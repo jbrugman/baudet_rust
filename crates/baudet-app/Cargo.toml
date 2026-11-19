@@ -1,0 +1,14 @@
+[package]
+name = "baudet-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+baudet-core = { workspace = true }
+baudet-backend = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
