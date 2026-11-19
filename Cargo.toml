@@ -16,29 +16,24 @@ futures-util = "=0.3.31"
 thiserror = "=1.0.69"
 # The GUI is the first phase, so the immediate-mode toolkit is a workspace dependency rather than
 # a per-crate one: a version skew between the transcript and its renderer is invisible until it
-# paints, which is the wrong place to discover it. The version follows ArtCraft's pure-Rust
-# desktop app (`storytold/artcraft`, `artcraft-native/`), which is egui on edition 2021.
-eframe = { version = "=0.31.1", default-features = false }
-egui = "=0.31.1"
-egui_extras = { version = "=0.31.1", default-features = false, features = ["image", "svg"] }
-# Two downward pins, both forced by this workspace's pinned cargo 1.82, which cannot parse an
-# edition 2024 manifest even for a crate it would never compile for this target.
+# paints, which is the wrong place to discover it. The version and feature shape follow the
+# ArtCraft apps' own UI crate (`storytold/craft-anything`, `crates/ui-egui`), which is egui 0.36
+# with eframe's defaults switched off; see ATTRIBUTION.md. What that tree needs is the toolchain
+# pinned in rust-toolchain.toml, not a version fight: with 1.95 the whole graph resolves.
 #
-#  * `smithay-clipboard` sits behind `cfg(any(linux, *bsd))` in `egui-winit`, which declares the
-#    dependency itself, so it cannot be opted out of here. `egui-winit` asks for `^0.7.2`; 0.7.2
-#    is edition 2021 and 0.7.3 is edition 2024, so 0.7.2 is the release that resolves. Never
-#    compiled on macOS.
-#  * `idna` 1.0.3+ delegates to `idna_adapter` (edition 2024). `egui-winit` hard-declares its
-#    `links` feature, so `webbrowser` -> `url` -> `idna` is in the graph whatever eframe features
-#    are chosen; 1.0.2 is the newest release predating that split.
-#
-# Neither crate is reachable from a macOS binary, so downgrading costs the product nothing.
-# Remove both in the same change as a toolchain bump.
-smithay-clipboard = "=0.7.2"
-idna = "=1.0.2"
-# `persistence` is not wanted: it drags `ron` in, whose current release pins `bitflags` below what
-# egui 0.36 requires. Dropping it also drops `serde` support for the painter, which this app does
-# not use -- window geometry surviving a restart is not worth a resolver fight it causes on its own.
+# `persistence` stays off deliberately. It drags `ron` in for serde of the painter's state, which
+# this app does not use: window geometry surviving a restart is not worth the resolver cost, and
+# the transcript's own durability belongs to the store layer, not to the window.
+eframe = { version = "=0.36", default-features = false }
+egui = "=0.36"
+egui_extras = { version = "=0.36", default-features = false }
+# SVG icons rasterised at the exact on-screen size, which is the reason `svg` is wanted and why
+# `image` comes along: ArtCraft rasterises Lucide the same way rather than shipping PNGs per dpi.
+resvg = "=0.45"
+# A real backend needs an HTTP client and a blocking pool; declared at the workspace so the GUI
+# and the transport cannot drift apart on TLS backend choice.
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

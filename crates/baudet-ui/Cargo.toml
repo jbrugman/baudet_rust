@@ -4,19 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# The GUI is phase one, so this crate must run with no backend process at all: the transcript is
+# driven by baudet-backend's scripted player, which is also what the JVM suite already used for
+# the same reason. A real transport (reqwest + SSE through baudet_backend::sse) becomes another
+# `impl Backend` later and changes nothing here.
 [dependencies]
 baudet-core = { workspace = true }
 baudet-backend = { workspace = true }
 baudet-app = { workspace = true }
+tokio = { workspace = true }
 egui = { workspace = true }
 egui_extras = { workspace = true }
-# No `accesskit`: on macOS eframe reaches the screen through its own objc2 path, and the feature
-# only drags in `accesskit_unix` -> `zvariant` for Linux, whose current release is edition 2024.
-# Screen-reader support is worth a real design conversation, not a third transitive pin.
 eframe = { workspace = true, features = ["default_fonts", "glow"] }
-# Pinned so the resolver cannot drift onto an edition 2024 release; see the workspace manifest for
-# why each is needed and why neither is ever compiled into a macOS binary.
-idna = { workspace = true }
 
-[target."cfg(any(target_os = \"linux\", target_os = \"dragonfly\", target_os = \"freebsd\", target_os = \"netbsd\", target_os = \"openbsd\"))".dependencies]
-smithay-clipboard = { workspace = true }
+# No `accesskit` yet: on macOS eframe reaches the screen through its own objc2 path, and the
+# feature only drags in `accesskit_unix` -> `zvariant` for Linux. Screen-reader support is a real
+# design conversation (which row announces as what), not a feature flag to flip for show.
+# No `links` either, so `ctx.open_url` is a deliberate no-op until a link in a transcript is a
+# requirement with a browser policy attached -- silent-and-honest beats silently-wrong.
