@@ -285,3 +285,71 @@ fn a_deadline_ends_a_stream_that_goes_quiet() {
     );
     assert!(elapsed < Duration::from_secs(3), "the deadline ends the wait long before the server lets go: {elapsed:?}");
 }
+
+
+/// Whether a chunked body read all the way to its end costs a decoder error is not a detail the
+/// transport can guess: it decides whether "the server finished" is a clean stop or a failure that
+/// would mark an answered turn failed.
+///
+/// Measured (2026-11-21) against a fixture that follows the server's etiquette instead of racing it:
+/// after the last delta it waits until the client has taken that delta, *then* writes the
+/// terminator, *then* hangs up -- which is what a real gateway does. The outcome is `Ok(0)`: a clean
+/// end of stream, and no decoder error anywhere.
+///
+/// That corrects the note this file used to carry, which claimed reading past `0\r\n\r\n` costs
+/// `Err("error decoding response body")` on both stacks. It was measured with a fixture that wrote
+/// the terminator and closed the socket in the same instant the reader was still inside its read --
+/// so the error was the fixture hanging up mid-read, not the terminator. The consequence for the
+/// transport is the opposite of what that note implied, and it is the cheaper one: ending a stream
+/// is an ordinary `Ok(0)`, so a turn that was answered is never marked failed because the server
+/// said goodbye properly.
+#[test]
+fn een_uitgelezen_terminator_is_measured_not_assumed() {
+    // A fixture that reads the client's patience: serve one delta, wait for the client to take it,
+    // only then end the stream. `read` on the server side here is a proxy for "the client asked for
+    // more", which is the minimum courtesy a streaming server owes it.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a free port");
+    let addr = listener.local_addr().expect("a bound listener reports its address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("one client");
+        let _ = socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
+        let _ = socket.flush();
+        let _ = write_chunk(&mut socket, &delta(BLOCK_BYTES));
+        // Give the client time to read the delta, then end the body properly.
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = socket.write_all(b"0\r\n\r\n");
+        let _ = socket.flush();
+        std::thread::sleep(Duration::from_millis(200));
+    });
+    let url = format!("http://{addr}/responses");
+    let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build().unwrap();
+    let mut response = client.post(&url).body("{}").send().expect("headers come back");
+    let mut buf = vec![0u8; BLOCK_BYTES * 4];
+    let mut outcome = Vec::new();
+    loop {
+        match std::io::Read::read(&mut response, &mut buf) {
+            Ok(0) => {
+                outcome.push("EOF".to_string());
+                break;
+            }
+            Ok(n) => outcome.push(format!("{n} bytes")),
+            Err(error) => {
+                outcome.push(format!("Err({error})"));
+                break;
+            }
+        }
+    }
+    server.join().expect("the fixture ends");
+    eprintln!("terminator outcome: {outcome:?}");
+    // Measured, and it is the honest shape of a blocking read rather than the delta-per-read the
+    // helpers above assume: one read carries the delta *and* the terminator's `\r\n`, so 65 bytes,
+    // and the read after that is the clean end. What a transport must take from this is that the
+    // stream ends with `Ok(0)` -- not with an error -- and that a read boundary need not line up
+    // with a frame boundary, which is what the framer is for.
+    assert_eq!(
+        outcome.as_slice(),
+        &["65 bytes".to_string(), "EOF".to_string()],
+        "the delta arrives, then the stream ends cleanly: {outcome:?}"
+    );
+}
