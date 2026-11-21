@@ -13,6 +13,7 @@ baudet-core = { workspace = true }
 baudet-backend = { workspace = true }
 baudet-app = { workspace = true }
 baudet-store = { workspace = true }
+baudet-settings = { workspace = true }
 tokio = { workspace = true }
 egui = { workspace = true }
 egui_extras = { workspace = true }

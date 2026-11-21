@@ -19,10 +19,12 @@
 use crate::palette;
 use crate::panels::{self, Changes, Workspace};
 use crate::rows::Row;
+use crate::settings::{self, SettingsCommand, SettingsEvent, SettingsView};
 use baudet_app::session::pump;
 use baudet_app::AppState;
 use baudet_backend::scripted::{Script, ScriptedBackend};
 use baudet_core::{AgentMessageItem, Item, ItemStatus, ThreadEvent};
+use baudet_settings::Provider;
 use eframe::egui;
 use egui::{CentralPanel, ColorImage, Frame, Panel, ScrollArea};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,6 +62,18 @@ pub struct TranscriptApp {
     workspace: Workspace,
     /// The right panel: the paths git reports for that folder.
     changes: Changes,
+    /// Whether the settings panel is painted. Owned by the window and toggled from the header, so
+    /// one boolean answers "is it showing" for both the header label and the panel.
+    settings_open: bool,
+    /// The settings panel's own state: the view-model, the last listing, the last status line.
+    settings: SettingsView,
+    /// Commands out to the settings worker (a fetch, a save). The worker never reaches back into the
+    /// window; it reports through `settings_events`, exactly as the conversation worker does.
+    settings_tx: std::sync::mpsc::Sender<SettingsCommand>,
+    /// Reports back from the settings worker, drained at the top of every paint.
+    settings_events: std::sync::mpsc::Receiver<SettingsEvent>,
+    /// The settings worker thread. Joined on drop so a save in flight finishes rather than dies.
+    settings_worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl TranscriptApp {
@@ -70,6 +84,17 @@ impl TranscriptApp {
         let (snap_tx, snap_rx) = ampcc::unbounded_channel();
         let state = Arc::new(AppState::new(backend, "You are Baudet's Rust rewrite."));
         let worker = std::thread::spawn(move || worker_loop(state, intent_rx, snap_tx));
+        // The settings worker owns the blocking calls — the listing and the file write — so a paint
+        // never waits on a socket or a disk. It is a second, simpler copy of the conversation worker's
+        // shape on purpose: one command channel in, one report channel out, a thread that drains.
+        let (settings_tx, settings_rx) = mpsc::channel::<SettingsCommand>();
+        let (report_tx, settings_events) = mpsc::channel::<SettingsEvent>();
+        let settings_worker = std::thread::spawn(move || settings_worker_loop(settings_rx, report_tx));
+        // Read the file once, now, so the panel opens already naming the datapad and a corrupt file
+        // announces itself before a keystroke. A file read is not a paint concern, but it is also not
+        // a thread's — it happens here, at construction, exactly once.
+        let mut settings = SettingsView::new();
+        settings.load(&baudet_settings::SettingsFile::default_location());
         TranscriptApp {
             input: String::new(),
             rows: Vec::new(),
@@ -83,6 +108,11 @@ impl TranscriptApp {
             shot_done: false,
             workspace: Workspace::default(),
             changes: Changes::default(),
+            settings_open: false,
+            settings,
+            settings_tx,
+            settings_events,
+            settings_worker: Some(settings_worker),
         }
     }
 
@@ -97,6 +127,14 @@ impl TranscriptApp {
     /// and asks git, which is the refresh a typed path triggers.
     pub fn with_workspace(mut self, path: impl AsRef<std::path::Path>) -> TranscriptApp {
         self.workspace.open(&path.as_ref().to_string_lossy());
+        self
+    }
+
+    /// Open the settings panel on startup. A scripted picture has no clicks, so this is the only way
+    /// to draw a panel whose default is closed; for a person it is the same state the header button
+    /// reaches.
+    pub fn with_settings_open(mut self) -> TranscriptApp {
+        self.settings_open = true;
         self
     }
 
@@ -160,6 +198,12 @@ impl TranscriptApp {
             self.changes.refresh(self.workspace.cwd());
         }
         panels::right(ui, &self.changes, self.workspace.cwd());
+        // Drain every worker report the settings panel asked for. Unlike transcript snapshots these
+        // are not dropped: a fetch or save result is a single fact the person is waiting on, and
+        // there is at most one in flight.
+        while let Ok(event) = self.settings_events.try_recv() {
+            self.settings.apply_event(event);
+        }
 
         // Drain every pending snapshot and paint the newest. Intermediate frames are dropped on
         // purpose: a row's value is its *current* folded text, so an old snapshot has nothing a
@@ -181,6 +225,13 @@ impl TranscriptApp {
                 ui.label(self.status.clone());
                 ui.separator();
                 ui.label(format!("{} rows", self.rows.len()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // The one owner of "is the panel showing": this button and the flag. The panel
+                    // itself never decides its own visibility, so the label can never lie about it.
+                    if ui.selectable_label(self.settings_open, "Settings").clicked() {
+                        self.settings_open = !self.settings_open;
+                    }
+                });
             });
         });
 
@@ -228,6 +279,13 @@ impl TranscriptApp {
                 o.cursor_icon = if self.busy { egui::CursorIcon::Progress } else { egui::CursorIcon::Default }
             });
         });
+
+        // The settings panel floats over the transcript, painted last so it sits on top, and only
+        // when open. It clears `settings_open` through the same flag the header button sets, so the
+        // pane's own close button and the header can never disagree about whether it is showing.
+        if self.settings_open {
+            settings::panel(ui, &mut self.settings, &self.settings_tx, &mut self.settings_open);
+        }
     }
 }
 
@@ -322,6 +380,14 @@ impl Drop for TranscriptApp {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+        // The settings worker ends when its command channel closes. Replacing our sender with a
+        // throwaway drops the only sender the worker sees, so its `recv` returns an error and the loop
+        // ends — then joining guarantees a queued save lands rather than being abandoned. A fetch
+        // cannot strand the join: the provider carries its own timeout, so the thread always returns.
+        if let Some(worker) = self.settings_worker.take() {
+            self.settings_tx = mpsc::channel::<SettingsCommand>().0;
+            let _ = worker.join();
+        }
     }
 }
 
@@ -387,6 +453,34 @@ fn worker_loop(
             Intent::Stop => state.cancel_turn(),
         }
         publish(&state, state.live_turns() > 0);
+    }
+}
+
+/// The settings worker: the only place a settings command touches the network or the disk.
+///
+/// A fetch is blocking (the provider is sync by design) and a save is a file write, so neither belongs
+/// in a paint pass. The worker takes one command at a time and reports the outcome; when both channels
+/// close — the window dropped — `recv` returns an error and the thread ends. It holds no settings of
+/// its own: it is a pair of hands for `baudet_settings`, nothing more, which is what lets the panel
+/// stay the single owner of what is on screen.
+fn settings_worker_loop(commands: mpsc::Receiver<SettingsCommand>, report: mpsc::Sender<SettingsEvent>) {
+    while let Ok(command) = commands.recv() {
+        match command {
+            SettingsCommand::Fetch { endpoint } => {
+                // `endpoint` travels with the report so the panel can tell a late answer for an old
+                // address from an answer for the one now in the field. The fetch borrows it, so it is
+                // still owned here when the report takes it by value.
+                let result = match Provider::from_base_url(&endpoint) {
+                    Ok(provider) => provider.list_models(),
+                    Err(error) => Err(error),
+                };
+                let _ = report.send(SettingsEvent::Listing(result, endpoint));
+            }
+            SettingsCommand::Save(settings) => {
+                let _ = report
+                    .send(SettingsEvent::Saved(baudet_settings::SettingsFile::default_location().write(&settings)));
+            }
+        }
     }
 }
 
@@ -519,6 +613,9 @@ pub struct Startup {
     /// it because an unfocused window receives no keystrokes, and it is not a second way of choosing
     /// a folder -- it is the same one, entered by a flag.
     pub workspace: Option<std::path::PathBuf>,
+    /// Open the settings panel on startup. Same reason as `workspace`: a headless `--screenshot` gets
+    /// no keystrokes, so the only way to draw a panel that starts closed is to start it open.
+    pub settings: bool,
 }
 
 impl Startup {
@@ -554,6 +651,8 @@ impl Startup {
                 }
             } else if let Some(rest) = arg.strip_prefix("--workspace=") {
                 out.workspace = Some(std::path::PathBuf::from(rest));
+            } else if arg == "--settings" {
+                out.settings = true;
             } else {
                 return Err(format!("{USAGE}\nunknown option: {arg}"));
             }
@@ -562,7 +661,7 @@ impl Startup {
     }
 }
 
-const USAGE: &str = "usage: baudet-ui [--screenshot=<file.png>] [--workspace=<folder>]";
+const USAGE: &str = "usage: baudet-ui [--screenshot=<file.png>] [--workspace=<folder>] [--settings]";
 const HELP: &str = "
 Baudet - a local-first coding assistant
 
@@ -571,6 +670,7 @@ usage: baudet-ui [option]
   --screenshot <file>   draw the window, save a picture of it to <file> and exit,
   --screenshot=<file>   without taking focus from what you are doing
   --workspace <folder>  open <folder> in the workspace panel on startup
+  --settings            open the settings panel on startup
   -h, --help            show this text";
 
 /// Start the window with `startup`'s arguments.
@@ -610,6 +710,7 @@ pub fn run_from(startup: Startup) -> eframe::Result {
     }
     let screenshot = startup.screenshot.clone();
     let workspace = startup.workspace.clone();
+    let settings = startup.settings;
     eframe::run_native(
         "Baudet",
         options,
@@ -618,6 +719,9 @@ pub fn run_from(startup: Startup) -> eframe::Result {
             let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
             if let Some(path) = &workspace {
                 app = app.with_workspace(path);
+            }
+            if settings {
+                app = app.with_settings_open();
             }
             if let Some(path) = &screenshot {
                 app = app.with_screenshot(path);

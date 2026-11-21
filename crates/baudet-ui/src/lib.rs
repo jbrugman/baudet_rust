@@ -18,6 +18,7 @@ mod app;
 mod palette;
 mod panels;
 mod rows;
+mod settings;
 
 pub use app::{run, run_from, Startup, TranscriptApp};
 pub use palette::DiffLine;
