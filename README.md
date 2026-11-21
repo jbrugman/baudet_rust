@@ -109,9 +109,13 @@ is een UI-gedragswijziging die een eigen besluit en een eigen meting verdient.
 
 ### Klussen die nog open staan
 
-1. **`max_model_len` als alias** in `baudet-settings::provider::Entry`. De gateway-venstermaten
-   (262144 voor Qwen, 128000 voor DeepSeek) gaan nu verloren; de parser kent alleen
-   `context_length`/`max_context_length`.
+1. **Het modelvenster wordt gelezen en nergens gebruikt.** Gemeten op de gateway: elk model noemt
+   daar `max_model_len` (Qwen 262144, DeepSeek 128000) en `Entry` leest die spelling — naast
+   `context_length` en `max_context_length` — al, met een test die de alias afdwingt. Wat wél ontbreekt,
+   is de consument: `Model::context_window` staat in de plukker maar wordt door geen enkele rij of
+   label gelezen, dus de persoon ziet nergens hoe groot een venster is. Een getal kopiëren naar de
+   eigen instelling is een ander gesprek en is bewust niet gedaan: de server mag zelf beslissen wat
+   hij aanvaardt, en `context_length_exceeded` bereikt ons nu al als fout van de server zelf.
 2. **Echte beurt tonen** — de app-toepassing van de transport: een live-venster dat een server
    kiest, scant, en antwoordt zonder dat er iets aan de code gesleuteld hoeft te worden.
 
