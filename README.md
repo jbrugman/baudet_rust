@@ -107,10 +107,52 @@ settle-controle, die vóór `paint` staat en dus de snapshot van de vorige frame
 volledig beeld wil, kiest een snellere machine of server. De volgorde omdraaien kan ook, maar dat
 is een UI-gedragswijziging die een eigen besluit en een eigen meting verdient.
 
+### De sweep vindt de server die hier draait
+
+`--discover` loopt de loopback-kandidaten af en noemt de eerste die een beurt antwoordt, met per
+kandidaat wat er gezien is. Het is geen tweede oordeelslogica: per adres draait dezelfde
+`protocol::scan` die het instellingenpaneel ook gebruikt, dus een sweep kan niet tot een ander
+antwoord komen dan de knop daar.
+
+De volgorde is niet gratis gekozen. **Eerst een socket, dan pas een verzoek**: acht poorten vragen
+— open en gesloten — kostte gemeten 0,00 s, dezelfde vraag over HTTP kostte 36 s voor achttien
+poorten, omdat een gesloten poort daar de hele watchdog van de client opeist. En de sweep **stopt
+bij de eerste die antwoordt**, want elke probe noemt een model dat een server kan moeten inladen;
+kandidaten na de winnaar kosten niets. De sweep op deze machine: 1,6 s.
+
+Daarbij twee dingen die een meeting waren, geen aanname:
+
+- **Een listing is geen chatmodellijst.** LM Studio noemt naast zijn gemma
+  `text-embedding-nomic-embed-text-v1.5`, de gateway noemt `bge-m3-mlx-fp16`,
+  `chatterbox-multilingual-v3` en `whisper-large-*`. Een probe die zo'n id noemt, kost een verzoek
+  dat niet kan antwoorden — en op een server die modellen inlaadt, een lading die het resident model
+  verdringt. `scan` noemt daarom het eerste *aannemelijke* model in plaats van het eerste. De test
+  staat op de id (`likely_chat_model`), want dat is alles wat een listing geeft; een model dat hij
+  niet herkent, blijft gewoon in de plukker staan, hij krijgt alleen de probe niet.
+- **Een statuscode noemt ook het verkeerde antwoord de goede kant op.** De gateway antwoordt
+  `404 {"error": …}` zowel op een pad dat hij niet dient als op een model dat hij niet heeft, op
+  `/responses` als op `/chat/completions`; LM Studio antwoordt op een nepmodel op een pad dat hij
+  wél dient met `200` en het antwoord van *zijn eigen* model. Een status-test zou de gateway een
+  afwijzing van het dialect noemen en bij de ander het verkeerde model noemen.
+
+De sweep staat bewust op een vlag en niet bij elke start: live op deze machine kostte hij 5,69 s
+(vandaag 1,6 s, omdat de winnaar na één gesloten poort al gevonden wordt), en een venster dat
+seconden wacht voordat het verschijnt, oogt kapot.
+
+Waar hij **niet** naar zoekt, is een besluit. `127.0.0.1:8000` is de default van de referentie-app
+en van `Settings::default`, maar de gateway die hier antwoordt, is op dat adres níét te bereiken —
+gemeten: loopback `8000` verwerpt, `192.168.1.2:8000` antwoordt. Een sweep die dat overslaat, ziet de
+server waar deze ontwikkeling tegen draait, als afwezig. Over een subnet poorten gaan aftasten is een
+portscan van andermans netwerk en niet wat "vind mijn server" betekent, dus zo'n server blijft één
+getypt adres in het paneel verwijderd. De 36 s hierboven is trouwens betaald op precies zo'n
+niet-loopback gateway, wat de socket-poort verdedigt.
+
 ### Klussen die nog open staan
 
 1. **Echte beurt tonen** — de app-toepassing van de transport: een live-venster dat een server
-   kiest, scant, en antwoordt zonder dat er iets aan de code gesleuteld hoeft te worden.
+   kiest, scant, en antwoordt zonder dat er iets aan de code gesleuteld hoeft te worden. Nu de sweep
+   er is, is wat resteert het knelpunt in het paneel zelf: een discovery-knop vraagt een vijfde
+   `SettingsEvent`-eis en een sweep van seconden in een venster dat al open is.
 
 ### Het modelvenster staat in de plukker
 

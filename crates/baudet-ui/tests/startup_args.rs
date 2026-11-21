@@ -94,3 +94,12 @@ fn the_two_options_can_be_given_in_any_order() {
 fn an_unknown_option_is_an_error() {
     assert!(parse(&["b", "--screenshotz=x.png"]).is_err(), "a typo must not silently open a window");
 }
+
+#[test]
+fn a_discovery_sweep_is_opt_in() {
+    // De sweep kost seconden - gemeten 5,69 s op deze machine - dus hij mag nooit bij een gewone
+    // start gebeuren: een venster dat seconden wacht voordat het verschijnt, oogt kapot. Een vlag
+    // die stil niet zet, zou precies dat betekenen, dus dit is de enige plaats waar het waar wordt.
+    assert!(!parse(&["b"]).unwrap().discover, "zonder vlag wordt er geen poort gevraagd");
+    assert!(parse(&["b", "--discover"]).unwrap().discover, "--discover zet de sweep aan");
+}

@@ -621,6 +621,109 @@ fn settings_worker_loop(commands: mpsc::Receiver<SettingsCommand>, report: mpsc:
     }
 }
 
+/// The localhost addresses worth asking, in the order they are asked.
+///
+/// Ordered by what this project actually runs against, not by which port a tool happened to pick
+/// first: the reference app's own default is `127.0.0.1:8000` (`AppConfig.kt:18`), LM Studio serves
+/// `1234`, Ollama `11434`, and llama.cpp's server `8080`. Loopback only -- a sweep that reached out
+/// over the LAN would be a port scan of somebody else's network, which is not what "find my server"
+/// means.
+///
+/// The list is a starting point, not a census, and the gap is worth stating plainly because the
+/// default endpoint misleads on this machine: `127.0.0.1:8000` is what the reference app and
+/// `Settings::default` name, yet the gateway answering it here is reached over the LAN (measured
+/// 2026-11-21: loopback `8000` refuses, `192.168.1.2:8000` answers). A sweep does not go looking
+/// for it: reaching such a server means naming an address, which the settings field is for, while
+/// asking a whole subnet would be a port scan of somebody else's network.
+pub fn local_candidates() -> Vec<String> {
+    [8000u16, 1234, 11434, 8080].iter().map(|port| format!("http://127.0.0.1:{port}/v1")).collect()
+}
+
+/// Whether anything is listening, decided at the socket layer before any request is made.
+///
+/// This is the cheap half of the sweep and it is measured, though the cost it saves is paid on the
+/// endpoint this project is developed against, which is not on loopback (see [`discover_local`] for
+/// where that comes from): connecting to eight ports -- open and closed -- took 0.00 s, while the same
+/// question asked over HTTP took 36 s for eighteen ports, because a port nobody listens on costs the
+/// client's whole watchdog instead of a socket answer. Refused means nobody is there; a timeout is
+/// read as absent, because a server that will not accept a connection cannot answer a listing either.
+pub fn port_is_listening(endpoint: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(endpoint) else { return false };
+    let Some(host) = url.host_str() else { return false };
+    let port = url.port_or_known_default().unwrap_or(80);
+    let address = format!("{host}:{port}");
+    let Ok(address) = address.parse::<std::net::SocketAddr>() else {
+        // A name rather than a literal: resolving it is a question of its own, and a sweep of
+        // localhost candidates should not become a DNS dependency.
+        return false;
+    };
+    std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(250)).is_ok()
+}
+
+/// Ask localhost what servers are here, and which dialect each answers.
+///
+/// Reuses [`baudet_backend::protocol::scan`] per candidate rather than deciding anything new: listing
+/// first, one probe, the answer's body naming the dialect. `api_key` is offered to every candidate
+/// because that is what the transport will do on the turn that follows -- and a gateway that wants a
+/// key answers a listing `401` without one, which would otherwise be reported as "no server" when a
+/// server is exactly what it is.
+///
+/// Loopback only, and that boundary is a decision rather than an oversight. The endpoint this project
+/// is developed against is `127.0.0.1:8000`, the default in the reference app and in
+/// `Settings::default`, but the server answering it on this machine is reached over the LAN
+/// (measured 2026-11-21: loopback `8000` refuses, `192.168.1.2:8000` answers). A sweep does not go
+/// looking for it: reaching a server this machine has to name explicitly is one setting away in the
+/// panel, while a sweep that scanned a LAN would be a port scan of somebody else's network -- and the
+/// `36 s` on [`port_is_listening`] was paid on exactly such a non-loopback gateway, which is why the
+/// gate is a socket and not a request.
+pub fn discover_local(api_key: Option<String>) -> baudet_backend::protocol::Discovery {
+    let candidates = local_candidates();
+    let scan_one = move |endpoint: &str| match Provider::with_key(endpoint, api_key.clone()) {
+        Ok(provider) => baudet_backend::protocol::scan(
+            provider.base_url(),
+            || {
+                provider
+                    .list_models()
+                    .map(|models| models.into_iter().map(|model| model.id).collect())
+                    .map_err(|error| error.to_string())
+            },
+            |path, model, body| probe_dialect(&provider, provider.base_url(), path, model, body),
+        ),
+        Err(error) => baudet_backend::protocol::ScanOutcome {
+            endpoint: endpoint.to_string(),
+            protocol: None,
+            models: Vec::new(),
+            notes: vec![format!("not a usable address: {error}")],
+        },
+    };
+    baudet_backend::protocol::discover(&candidates, port_is_listening, scan_one)
+}
+
+/// Say what a sweep did, in the order it did it.
+pub fn describe_discovery(discovery: &baudet_backend::protocol::Discovery) -> String {
+    let mut lines = Vec::new();
+    for outcome in &discovery.tried {
+        let verdict = match outcome.protocol {
+            Some(protocol) => format!("answers {}", protocol.word()),
+            None => "no".to_string(),
+        };
+        lines.push(format!("  {} — {verdict}", outcome.endpoint));
+        for note in &outcome.notes {
+            lines.push(format!("      {note}"));
+        }
+    }
+    match &discovery.found {
+        Some(found) => format!(
+            "found a server at {} speaking {}\n{}\nmodels: {}",
+            found.endpoint,
+            found.protocol.expect("a found server names its dialect").word(),
+            lines.join("\n"),
+            found.models.join(", ")
+        ),
+        None => format!("no local server answered a turn\n{}", lines.join("\n")),
+    }
+}
+
 /// Ask one endpoint what it is, on the settings worker's thread.
 ///
 /// The rules themselves live in [`baudet_backend::protocol::scan`] — listing first, one probe, the
@@ -836,6 +939,10 @@ pub struct Startup {
     /// beside `live`: it puts a real turn on the wire so the picture can capture a server answering,
     /// which is the point of `--live`. It reuses the same `Intent::Submit` a keystroke uses.
     pub send: Option<String>,
+    /// Report which local server answers, then stop. A flag rather than a startup step for the
+    /// reason in [`discover_local`]: the sweep costs seconds, and a window that costs seconds before
+    /// it appears is a window that looks broken.
+    pub discover: bool,
 }
 
 impl Startup {
@@ -891,6 +998,8 @@ impl Startup {
                 }
             } else if let Some(rest) = arg.strip_prefix("--endpoint=") {
                 out.endpoint = Some(std::path::PathBuf::from(rest));
+            } else if arg == "--discover" {
+                out.discover = true;
             } else {
                 return Err(format!("{USAGE}\nunknown option: {arg}"));
             }
@@ -900,7 +1009,7 @@ impl Startup {
 }
 
 const USAGE: &str =
-    "usage: baudet-ui [--screenshot=<file.png>] [--workspace=<folder>] [--settings] [--fetch-models] [--endpoint=<address>] [--live] [--send=<question>]";
+    "usage: baudet-ui [--screenshot=<file.png>] [--workspace=<folder>] [--settings] [--fetch-models] [--endpoint=<address>] [--live] [--send=<question>] [--discover]";
 const HELP: &str = "
 Baudet - a local-first coding assistant
 
@@ -919,6 +1028,8 @@ usage: baudet-ui [option]
   --send <question>     on startup, ask <question> of the live server (with --screenshot, the
                         picture waits for that turn to settle); it needs --live
   --send=<question>     (a window with --live but no --send shows its scripted demo)
+  --discover            list the local servers that answer a turn, say which dialect each
+                        answers in, and exit without opening a window
   -h, --help            show this text";
 
 /// Start the window with `startup`'s arguments.
@@ -926,6 +1037,17 @@ usage: baudet-ui [option]
 /// The window is 1040x720, which is the size the original opens at; the minimum is ours, sized so
 /// that a transcript row and the composer both stay reachable on a small laptop screen.
 pub fn run_from(startup: Startup) -> eframe::Result {
+    if startup.discover {
+        // Print and stop. The sweep is the whole answer, and it is measured to cost seconds, so
+        // opening a window behind it would make a question about the machine look like an app that
+        // is slow to start. Status quo: without the flag nothing here runs and no port is asked.
+        // The credential the app would offer, read the way the settings panel reads it: a typed
+        // key in the file first, then the variable named there. Without it a gateway that wants a
+        // key answers 401, which is a server, and the sweep would report it as no server.
+        let key = baudet_settings::SettingsFile::default_location().read().settings().resolved_key();
+        println!("{}", describe_discovery(&discover_local(key)));
+        return Ok(());
+    }
     let mut builder =
         egui::ViewportBuilder::default().with_inner_size([1040.0, 720.0]).with_min_inner_size([520.0, 360.0]);
     // A screenshot must not steal focus from what the person is doing. `with_active` is a no-op on

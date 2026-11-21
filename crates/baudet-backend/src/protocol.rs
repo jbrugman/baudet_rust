@@ -9,12 +9,21 @@
 //! is a guess either way -- which is why the guess is kept here, in one place, named, rather than
 //! distributed through a transport as a chain of status-code checks.
 //!
-//! The measurement also settled which dialect is worth building first. No server on this machine
-//! implements `/responses`; every one of them implements `/v1/chat/completions`. So Responses stays
+//! The measurement also settled which dialect is worth building first: every server on this machine
+//! implements `/v1/chat/completions`, so that is the dialect the probe asks about. Responses stays
 //! the shape this app prefers -- `request_body` already builds it, and it is what the reference app
-//! speaks to gateways -- and chat-completions is the dialect the local servers actually answer.
-//! `TurnAccumulator` has read `chat.completion.chunk` from the start, so what is new here is the
-//! request shape and the decision of when to use it, not a second parser.
+//! speaks to gateways. `TurnAccumulator` has read `chat.completion.chunk` from the start, so what is
+//! new here is the request shape and the decision of when to use it, not a second parser.
+//!
+//! Corrected 2026-11-21, because a later measurement contradicted the first note above. LM Studio now
+//! answers `POST /v1/responses` with `200` and a real `{"object":"response", …, "status":"completed"}`
+//! body, so "no server here implements Responses" was true only of the build measured earlier. The
+//! sentence that mattered -- a status code cannot name a protocol -- stands, and is now supported from
+//! both sides: the gateway answers `404` + `{"error": …}` for a path it does not serve *and* for a
+//! model it does not have, on `/responses` as well as on `/chat/completions`, while LM Studio answers
+//! a bogus model on a path it does serve with `200` and its own model's body. A status-code test would
+//! read the gateway's 404 as a refusal of the protocol and LM Studio's 200 as an answer for the model
+//! that was asked for; reading the body says neither of those things.
 
 use crate::openai::REASONING_NONE;
 use baudet_core::Msg;
@@ -263,15 +272,19 @@ pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 ///     models worth naming, so no probe is ever sent at a server that has nothing loaded. (`list` is
 ///     injected rather than called here so this crate stays free of a network dependency it does not
 ///     need, and so a scan is testable without a socket.)
-///  2. **The dialect is settled by the answer body, not by the status.** `200` with a
+///  2. **The dialect is settled by the answer body, not by the status.** Both halves of this were
+///     measured 2026-11-21, and each is wrong in the other's direction. `200` with a
 ///     `chat.completion` body is a dialect; `200` with `{"error": ...}` is a refusal -- exactly what
-///     LM Studio returns for a path it does not serve. A status-code test would call that a success.
-///     (Measured 2026-11-21.)
-///  3. **One probe, because a second one buys nothing.** `Responses` is deliberately not probed. A
-///     gateway that refuses with `400 {"error":"unknown field"}` and one that refuses with
-///     `404 Not Found` carry the same information -- "this is not a chat answer" -- and neither
-///     establishes that the server *does* speak Responses. Sending that request would therefore spend
-///     a model load to produce a guess, so the refusal is reported in `notes` and an explicit choice
+///     LM Studio returns for a path it does not serve, and a status-code test would call that a
+///     success. The other half: the gateway answers `404 {"error": …}` for a path it does not serve
+///     *and* for a model it does not have alike, on `/responses` as on `/chat/completions`, and LM
+///     Studio answers a bogus model on a path it does serve with `200` and *its own* model's body. A
+///     status would call the gateway's server a refusal of the protocol and would name the wrong
+///     model for the other one.
+///  3. **One probe, because a second one buys nothing.** `Responses` is deliberately not probed. The
+///     refusals above carry no dialect in them -- "not a chat answer" is all a refusal says, and it
+///     is not evidence that the server speaks Responses instead -- so a second request would spend a
+///     model load to produce a guess. The refusal is reported in `notes` and the explicit choice
 ///     belongs to the person, in settings.
 ///
 /// `protocol: None` means "not a chat-completions server", not "no server": the notes say which of
@@ -292,8 +305,14 @@ pub fn scan(
             return ScanOutcome { endpoint, protocol: None, models: Vec::new(), notes };
         }
     };
-    let Some(model) = models.first().cloned() else {
-        notes.push("the server lists no models; nothing to ask it".into());
+    // Not `models.first()`: a listing holds embedders and transcribers too, and a probe names one
+    // model it may have to page in. See [`likely_chat_model`].
+    let Some(model) = probeable_model(&models).map(str::to_string) else {
+        notes.push(if models.is_empty() {
+            "the server lists no models; nothing to ask it".into()
+        } else {
+            "the server lists no model that can answer a turn".into()
+        });
         return ScanOutcome { endpoint, protocol: None, models, notes };
     };
     let (found, note) = probe(CHAT_COMPLETIONS_PATH, &model, &chat_probe_body(&model));
@@ -308,6 +327,97 @@ pub fn scan(
         }
     };
     ScanOutcome { endpoint, protocol, models, notes }
+}
+
+/// Whether one listed id names something that can answer a turn.
+///
+/// A listing is not a list of chat models. Measured 2026-11-21: LM Studio lists
+/// `text-embedding-nomic-embed-text-v1.5` beside its gemma, and the gateway lists `bge-m3-mlx-fp16`,
+/// `chatterbox-multilingual-v3` and `whisper-large-*` beside its chat models. A probe names a model,
+/// so naming one of these spends a request that cannot answer -- and on a server that pages models in,
+/// a load that displaces the resident one, which is the very cost rule 1 of [`scan`] exists to avoid.
+///
+/// The test is on the id, because that is all a listing gives; it deliberately says *likely*, since a
+/// server could name a chat model in a way this does not recognise. Such a model is still listed for
+/// the person to pick, it is just not the one a probe gets to load.
+pub fn likely_chat_model(id: &str) -> bool {
+    // Markers taken from the ids the two servers on this machine actually list (2026-11-21), not from
+    // a taxonomy: the gateway's non-chat entries are `bge-m3-mlx-fp16` (no "embed" in it at all),
+    // `chatterbox-multilingual-v3`, `whisper-large-v3-turbo` and `mlx-community--S3TokenizerV2`, and
+    // LM Studio's is `text-embedding-nomic-embed-text-v1.5`. A marker list is a heuristic and will be
+    // wrong for some server someday, which is why it only ever decides what a *probe* may name.
+    let id = id.to_ascii_lowercase();
+    !["embed", "bge", "tts", "whisper", "chatterbox", "rerank", "clip", "tokenizer", "vision-", "-ocr", "llava"]
+        .iter()
+        .any(|marker| id.contains(marker))
+}
+
+/// The model a probe may name, or `None` when the listing holds nothing a turn can be asked of.
+///
+/// First plausible id, so a server whose chat models are listed after its embedders is still probed.
+fn probeable_model(models: &[String]) -> Option<&str> {
+    models.iter().map(String::as_str).find(|id| likely_chat_model(id))
+}
+
+/// What a discovery sweep concluded about a machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Discovery {
+    /// The first candidate that identified a server, if any.
+    pub found: Option<ScanOutcome>,
+    /// Every candidate's own outcome, in the order it was tried, so "nothing found" still says what
+    /// was seen. A sweep that reports only failure is worthless to whoever has to start a server.
+    pub tried: Vec<ScanOutcome>,
+}
+
+impl Discovery {
+    /// Whether any candidate answered a turn.
+    pub fn usable(&self) -> bool {
+        self.found.is_some()
+    }
+}
+
+/// Sweep localhost candidates and name the first server that answers a turn.
+///
+/// Built on [`scan`] rather than beside it: one endpoint's rules -- listing first, the dialect read
+/// from the answer body, never a second probe -- are exactly the rules a sweep wants, and a sweep
+/// with its own judgement would be a second opinion to keep in step. Two things are added, both
+/// measured:
+///
+///  1. **A TCP gate before any HTTP.** A port that is closed answers instantly at the socket layer
+///     (`refused`, measured 0.00 s for eight ports), while a request to one costs whatever the HTTP
+///     stack's watchdog is: 36 s for eighteen ports here, because the timeout had to be paid per
+///     port. Gating on the connect turns "is anything there" into a free question, and only the
+///     ports that answer it are worth a listing.
+///  2. **Stop at the first server that answers.** On a machine with several local servers the point is
+///     to find one that works, not to inventory them, and every probe names a model that a server may
+///     have to page in. The remaining candidates cost nothing.
+///
+/// `probe` is injected for the same reason [`scan`] injects its two: this crate stays free of the
+/// network stack it does not own, and a sweep is testable without a socket.
+pub fn discover(
+    candidates: &[String],
+    reachable: impl Fn(&str) -> bool,
+    mut scan_one: impl FnMut(&str) -> ScanOutcome,
+) -> Discovery {
+    let mut tried = Vec::new();
+    for candidate in candidates {
+        if !reachable(candidate) {
+            tried.push(ScanOutcome {
+                endpoint: candidate.clone(),
+                protocol: None,
+                models: Vec::new(),
+                notes: vec!["nothing is listening on it".into()],
+            });
+            continue;
+        }
+        let outcome = scan_one(candidate);
+        if outcome.usable() {
+            tried.push(outcome.clone());
+            return Discovery { found: Some(outcome), tried };
+        }
+        tried.push(outcome);
+    }
+    Discovery { found: None, tried }
 }
 
 /// The chat sibling of [`probe_body`], in the shape [`chat_request_body`] produces.
