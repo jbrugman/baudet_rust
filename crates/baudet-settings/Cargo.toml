@@ -1,0 +1,24 @@
+[package]
+name = "baudet-settings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The choices a person makes, and the models to choose from. Deliberately free of UI and of async:
+# a model listing is a blocking call made from a background thread by whoever owns a window, which
+# is what keeps both this crate and the JVM `store`/`api` pair it comes from testable without a
+# frame or a runtime.
+[dependencies]
+baudet-core = { workspace = true }
+baudet-store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# The real transport, and the reason a model listing can exist at all. Declared here rather than
+# only in the GUI so the wire shape and the settings that describe it cannot drift apart.
+reqwest = { workspace = true }
+
+[dev-dependencies]
+# Fixtures need a real throwaway folder that removes itself, so a corrupt-file test cannot depend
+# on which sibling test ran before it.
+tempfile = { workspace = true }

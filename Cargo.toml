@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/baudet-core", "crates/baudet-backend", "crates/baudet-app", "crates/baudet-store", "crates/baudet-ui"]
+members = ["crates/baudet-core", "crates/baudet-backend", "crates/baudet-app", "crates/baudet-store", "crates/baudet-settings", "crates/baudet-ui"]
 
 # Versions pinned to what already exists in ~/.cargo/registry/src so the first
 # build needs no network: serde 1.0.215, serde_json 1.0.132, tokio 1.41.1,
@@ -10,6 +10,7 @@ baudet-core = { path = "crates/baudet-core" }
 baudet-backend = { path = "crates/baudet-backend" }
 baudet-app = { path = "crates/baudet-app" }
 baudet-store = { path = "crates/baudet-store" }
+baudet-settings = { path = "crates/baudet-settings" }
 serde = { version = "=1.0.215", features = ["derive"] }
 serde_json = "=1.0.132"
 tokio = { version = "=1.41.1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
