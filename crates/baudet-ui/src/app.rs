@@ -22,8 +22,8 @@ use crate::rows::Row;
 use crate::settings::{self, SettingsCommand, SettingsEvent, SettingsView};
 use baudet_app::session::pump;
 use baudet_app::AppState;
-use baudet_backend::scripted::{Script, ScriptedBackend};
 use baudet_backend::protocol::Protocol;
+use baudet_backend::scripted::{Script, ScriptedBackend};
 use baudet_backend::transport::{Endpoint, ResponsesBackend};
 use baudet_backend::Backend;
 use baudet_core::{AgentMessageItem, Item, ItemStatus, ThreadEvent};
@@ -365,8 +365,11 @@ impl TranscriptApp {
     ///
     /// The picture is taken once the demo turn has drained (see `take_screenshot`), so this is only
     /// a ceiling for the case where the stream never closes. It is generous because a screenshot is
-    /// never on a person's critical path, and it still fails loudly rather than drawing nothing:
-    /// on the timeout the window is captured as-is and the run exits non-zero.
+    /// never on a person's critical path. On the timeout the window is still written, as-is, with
+    /// the unfinished turn in it, and the miss is named on stderr: an honest picture of a turn that
+    /// is still running is worth more to whoever asked for the picture than no picture at all, and
+    /// the reason the ceiling exists at all is to bound a stream that never closes rather than a
+    /// model that answers slowly.
     const SHOT_FRAMES: u32 = 600;
 
     /// Ask for a picture once enough frames have been drawn, write it, then close.
@@ -981,10 +984,7 @@ fn chosen_backend(startup: &Startup) -> (Arc<dyn Backend>, Option<String>) {
             .map_err(|error| error.to_string())
     }) {
         Ok(backend) => (backend, None),
-        Err(problem) => (
-            TranscriptApp::demo_backend(),
-            Some(format!("scripted player: {problem}")),
-        ),
+        Err(problem) => (TranscriptApp::demo_backend(), Some(format!("scripted player: {problem}"))),
     }
 }
 
@@ -1001,8 +1001,8 @@ fn chosen_backend(startup: &Startup) -> (Arc<dyn Backend>, Option<String>) {
 /// another, and a wrong answer is worse than an absent one.
 fn endpoint_from_settings(settings: &baudet_settings::Settings) -> Result<Endpoint, String> {
     let key = settings.resolved_key();
-    let provider = baudet_settings::Provider::with_key(&settings.base_url, key.clone())
-        .map_err(|error| error.to_string())?;
+    let provider =
+        baudet_settings::Provider::with_key(&settings.base_url, key.clone()).map_err(|error| error.to_string())?;
     let dialect = settings
         .protocol_word()
         .and_then(Protocol::from_word)

@@ -14,7 +14,7 @@
 //! pipe: a transcript must never *lose* an event, which is what `sync::broadcast`'s lag would do,
 //! and a renderer that wakes late still sees the complete current state.
 
-use crate::reducer::{reduce, Rows};
+use crate::reducer::{reduce, streamed_text, Rows};
 use baudet_backend::{Backend, SendRequest, TurnHandle};
 use baudet_core::{Item, ItemStatus, ThreadEvent};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -101,6 +101,45 @@ pub fn pump(
     }
 }
 
+/// Everything a turn may remember: the rows that are finished, as events, newest first -- the
+/// order [`baudet_backend::protocol::wire_history`] reads them in, so the fold into `Msg` stays
+/// entirely in that function and this helper decides nothing about wire order. It is the only place
+/// that decides *what* travels.
+///
+/// A caller reading these events straight -- a test, a future recorder -- sees the conversation
+/// backwards, which is the price of owning the input order of a function rather than its output;
+/// it is cheaper than a second reversal here and a second opinion on the same conversation there.
+///
+/// `wire_history` reverses this into oldest-first and appends the caller's `user_text` afterwards,
+/// which is why the question being asked is not in here: [`AppState::send`] reads the rows before
+/// it adds its own row, so appending the question again is not a case this has to guard against.
+///
+/// Two kinds of row are kept, and the two that are dropped are dropped for a reason each:
+///
+///  * only [`ItemStatus::Completed`]: [`wire_history`] would swallow an `InProgress` row silently,
+///    and replaying a half answer the person can still see change on screen would tell the model
+///    something that is not yet true. An interrupted or failed answer is not a fact either;
+///  * only user and agent messages: what a model is asked to remember is the conversation, not its
+///    own reasoning, its shell output, or an error row the person never sent it.
+///
+/// Derives `turn_id` from the row's id, which `openai::StreamState::item_id` and the user-row id in
+/// `send` both build as `"{turn}/msg"` and `"{turn}/user"`. No invented id: a turn's events are
+/// keyed by it, and a wrong one would attribute an old answer to the wrong turn.
+fn completed_messages(rows: &Rows, thread_id: &str) -> Vec<ThreadEvent> {
+    rows.ordered()
+        .iter()
+        .rev()
+        .filter(|item| matches!(**item, Item::UserMessage(_) | Item::AgentMessage(_)))
+        .filter(|item| item.status() == ItemStatus::Completed)
+        .filter(|item| !streamed_text(item).trim().is_empty())
+        .map(|item| ThreadEvent::ItemCompleted {
+            thread_id: thread_id.to_string(),
+            turn_id: item.item_id().split('/').next().unwrap_or(item.item_id()).to_string(),
+            item: (*item).clone(),
+        })
+        .collect()
+}
+
 impl AppState {
     pub fn new(backend: Arc<dyn Backend>, system: impl Into<String>) -> AppState {
         AppState {
@@ -125,8 +164,7 @@ impl AppState {
         reasoning: Option<String>,
         max_output_tokens: Option<u32>,
     ) {
-        *self.choices.lock().unwrap() =
-            RequestChoices { model, reasoning, max_output_tokens };
+        *self.choices.lock().unwrap() = RequestChoices { model, reasoning, max_output_tokens };
     }
 
     /// Rows as they stand right now, oldest first. The only accessor a renderer needs.
@@ -152,6 +190,14 @@ impl AppState {
         let turn_id = format!("tu_{}", index + 1);
         let thread_id = "th_1".to_string();
 
+        // Everything the model is allowed to remember, read before this turn's question is added
+        // below: the request's transcript must not carry the question twice, because `user_text` is
+        // appended after it by both request builders.
+        let history = {
+            let rows = self.rows.lock().unwrap();
+            completed_messages(&rows, &thread_id)
+        };
+
         // The instruction becomes a row before the request leaves, so a turn that never answers
         // still shows what was asked.
         reduce(
@@ -171,7 +217,7 @@ impl AppState {
         let request = SendRequest {
             system: self.system.clone(),
             user_text: user_text.to_string(),
-            history: Vec::new(),
+            history,
             previous_response_id: None,
             tools: None,
             image: None,

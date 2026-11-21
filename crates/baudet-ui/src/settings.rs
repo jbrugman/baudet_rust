@@ -58,11 +58,7 @@ pub enum SettingsEvent {
     /// What a save just persisted, as the choices a session should stamp on its next request. Sent
     /// beside [`SettingsEvent::Saved`] rather than instead of it: whether the file took the bytes is
     /// the panel's business, and which model to ask next is the session's.
-    Adopted {
-        model: Option<String>,
-        reasoning: Option<String>,
-        max_output_tokens: Option<u32>,
-    },
+    Adopted { model: Option<String>, reasoning: Option<String>, max_output_tokens: Option<u32> },
     /// A save, refused or done, in the words the store produced.
     Saved(Result<(), WriteError>),
 }

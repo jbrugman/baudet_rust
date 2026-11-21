@@ -40,6 +40,16 @@ fn the_panel_flags_are_off_unless_asked_and_set_when_asked() {
 }
 
 #[test]
+fn sending_turns_to_a_server_is_opt_in() {
+    // `--live` promises a network and answers with whatever that machine happens to be running,
+    // while the scripted window draws the same picture everywhere. So the default must be the
+    // scripted one, and only the flag may change it -- a flag that silently failed to set would
+    // look exactly like a window that reached a server.
+    assert!(!parse(&["b"]).unwrap().live, "zonder vlag blijft het venster scripted");
+    assert!(parse(&["b", "--live"]).unwrap().live, "--live zet het aan");
+}
+
+#[test]
 fn a_screenshot_without_a_file_is_an_error_not_a_window() {
     assert!(parse(&["b", "--screenshot"]).is_err());
 }

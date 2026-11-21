@@ -188,7 +188,14 @@ impl ResponsesBackend {
 impl Shared {
     /// Send a turn and read its stream to the end. Runs on the turn's own thread; [`spawn_turn`]
     /// owns the sharing that makes that legal.
-    fn run(&self, request: &SendRequest, thread_id: &str, turn_id: &str, tx: &tokio::sync::mpsc::UnboundedSender<ThreadEvent>, cancelled: &AtomicBool) {
+    fn run(
+        &self,
+        request: &SendRequest,
+        thread_id: &str,
+        turn_id: &str,
+        tx: &tokio::sync::mpsc::UnboundedSender<ThreadEvent>,
+        cancelled: &AtomicBool,
+    ) {
         let _ = tx.send(ThreadEvent::TurnStarted { thread_id: thread_id.to_string(), turn_id: turn_id.to_string() });
         let outcome = self.stream(request, thread_id, turn_id, tx, cancelled);
         if cancelled.load(Ordering::SeqCst) {
@@ -227,7 +234,14 @@ impl Shared {
     }
 
     /// One request, one stream, folded into a turn.
-    fn stream(&self, request: &SendRequest, thread_id: &str, turn_id: &str, tx: &tokio::sync::mpsc::UnboundedSender<ThreadEvent>, cancelled: &AtomicBool) -> Result<Turn, BackendError> {
+    fn stream(
+        &self,
+        request: &SendRequest,
+        thread_id: &str,
+        turn_id: &str,
+        tx: &tokio::sync::mpsc::UnboundedSender<ThreadEvent>,
+        cancelled: &AtomicBool,
+    ) -> Result<Turn, BackendError> {
         let reasoning = request.reasoning.as_deref().or(self.reasoning.as_deref());
         let model = request.model.as_deref().filter(|m| !m.trim().is_empty()).unwrap_or(&self.endpoint.model);
         if model.trim().is_empty() {
@@ -269,7 +283,10 @@ impl Shared {
         let status = response.status();
         if !status.is_success() {
             let detail = response.text().unwrap_or_default();
-            return Err(BackendError::Core(CoreError::Http { status: status.as_u16(), detail: redact(detail.trim(), &self.endpoint.credential) }));
+            return Err(BackendError::Core(CoreError::Http {
+                status: status.as_u16(),
+                detail: redact(detail.trim(), &self.endpoint.credential),
+            }));
         }
         // A success status is not a success: measured, LM Studio answers `POST /responses` with 200
         // and an error body, so a status test alone would read that as a turn and report a turn that
@@ -290,7 +307,11 @@ impl Shared {
             let said = if looks_like_json {
                 detail.chars().take(400).collect::<String>()
             } else {
-                format!("a {} body of {} bytes", content_type.split(';').next().unwrap_or("empty"), detail.chars().count())
+                format!(
+                    "a {} body of {} bytes",
+                    content_type.split(';').next().unwrap_or("empty"),
+                    detail.chars().count()
+                )
             };
             return Err(BackendError::Core(CoreError::Http { status: status.as_u16(), detail: said }));
         }
@@ -322,7 +343,8 @@ impl Shared {
                         // rather than a payload (sse.rs, and `sse_framing.rs` protects that). So
                         // nothing here stops at it, which is what the measurement below is about.
                         if let Some(event) = framer.push_line(line) {
-                            terminal_seen |= self.publish(&event.event, &event.data, &mut accumulator, &mut state, turn_id, tx);
+                            terminal_seen |=
+                                self.publish(&event.event, &event.data, &mut accumulator, &mut state, turn_id, tx);
                             if terminal_seen || cancelled.load(Ordering::SeqCst) {
                                 break;
                             }
@@ -338,7 +360,9 @@ impl Shared {
                     if terminal_seen {
                         break;
                     }
-                    return Err(BackendError::Core(CoreError::Incomplete { detail: redact(&error.to_string(), &self.endpoint.credential) }));
+                    return Err(BackendError::Core(CoreError::Incomplete {
+                        detail: redact(&error.to_string(), &self.endpoint.credential),
+                    }));
                 }
             }
         }
@@ -356,14 +380,29 @@ impl Shared {
         // The answer existed and the rows are still open, so they close here. An empty answer with a
         // terminal event (a model that refused, a `content_filter` truncation) must not leave a
         // spinner, and `AppState::cancel_turn`'s sweep covers only the turn the user stopped.
-        let _ = state.close_open_rows(turn_id, ItemStatus::Completed);
+        //
+        // Sent, not discarded: `close_open_rows` returns the events that close the rows, and a
+        // `let _ =` folded them away, which measured as an answer that stayed `working` forever
+        // while the header said `idle` -- the row and the header reading the same turn through two
+        // doors, one of which never received its event.
+        for closing in state.close_open_rows(turn_id, ItemStatus::Completed) {
+            let _ = tx.send(closing);
+        }
         Ok(turn)
     }
 
     /// Fold one framed payload and publish the rows it opened or extended. Returns whether the
     /// payload was a Responses terminal, which is the only payload that ends a stream early; the
     /// chat dialect ends at the body's end, for the reason documented in [`Self::stream`].
-    fn publish(&self, event: &Option<String>, data: &str, accumulator: &mut TurnAccumulator, state: &mut StreamState, turn_id: &str, tx: &tokio::sync::mpsc::UnboundedSender<ThreadEvent>) -> bool {
+    fn publish(
+        &self,
+        event: &Option<String>,
+        data: &str,
+        accumulator: &mut TurnAccumulator,
+        state: &mut StreamState,
+        turn_id: &str,
+        tx: &tokio::sync::mpsc::UnboundedSender<ThreadEvent>,
+    ) -> bool {
         let terminal = event.as_deref() == Some("response.completed")
             || event.as_deref() == Some("response.incomplete")
             || event.as_deref() == Some("response.failed");
@@ -404,7 +443,11 @@ impl Backend for ResponsesBackend {
             body = request_body(&shape);
             body.insert("stream".into(), Value::Bool(false));
         }
-        let mut call = self.inner.client.post(self.inner.endpoint.url_for(self.inner.endpoint.protocol)).json(&Value::Object(body));
+        let mut call = self
+            .inner
+            .client
+            .post(self.inner.endpoint.url_for(self.inner.endpoint.protocol))
+            .json(&Value::Object(body));
         if let Some(key) = &self.inner.endpoint.credential.value {
             call = call.bearer_auth(key);
         }
@@ -412,9 +455,8 @@ impl Backend for ResponsesBackend {
             .send()
             .map_err(|error| BackendError::Core(CoreError::Http { status: 0, detail: error.to_string() }))?;
         let status = response.status();
-        let text = response
-            .text()
-            .map_err(|error| BackendError::Core(CoreError::Incomplete { detail: error.to_string() }))?;
+        let text =
+            response.text().map_err(|error| BackendError::Core(CoreError::Incomplete { detail: error.to_string() }))?;
         if !status.is_success() {
             return Err(BackendError::Core(CoreError::Http {
                 status: status.as_u16(),

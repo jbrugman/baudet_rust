@@ -100,7 +100,7 @@ pub fn reduce(rows: &mut Rows, event: &ThreadEvent) -> bool {
     }
 }
 
-fn streamed_text(item: &Item) -> String {
+pub(crate) fn streamed_text(item: &Item) -> String {
     match item {
         Item::AgentMessage(i) => i.text.clone(),
         Item::Reasoning(i) => i.text.clone(),

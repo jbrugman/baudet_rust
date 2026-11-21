@@ -9,7 +9,10 @@ Groen opgezette Rust-versie van de Baudet-app, met de Kotlin-app als voorbeeld. 
 De front-end is representatief: transcript met streaming-regels, linker pane (project, tree),
 rechter pane (changed files), composer, en het ingestpaneel met endpoint, modellenlijst,
 redenereniveau en uitvoerplafond. `--screenshot` bewijst de staat van een sessie zonder muis.
-`ScriptedBackend` voert beurtstromen uit; de echte transportlaag ontbreekt nog.
+`ScriptedBackend` voert beurtstromen uit voor een venster zonder server; `--live` stuurt de beurt
+naar het opgeslagen endpoint via `ResponsesBackend`, die beide OpenAI-dialecten spreekt en wiens
+dialect uit een server-scan komt. Het transport bestaat dus; wat er nu bovenop gebeurt, is hier
+onder.
 
 ## Besluit: de fetch-sleutel komt uit de omgeving, en "geland" is niet "geslaagd"
 
@@ -49,7 +52,7 @@ Zes crates, de UI kent alleen het `Backend`-contract:
 | crate | taak |
 |---|---|
 | `baudet-core` | events/reductie/rollout. Geen IO, geen UI. |
-| `baudet-backend` | het `Backend`-contract + `ScriptedBackend` + `sse.rs` (parser, nog geen transport). |
+| `baudet-backend` | het `Backend`-contract + `ScriptedBackend` + `sse.rs` (parser) + `transport.rs` (`ResponsesBackend`: HTTP/SSE, beide dialecten, streaming) + `protocol.rs` (lichamen en de server-scan). |
 | `baudet-settings` | settings-pad, schrijven, en `GET /v1/models`. Leest geen UI. |
 | `baudet-store` | rollouts op schijf en hun indexeringslaag. |
 | `baudet-app` | de proxy bovenop een backend: events, checkpoints, interrupts. |
@@ -60,19 +63,57 @@ details, interrupt/resume met toetsenbord en met Esc, Shift+Enter, scroll-vastze
 transcript opschonen, rijselectie, workspace-tree met lazy vouwen en verversen, changed-files met
 kopieerbare pakketcodes, settings-venster incl. model-ophalen.
 
+## Wat er sinds de transport is bijgekomen, en wat er toen twee keer misging
+
+De transportlaag (`transport.rs`: HTTP, chunked SSE, beide dialecten, streaming) is er, en
+vervangt daarmee wat er eerder ontbrak. Daarbij zijn twee fouten gevonden, beide gemeten tegen een
+levend venster of een naspeelde stroom, niet bedacht:
+
+1. **Een beurt sloot zijn eigen regel nooit.** `transport.rs` bouwde de sluit-events en gooide ze
+   weg (`let _ = state.close_open_rows(...)`). Het effect was in het venster zichtbaar: de kop zei
+   `idle` terwijl het antwoord eeuwig op `working` bleef staan — rij en kop lezen dezelfde beurt via
+   twee deuren en één van die deuren kreeg nooit een event. Nu gaan die events het kanaal in. Het
+   bewijs dat dit geen kosmetische ingreep is: het nieuwe `baudet-backend/tests/stream_closure.rs`
+   (2 tests) speelt een complete chat-stroom na: allebei falen zodra deze fix wordt weggehaald (gemeten met
+   `git stash`), allebei slagen wanneer hij er staat.
+2. **Documentatie beloofde een exit die er niet was.** De `SHOT_FRAMES`-doc zei dat een
+   `--screenshot`-run op het tijdsplafond "non-zero" eindigt. Gemeten: `RETOUR=0`, en géén enkele
+   test claimde die exit. Alleen de doc is gecorrigeerd naar wat de code werkelijk doet (het venster
+   wordt zoals het is weggeschreven, met de melding op stderr); er is geen gedrag ingebouwd dat
+   niemand had gevraagd.
+
+Ook mee in deze ronde, elk met eigen test: het voltooide gesprek reist mee in elke aanvraag
+(`completed_messages` + 6 tests in `baudet-app/tests/history.rs`); de usage-chunk van een
+chat-stroom — `choices: []` met de aantallen ernaast — wordt niet meer weggegooid maar geteld; en
+elke beurt noemt het model en het redenereniveau uit het ingestpaneel, zonder dat de persoon die
+keuze nog eens hoeft te typen. `--live` blijft een expliciete vlag: het scripted venster is en
+blijft de standaard.
+
+Bij de live-run is de shot-variatie verklaard, met een meting erbij en niet met een modifier.
+Een `--screenshot`-run vraagt de demo-vraag en tekent zodra de beurt gezet is; `SHOT_FRAMES`
+(600 frames) is daar het plafond voor. Gemeten in drie runs met dezelfde instellingen: 73 KB,
+141 KB en 241 KB, dus de uitkomst hangt aan de frame-snelheid van de machine en niet aan de
+server. Snel getekend past een hele beurt onder het plafond en tekent het venster een voltooid
+beeld, met het echte antwoord van de LM Studio-gemma via de transport in de kop `streaming`; traag
+getekend viel het plafond vóór het eerste token en blijft de vraag zonder antwoord staan, met de
+"not settled"-melding erbij. Die melding is dus het eerlijke gevolg van een plafond dat lager ligt
+dan één beurt op een lokaal model — gemeten: dezelfde vraag met het plafond uit de instellingen
+(512 tokens) doet er op die gemma ~22 s over en bereikt `finish: length` — en niet van een kapotte
+streaming, want de streaming bereikte het venster zichtbaar.
+
+Twee gedragingen eraan vast zijn bewust niet aangeraakt: het plafond zelf, want het bestaat om een
+stroom te snoeren die nooit sluit en niet om een traag model te straffen, en de plaats van de
+settle-controle, die vóór `paint` staat en dus de snapshot van de vorige frame beoordeelt. Wie een
+volledig beeld wil, kiest een snellere machine of server. De volgorde omdraaien kan ook, maar dat
+is een UI-gedragswijziging die een eigen besluit en een eigen meting verdient.
+
 ### Klussen die nog open staan
 
-1. **Streaming-transport** (#B). Er is geen enkel netwerkverzoek op de chat. `sse.rs` parseert
-   alleen; de HTTP/SSE-laag ontbreekt. Detectie van het protocol hoort bij een server-scan (die
-   nooit `/chat/completions` of `/responses` raakt, alleen `GET /v1/models`) — het doel is lokaal,
-   daar draaien meer servers (oMLX, LM Studio, Jan, Ollama).
-2. **Model en reasoning naar de aanvraag** (#2). `SendRequest` heeft géén model-veld, dus de
-   keuzes uit het ingestpaneel bereiken de backend nog niet. Kan pas na 1, want
-   `ScriptedBackend` negeert het request.
-3. **`max_model_len` als alias** in `baudet-settings::provider::Entry`. De gateway-venstermaten
+1. **`max_model_len` als alias** in `baudet-settings::provider::Entry`. De gateway-venstermaten
    (262144 voor Qwen, 128000 voor DeepSeek) gaan nu verloren; de parser kent alleen
    `context_length`/`max_context_length`.
-4. **Echte beurt tonen** — de app-toepassing van 1 en 2.
+2. **Echte beurt tonen** — de app-toepassing van de transport: een live-venster dat een server
+   kiest, scant, en antwoordt zonder dat er iets aan de code gesleuteld hoeft te worden.
 
 ## Bouten
 

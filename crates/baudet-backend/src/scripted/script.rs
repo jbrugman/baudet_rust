@@ -60,6 +60,7 @@ pub struct ScriptedBackend {
     scripts: Mutex<Vec<Script>>,
     turn_counter: AtomicUsize,
     last_turn: Mutex<Option<Arc<TurnState>>>,
+    last_request: Mutex<Option<RecordedRequest>>,
 }
 
 struct TurnState {
@@ -67,9 +68,27 @@ struct TurnState {
     steered: Mutex<Vec<String>>,
 }
 
+/// What the most recent turn was asked for.
+///
+/// A value behind a lock, not a borrow: `send` is given the `SendRequest` by move, so nothing here
+/// could outlive the call as a reference, and the conversation owner hands its transcript over in
+/// exactly the shape a caller would want to assert on.
+#[derive(Debug, Clone)]
+struct RecordedRequest {
+    request: SendRequest,
+    /// `tu_1` for the first turn -- the same id the player publishes, so an answer can be matched
+    /// back to the request that produced it.
+    turn_id: String,
+}
+
 impl ScriptedBackend {
     pub fn new(scripts: Vec<Script>) -> ScriptedBackend {
-        ScriptedBackend { scripts: Mutex::new(scripts), turn_counter: AtomicUsize::new(0), last_turn: Mutex::new(None) }
+        ScriptedBackend {
+            scripts: Mutex::new(scripts),
+            turn_counter: AtomicUsize::new(0),
+            last_turn: Mutex::new(None),
+            last_request: Mutex::new(None),
+        }
     }
 
     /// How many turns have been started, so a test can assert a turn was claimed exactly once.
@@ -82,6 +101,15 @@ impl ScriptedBackend {
         self.last_turn.lock().unwrap().as_ref().map(|t| t.steered.lock().unwrap().clone()).unwrap_or_default()
     }
 
+    /// The whole request of the most recent turn, with the id that turn was published under.
+    ///
+    /// Exists so a caller can assert what it *asked*, not only what it replayed. Whether a turn
+    /// carried its conversation is invisible in the published events, so without this the player
+    /// could drop the transcript and every test here would still pass.
+    pub fn last_request(&self) -> Option<(SendRequest, String)> {
+        self.last_request.lock().unwrap().clone().map(|r| (r.request, r.turn_id))
+    }
+
     /// Whether the most recent turn was cancelled.
     pub fn cancelled(&self) -> bool {
         self.last_turn.lock().unwrap().as_ref().map(|t| t.cancelled.load(Ordering::SeqCst)).unwrap_or(false)
@@ -89,13 +117,14 @@ impl ScriptedBackend {
 }
 
 impl Backend for ScriptedBackend {
-    fn send(&self, _request: SendRequest) -> Result<TurnHandle, BackendError> {
+    fn send(&self, request: SendRequest) -> Result<TurnHandle, BackendError> {
         let index = self.turn_counter.fetch_add(1, Ordering::SeqCst);
         let script = {
             let scripts = self.scripts.lock().unwrap();
             scripts.get(index).cloned().unwrap_or_default()
         };
         let turn_id = format!("tu_{}", index + 1);
+        *self.last_request.lock().unwrap() = Some(RecordedRequest { request, turn_id: turn_id.clone() });
         let state = Arc::new(TurnState { cancelled: AtomicBool::new(false), steered: Mutex::new(Vec::new()) });
         *self.last_turn.lock().unwrap() = Some(Arc::clone(&state));
 

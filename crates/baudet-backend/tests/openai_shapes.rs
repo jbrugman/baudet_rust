@@ -5,6 +5,7 @@
 //! that decides them would hide its guesses behind whichever server happened to be up.
 
 use baudet_backend::openai::{events_for_payload, request_body, Delta, StreamState, TurnAccumulator, REASONING_NONE};
+use baudet_backend::protocol::Protocol;
 use baudet_core::{ItemKind, ThreadEvent};
 use serde_json::Value;
 
@@ -298,4 +299,59 @@ fn closing_rows_names_the_status_the_turn_ended_with() {
     }
     // Closing twice must not announce rows that are already closed.
     assert!(state.close_open_rows("tu_1", baudet_core::ItemStatus::Completed).is_empty());
+}
+
+#[test]
+fn a_usage_chunk_without_choices_keeps_its_accounting() {
+    // Measured on LM Studio (2026-11-21): after the last text chunk comes a chunk with an empty
+    // `choices` array and the token counts in it. A reader that treats "no choices" as "nothing to
+    // fold" throws away the one number a person can check against their own GPU.
+    let mut turn = TurnAccumulator::new();
+    turn.feed(None, r#"{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ja"}}]}"#);
+    assert!(
+        turn.feed(None, r#"{"object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":41,"completion_tokens":9,"total_tokens":50}}"#)
+            .is_none(),
+        "a chunk with no delta must not invent one"
+    );
+    let finished = turn.finish();
+    let usage = finished.usage.expect("the usage chunk carries the turn's accounting");
+    assert_eq!((usage.prompt, usage.completion, usage.total), (Some(41), Some(9), Some(50)));
+    assert_eq!(finished.text, "ja", "and the answer that streamed stays intact");
+}
+
+#[test]
+fn a_body_that_ends_at_its_terminator_is_an_ending_not_a_failure() {
+    // `[DONE]` never reaches the accumulator: the framer drops it as a terminator (sse.rs, and
+    // `sse_framing.rs::done_is_not_an_event` guards that). What the accumulator therefore sees of a
+    // chat stream that only says `[DONE]` is nothing at all -- which is an ordinary ending, named by
+    // the count it reached, and deliberately *not* reported incomplete, because nothing went wrong.
+    //
+    // Fed as nothing, not as `[DONE]`: this asserts the consequence of that framing rule at the
+    // accumulator, which is where a turn's terminal name is decided. The framing itself belongs to
+    // `sse_framing.rs`, and duplicating it here would test the same rule twice under two names.
+    let turn = TurnAccumulator::new();
+    assert_eq!(turn.event_count(), 0, "the terminator is not an event");
+    let finished = turn.finish();
+    assert!(finished.text.is_empty());
+    assert_eq!(finished.final_event.as_deref(), Some("stream_end_after_0 events"));
+    assert!(finished.incomplete_reason.is_none(), "a clean end is not a failure");
+}
+
+#[test]
+fn a_settings_word_round_trips_and_an_unknown_word_is_refused() {
+    // `word` is what a settings file stores and `from_word` is what reads it back, so the two must
+    // be exact inverses; a word this build has no path for must answer `None` rather than be
+    // guessed at, because guessing sends a turn built for one dialect to a server chosen for
+    // another -- a wrong answer where an absent one was available.
+    for protocol in [Protocol::Responses, Protocol::ChatCompletions] {
+        assert_eq!(Protocol::from_word(protocol.word()), Some(protocol), "{} must round-trip", protocol.word());
+    }
+    for word in ["", "  ", "Responses", "openai", "chat/completions", "gpt"] {
+        assert_eq!(Protocol::from_word(word), None, "{word:?} names no dialect this build can send to");
+    }
+    // `label` is what a person reads, `word` is what a file stores, and the two differ for one
+    // dialect: prose says `chat/completions`, the file says `chat_completions`. Guarding that they
+    // are *equal* would be wrong; guarding that `from_word` reads the stored spelling is the point.
+    assert_eq!(Protocol::ChatCompletions.label(), "chat/completions");
+    assert_eq!(Protocol::ChatCompletions.word(), "chat_completions");
 }

@@ -247,6 +247,14 @@ impl TurnAccumulator {
             return delta.map(|reasoning| Delta { text: None, reasoning: Some(reasoning) });
         }
         if name == "chat.completion.chunk" {
+            // Measured on LM Studio (2026-11-21): the chunk that ends a chat stream carries no
+            // `choices` at all -- an empty array -- and the turn's token counts in `usage`. Reading
+            // only the choice and returning here would fold that chunk's absence and throw its
+            // accounting away, which is the one number a person can check against their own GPU. So
+            // the response-level fields are absorbed first; `absorb` reads `usage` wherever it sits
+            // and takes its turn-level names (`id`, `output`, the terminals) from the same payload
+            // they appear in, which a chat chunk either does not have or has under another name.
+            self.absorb(name, object);
             let choice =
                 object.get("choices").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_object);
             let content = choice

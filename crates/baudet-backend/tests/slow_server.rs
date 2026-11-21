@@ -286,7 +286,6 @@ fn a_deadline_ends_a_stream_that_goes_quiet() {
     assert!(elapsed < Duration::from_secs(3), "the deadline ends the wait long before the server lets go: {elapsed:?}");
 }
 
-
 /// Whether a chunked body read all the way to its end costs a decoder error is not a detail the
 /// transport can guess: it decides whether "the server finished" is a clean stop or a failure that
 /// would mark an answered turn failed.

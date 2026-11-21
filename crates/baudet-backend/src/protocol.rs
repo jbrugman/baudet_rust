@@ -349,10 +349,13 @@ pub fn judge_probe(dialect: Protocol, status: u16, body: &Value) -> (Option<Prot
                 other => other.to_string(),
             })
             .unwrap_or_else(|| format!("a {status} body with no answer in it")),
-        other => format!("a {status} {} body", match other {
-            Value::Null => "empty",
-            _ => "non-object",
-        }),
+        other => format!(
+            "a {status} {} body",
+            match other {
+                Value::Null => "empty",
+                _ => "non-object",
+            }
+        ),
     };
     (None, format!("did not answer as a turn request: {said}"))
 }
