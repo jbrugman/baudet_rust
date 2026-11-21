@@ -466,11 +466,12 @@ fn worker_loop(
 fn settings_worker_loop(commands: mpsc::Receiver<SettingsCommand>, report: mpsc::Sender<SettingsEvent>) {
     while let Ok(command) = commands.recv() {
         match command {
-            SettingsCommand::Fetch { endpoint } => {
+            SettingsCommand::Fetch { endpoint, api_key } => {
                 // `endpoint` travels with the report so the panel can tell a late answer for an old
                 // address from an answer for the one now in the field. The fetch borrows it, so it is
-                // still owned here when the report takes it by value.
-                let result = match Provider::from_base_url(&endpoint) {
+                // still owned here when the report takes it by value. The key travels too, so a
+                // gateway that wants one answers rather than 401-ing every fetch.
+                let result = match Provider::with_key(&endpoint, api_key) {
                     Ok(provider) => provider.list_models(),
                     Err(error) => Err(error),
                 };

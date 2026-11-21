@@ -63,6 +63,11 @@ pub enum ListingError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Provider {
     base_url: String,
+    /// The credential to offer this endpoint, already resolved (typed-over-environment) by the
+    /// caller. `None` means "no key known", which is honest rather than blank: an unauthenticated
+    /// `GET` is sent, because several local servers answer `/v1/models` without a key and adding a
+    /// header they do not expect would change behaviour a person did not ask for.
+    api_key: Option<String>,
 }
 
 impl Provider {
@@ -89,12 +94,27 @@ impl Provider {
             Some(already) => already,
             None => format!("{without_slash}/v1"),
         };
-        Ok(Provider { base_url: base })
+        Ok(Provider { base_url: base, api_key: None })
     }
 
-    /// Build from what is stored.
+    /// Build from what is stored, including the credential. The key is resolved exactly once, here,
+    /// through [`Settings::resolved_key`] — typed value first, else the named environment variable —
+    /// so the header this provider sends is the same key the settings panel shows. No second
+    /// resolution lives near the transport.
     pub fn from_settings(settings: &Settings) -> Result<Provider, ListingError> {
-        Provider::from_base_url(&settings.base_url)
+        let mut provider = Provider::from_base_url(&settings.base_url)?;
+        provider.api_key = settings.resolved_key();
+        Ok(provider)
+    }
+
+    /// Build from a base URL with a credential the caller already holds. Used when the value that
+    /// belongs to this fetch lives in the settings panel rather than in a stored file — the fetch
+    /// then carries its own key, exactly as it carries its own endpoint, and the worker reads no
+    /// shared state.
+    pub fn with_key(base_url: &str, api_key: Option<String>) -> Result<Provider, ListingError> {
+        let mut provider = Provider::from_base_url(base_url)?;
+        provider.api_key = api_key.filter(|k| !k.trim().is_empty());
+        Ok(provider)
     }
 
     /// The versioned base, after normalising.
@@ -112,22 +132,27 @@ impl Provider {
     /// Blocking, single-shot, no cache: a local server gains models as it loads them, so a cache
     /// here would show a person a model that has since disappeared. The panel owns refresh.
     ///
-    /// Sends no credential, which the reference app copies exactly: `ModelsClient.fetch` issues a
-    /// bare `GET`, so a local server that answers `/v1/models` without a key behaves the same for
-    /// both apps. What has to stay true when that changes is the *display* rule, stated here so the
-    /// next person does not rediscover it by leaking one: `NotAListing.detail` carries a short slice
-    /// of the response body, so the moment this request starts sending `Authorization: Bearer …`, an
-    /// echo of that body — some gateways repeat request context in their error — could surface the
-    /// key in a status line. `shorten` caps the shape, not the secrecy; whoever adds the header must
-    /// redact `detail` then, not here.
+    /// Send the credential when one is known, and none when it is not. A local server that answers
+    /// `/v1/models` without a key keeps behaving that way; a gateway that demands one (measured: the
+    /// oMLX gateway answers `401 API key required` empty-handed and `200` with the header) starts
+    /// answering. The reference app's bare `GET` is kept for the no-key case.
+    ///
+    /// Because a header can now travel, the *display* rule applies: `NotAListing.detail` carries a
+    /// short slice of the response body, and some gateways echo request context back in their error.
+    /// So every `detail` leaving here passes through [`redact`], which removes the very key this
+    /// request sent before `shorten` ever sees it. Order matters — redact first, then cut — so a
+    /// key the limit would otherwise split cannot leave in pieces.
     pub fn list_models(&self) -> Result<Vec<Model>, ListingError> {
         let url = self.models_url();
-        // No `.default_headers(authorization(...))` on purpose. See the display rule above.
         let client = match reqwest::blocking::Client::builder().timeout(LISTING_TIMEOUT).build() {
             Ok(client) => client,
             Err(error) => return Err(ListingError::Unreachable { endpoint: url, detail: error.to_string() }),
         };
-        let response = match client.get(&url).send() {
+        let mut request = client.get(&url);
+        if let Some(key) = &self.api_key {
+            request = request.bearer_auth(key);
+        }
+        let response = match request.send() {
             Ok(response) => response,
             Err(error) => {
                 // reqwest reports a timeout as an error with its own flag, which is the one case
@@ -141,7 +166,8 @@ impl Provider {
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
             let detail = response.text().unwrap_or_default();
-            return Err(ListingError::NotAListing { endpoint: url, status, detail: shorten(detail.trim()) });
+            let detail = self.redact(detail.trim());
+            return Err(ListingError::NotAListing { endpoint: url, status, detail: shorten(&detail) });
         }
         // The body is read as text and *then* parsed, so a 200 from a login page reports the shape
         // problem as a listing error instead of as a transport one.
@@ -151,7 +177,11 @@ impl Provider {
                 return Err(ListingError::NotAListing { endpoint: url, status, detail: shorten(&error.to_string()) })
             }
         };
-        parse_listing(&body).map_err(|detail| ListingError::NotAListing { endpoint: url, status, detail })
+        parse_listing(&body).map_err(|detail| ListingError::NotAListing {
+            endpoint: url,
+            status,
+            detail: shorten(&self.redact(&detail)),
+        })
     }
 }
 
@@ -225,6 +255,27 @@ fn url_without_version(without_slash: &str) -> Option<String> {
     // A path exists once anything but host:port remains.
     let path_start = after_scheme.find('/')?;
     (path_start > 0).then(|| without_slash.to_string())
+}
+
+impl Provider {
+    /// Remove the credential this request sent from a body slice about to be shown. Redaction is
+    /// unconditional, not best-effort: no caller chooses it, so the display rule cannot be opted
+    /// out of the way by the next transport added here.
+    fn redact(&self, detail: &str) -> String {
+        redact(detail, self.api_key.as_deref())
+    }
+}
+
+/// Replace every occurrence of `key` in `detail` with a marker. A `None` or empty key changes
+/// nothing — there is no secret to hide then, and a no-op beats a marker that lies about one.
+///
+/// Empty needle guarded on purpose: `str::replace` would insert the marker between every character
+/// of the text if the needle were empty, turning "Not Found" into the marker a hundred times.
+fn redact(detail: &str, key: Option<&str>) -> String {
+    match key.map(str::trim).filter(|k| !k.is_empty()) {
+        None => detail.to_string(),
+        Some(key) => detail.replace(key, "[redacted]"),
+    }
 }
 
 fn shorten(text: &str) -> String {
@@ -342,10 +393,20 @@ mod tests {
     /// Draait alleen wanneer een endpoint werkelijk bereikbaar is (de default `127.0.0.1:8000` of
     /// `$BAUDET_LIVE_MODELS_URL`), anders skipt hij schoon — een test die faalt omdat er geen server
     /// draait, is geen test.
+    ///
+    /// De credential komt uit `$BAUDET_LIVE_MODELS_KEY_ENV` (een variabelenaam, niet de waarde):
+    /// zodoende verandert er niets aan het sleutelbeleid — géén test bevat of drukt een echte key af,
+    /// want de echte_gateway vraagt erom. Met een key wordt de beveiligde gateway gehaald (200),
+    /// zonder key is het een nette `401 NotAListing`. Beide zijn geen stil-lege-lijst.
     #[test]
     fn a_live_endpoint_reports_models_or_a_reason_but_never_a_silent_empty_list() {
         let base = std::env::var("BAUDET_LIVE_MODELS_URL").unwrap_or_else(|_| "http://127.0.0.1:8000/v1".into());
-        let provider = Provider::from_base_url(&base).expect("a normalisable endpoint");
+        // Een variabelenaam lezen, nooit een waarde hardcoden. Leeg of afwezig = naakte GET.
+        let api_key = std::env::var("BAUDET_LIVE_MODELS_KEY_ENV")
+            .ok()
+            .and_then(|name| std::env::var(name).ok())
+            .filter(|k| !k.trim().is_empty());
+        let provider = Provider::with_key(&base, api_key.clone()).expect("a normalisable endpoint");
         let probe = reqwest::blocking::Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
         if probe.get(provider.models_url()).send().is_err() {
             eprintln!("skipping live test: no endpoint at {}", provider.models_url());
@@ -353,14 +414,23 @@ mod tests {
         }
         match provider.list_models() {
             // Een echte lijst, of leeg omdat de server dat zegt.
-            Ok(models) => eprintln!("live: {} models van {}", models.len(), provider.models_url()),
+            Ok(models) => eprintln!(
+                "live: {} models van {} (key: {})",
+                models.len(),
+                provider.models_url(),
+                if api_key.is_some() { "ja" } else { "nee" }
+            ),
             // Een fout moet een status noemen. "error body + 401 -> NotAListing" is precies de casus
-            // die de echte gateway hier levert; mag niet door de vingers glippen als Ok(vec![]).
+            // die de echte gateway hier levert zonder key; mag niet door de vingers glippen als Ok(vec![]).
             Err(
                 error
                 @ (ListingError::NotAListing { .. } | ListingError::Unreachable { .. } | ListingError::Timeout(_)),
             ) => {
-                eprintln!("live: {} -> {error}", provider.models_url());
+                eprintln!(
+                    "live: {} -> {error} (key: {})",
+                    provider.models_url(),
+                    if api_key.is_some() { "ja" } else { "nee" }
+                );
             }
             Err(other) => panic!("live listing faalde op de verkeerde plek: {other}"),
         }
@@ -370,6 +440,61 @@ mod tests {
     fn a_blank_id_is_not_offered_as_a_model() {
         let models = parse_listing(r#"{"data":[{"id":"  "},{"id":"real"}]}"#).unwrap();
         assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["real"]);
+    }
+
+    #[test]
+    fn a_credential_reaches_the_header_only_when_one_is_known() {
+        // The header must be the resolved key, and only the resolved key: no key means a bare GET,
+        // which is what several local servers (LM Studio measured) answer without complaint.
+        let provider = Provider::with_key("127.0.0.1:1234/v1", Some("typed-key".into())).unwrap();
+        assert_eq!(provider.api_key.as_deref(), Some("typed-key"));
+        // Blank is absence, not a header of "Bearer ".
+        let blank = Provider::with_key("127.0.0.1:1234/v1", Some("   ".into())).unwrap();
+        assert_eq!(blank.api_key, None);
+        assert_eq!(blank.base_url(), "http://127.0.0.1:1234/v1");
+        // from_base_url alone can never carry a key.
+        assert_eq!(Provider::from_base_url("127.0.0.1:1234/v1").unwrap().api_key, None);
+    }
+
+    #[test]
+    fn from_settings_offers_the_resolved_key_and_none_when_there_is_none() {
+        // A typed key wins (the panel shows it, so it must be the one sent); no key at all resolves
+        // to None and therefore to a bare GET. Uses a name no shell defines, so the environment
+        // cannot make this pass by accident.
+        let typed = Settings {
+            base_url: "http://127.0.0.1:1234/v1".into(),
+            api_key: Some("typed-key".into()),
+            api_key_env_var: "BAUDET_UNSET_TEST_KEY".into(),
+            ..Default::default()
+        };
+        assert_eq!(Provider::from_settings(&typed).unwrap().api_key.as_deref(), Some("typed-key"));
+        let none = Settings {
+            base_url: "http://127.0.0.1:1234/v1".into(),
+            api_key: None,
+            api_key_env_var: "BAUDET_UNSET_TEST_KEY".into(),
+            ..Default::default()
+        };
+        assert_eq!(Provider::from_settings(&none).unwrap().api_key, None);
+    }
+
+    #[test]
+    fn a_key_the_endpoint_echoed_back_never_survives_redaction() {
+        let key = "secret-typed-key";
+        // The realistic echo: a gateway repeating its auth context in a 401 body.
+        let echo = format!(r#"{{"error":{{"message":"bad key {key} supplied"}}}}"#);
+        let out = redact(&echo, Some(key));
+        assert!(!out.contains(key), "the key must not survive: {out}");
+        assert!(out.contains("[redacted]"), "and the shape must say so: {out}");
+        assert!(out.contains("bad key") && out.contains("supplied"), "the words around it stay: {out}");
+        // Two copies: both go, because the second is as secret as the first.
+        let twice = format!("{key} and {key}");
+        assert_eq!(redact(&twice, Some(key)), "[redacted] and [redacted]");
+        // A key shorter than the body is still redacted; a body without it is untouched.
+        assert_eq!(redact("Not Found", Some(key)), "Not Found");
+        // The empty-needle guard: without it this would explode into markers.
+        assert_eq!(redact("Not Found", None), "Not Found");
+        assert_eq!(redact("Not Found", Some("")), "Not Found");
+        assert_eq!(redact("Not Found", Some("   ")), "Not Found");
     }
 
     #[test]

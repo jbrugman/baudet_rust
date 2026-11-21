@@ -29,7 +29,13 @@ pub enum SettingsCommand {
     /// Ask `endpoint` which models it has. The endpoint travels with the command rather than being
     /// read from shared state: the fetch is owned by the worker, so the request cannot race the next
     /// keystroke in the field.
-    Fetch { endpoint: String },
+    Fetch {
+        endpoint: String,
+        /// The credential the panel holds, sent so the fetch authenticates exactly as the panel
+        /// claims it will. The worker reads no shared state: a fetch carries its own key, exactly
+        /// as it carries its own endpoint. `None` (or blank) means a bare GET.
+        api_key: Option<String>,
+    },
     /// Persist `settings`. The worker writes it and reports the outcome; it never keeps the settings,
     /// because the view-model is the truth about what is on screen.
     Save(Settings),
@@ -309,7 +315,10 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
     if (fetch_now || enter) && !view.fetching {
         view.fetching = true;
         view.status = format!("asking {}…", view.base_url.trim());
-        commands.push(SettingsCommand::Fetch { endpoint: view.base_url.trim().to_string() });
+        commands.push(SettingsCommand::Fetch {
+            endpoint: view.base_url.trim().to_string(),
+            api_key: Some(view.api_key.clone()).filter(|k| !k.trim().is_empty()),
+        });
     }
 }
 
