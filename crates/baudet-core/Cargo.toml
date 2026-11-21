@@ -8,3 +8,8 @@ license.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# The git-probe fixtures need a real throwaway repository, and a directory that removes itself on
+# drop is the difference between a self-contained test and one that cleans up after itself by luck.
+tempfile = { workspace = true }

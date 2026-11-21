@@ -8,14 +8,19 @@
 //!  * [`event`] -- everything that happens, each event scoped by thread and turn (`ThreadEvent.kt`);
 //!  * [`protocol`] -- what a turn returned, including the backend's own terminal signals (`Turn.kt`);
 //!  * [`usage`] -- token accounting, where a missing number stays missing (`Usage.kt`);
-//!  * [`error`] -- a backend complaint, and the one error a user can act on (`BackendException.kt`).
+//!  * [`error`] -- a backend complaint, and the one error a user can act on (`BackendException.kt`);
+//!  * [`context`] -- where a conversation happened, which a transcript needs to stay meaningful;
+//!  * [`msg`] -- a turn as the model is asked to remember it, the wire twin of [`item`].
 
+pub mod context;
 pub mod error;
 pub mod event;
 pub mod item;
+pub mod msg;
 pub mod protocol;
 pub mod usage;
 
+pub use context::{probe_git, GitMeta, SessionContext, GIT_PROBE_TIMEOUT};
 pub use error::CoreError;
 pub use event::{delta_method, ApprovalRequest, ThreadEvent};
 pub use item::{
@@ -23,5 +28,6 @@ pub use item::{
     ImageItem, Item, ItemKind, ItemStatus, PlanEntry, PlanEntryStatus, PlanItem, ReasoningItem, ToolCallItem,
     UserMessageItem,
 };
+pub use msg::Msg;
 pub use protocol::{FunctionCall, Turn};
 pub use usage::Usage;

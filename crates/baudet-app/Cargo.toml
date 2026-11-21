@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 baudet-core = { workspace = true }
 baudet-backend = { workspace = true }
+baudet-store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
