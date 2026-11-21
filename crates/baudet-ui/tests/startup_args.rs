@@ -29,6 +29,31 @@ fn a_screenshot_without_a_file_is_an_error_not_a_window() {
     assert!(parse(&["b", "--screenshot"]).is_err());
 }
 
+/// The flag exists so a scripted picture can show a folder, and a silently dropped path would show
+/// the cold start instead -- which looks like a working panel with nothing in it.
+#[test]
+fn a_workspace_folder_is_honoured_in_both_spellings() {
+    let equals = parse(&["b", "--workspace=/tmp/bron"]).unwrap().workspace;
+    assert_eq!(equals.as_deref(), Some(std::path::Path::new("/tmp/bron")));
+    let spaced = parse(&["b", "--workspace", "/tmp/bron"]).unwrap().workspace;
+    assert_eq!(spaced.as_deref(), Some(std::path::Path::new("/tmp/bron")));
+}
+
+#[test]
+fn a_workspace_without_a_folder_is_an_error_not_a_window() {
+    assert!(parse(&["b", "--workspace"]).is_err());
+}
+
+#[test]
+fn the_two_options_can_be_given_in_any_order() {
+    let startup = parse(&["b", "--workspace=/tmp/bron", "--screenshot=/tmp/a.png"]).unwrap();
+    assert_eq!(startup.workspace.as_deref(), Some(std::path::Path::new("/tmp/bron")));
+    assert_eq!(startup.screenshot.as_deref(), Some(std::path::Path::new("/tmp/a.png")));
+    let flipped = parse(&["b", "--screenshot=/tmp/a.png", "--workspace=/tmp/bron"]).unwrap();
+    assert_eq!(flipped.workspace, startup.workspace);
+    assert_eq!(flipped.screenshot, startup.screenshot);
+}
+
 #[test]
 fn an_unknown_option_is_an_error() {
     assert!(parse(&["b", "--screenshotz=x.png"]).is_err(), "a typo must not silently open a window");

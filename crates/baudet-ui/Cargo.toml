@@ -39,3 +39,9 @@ winit = "0.30"
 # design conversation (which row announces as what), not a feature flag to flip for show.
 # No `links` either, so `ctx.open_url` is a deliberate no-op until a link in a transcript is a
 # requirement with a browser policy attached -- silent-and-honest beats silently-wrong.
+
+[dev-dependencies]
+# The tree tests read real throwaway folders, and a directory that removes itself on drop is the
+# difference between a self-contained test and one that cleans up after itself by luck. Same reason
+# baudet-core already carries it.
+tempfile = { workspace = true }
