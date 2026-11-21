@@ -25,6 +25,21 @@ fn a_screenshot_path_is_honoured_in_both_spellings() {
 }
 
 #[test]
+fn the_panel_flags_are_off_unless_asked_and_set_when_asked() {
+    // Two independent booleans, each only ever true from its own flag. Worth pinning because the
+    // headless picture is the only place they become observable, and a flag that silently failed to
+    // set would draw an empty panel that looks like a working one.
+    let plain = parse(&["b"]).unwrap();
+    assert!(!plain.settings && !plain.fetch_models);
+    let open = parse(&["b", "--settings"]).unwrap();
+    assert!(open.settings && !open.fetch_models);
+    let fetched = parse(&["b", "--fetch-models"]).unwrap();
+    assert!(!fetched.settings && fetched.fetch_models);
+    let both = parse(&["b", "--settings", "--fetch-models"]).unwrap();
+    assert!(both.settings && both.fetch_models);
+}
+
+#[test]
 fn a_screenshot_without_a_file_is_an_error_not_a_window() {
     assert!(parse(&["b", "--screenshot"]).is_err());
 }

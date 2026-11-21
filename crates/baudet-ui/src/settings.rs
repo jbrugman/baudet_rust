@@ -84,6 +84,10 @@ pub struct SettingsView {
     /// Whether the model ids were fetched since the endpoint last changed, so a stale picker cannot
     /// offer a model the current endpoint does not have.
     fetched_for: Option<String>,
+    /// Whether the endpoint that was asked has answered at all — a listing or a named failure. Unlike
+    /// `fetched_for` this is not about which models are current: it is the record that a request is
+    /// no longer in flight, which is what a waiter needs and what a failure cannot otherwise supply.
+    listing_answered: bool,
     /// The password widget's transient buffer, kept so the field's show/hide survives a repaint.
     reveal_key: bool,
 }
@@ -181,6 +185,8 @@ impl SettingsView {
         self.max_output_tokens = settings.max_output_tokens.map(|n| n.to_string()).unwrap_or_default();
         self.api_key = settings.api_key.clone().unwrap_or_default();
         self.api_key_env_var = settings.api_key_env_var.clone();
+        self.fetched_for = None;
+        self.listing_answered = false;
     }
 
     /// What a save would persist right now, parsing the text fields. Returns the reason instead when
@@ -213,6 +219,7 @@ impl SettingsView {
         match event {
             SettingsEvent::Listing(result, endpoint) => {
                 self.fetching = false;
+                self.listing_answered = true;
                 match result {
                     Ok(models) => {
                         self.models = models;
@@ -242,6 +249,40 @@ impl SettingsView {
                 };
             }
         }
+    }
+}
+
+impl SettingsView {
+    /// Point the endpoint field at `address`, clearing the picker's claim to be current: models
+    /// belong to the endpoint that listed them, which is the same rule the field enforces when a
+    /// person retypes it. This is that edit, made by a flag instead of a keystroke.
+    pub fn set_endpoint(&mut self, address: &str) {
+        self.base_url = address.trim().to_string();
+        self.fetched_for = None;
+        self.listing_answered = false;
+    }
+
+    /// Ask for the models the endpoint offers, exactly as the Fetch button does: the command carries
+    /// the endpoint and the key the field holds, and the in-flight status line is set here rather
+    /// than in the paint helper so a scripted call and a click leave identical state.
+    pub fn request_fetch(&mut self, tx: &std::sync::mpsc::Sender<SettingsCommand>) {
+        if self.fetching {
+            return;
+        }
+        self.fetching = true;
+        self.status = format!("asking {}…", self.base_url.trim());
+        // The key is resolved the way the panel's own label promises ("empty = read from
+        // environment"): the typed value wins, otherwise the named variable answers. `draft()` is the
+        // panel's existing verdict on its fields, so a token field that means nothing stops the
+        // request rather than firing one the panel would not save.
+        let key = self.draft().ok().and_then(|draft| draft.resolved_key());
+        let _ = tx.send(SettingsCommand::Fetch { endpoint: self.base_url.trim().to_string(), api_key: key });
+    }
+
+    /// Whether the endpoint that was asked has answered, successfully or not. A screenshot run waits
+    /// on this so a failure it caused is still in the picture it takes.
+    pub fn listing_answered(&self) -> bool {
+        self.listing_answered
     }
 }
 
@@ -423,7 +464,7 @@ fn describe_path(path: &std::path::Path) -> String {
 /// because it is the reason these are unit tests in the file rather than integration tests beside it.
 #[cfg(test)]
 mod tests {
-    use super::{Reasoning, SettingsEvent, SettingsView};
+    use super::{Reasoning, SettingsCommand, SettingsEvent, SettingsView};
     use baudet_settings::{ListingError, Model};
     use std::path::PathBuf;
 
@@ -451,6 +492,91 @@ mod tests {
         // here but indistinguishable from a cleared field after a reload.
         assert_eq!(settings.model, None);
         assert_eq!(settings.api_key, None);
+    }
+
+    /// End one request the way the app does — with the worker's report — because `request_fetch`
+    /// refuses to fire a second while one is in flight. A test that skipped this would be testing a
+    /// state the panel can never be in.
+    fn answer_fetch(view: &mut SettingsView, rx: &std::sync::mpsc::Receiver<SettingsCommand>) {
+        let SettingsCommand::Fetch { endpoint, .. } = rx.recv().unwrap() else {
+            panic!("expected a fetch command");
+        };
+        view.apply_event(SettingsEvent::Listing(Ok(Vec::new()), endpoint));
+    }
+
+    #[test]
+    fn a_fetch_uses_the_credential_the_panel_promises_not_only_a_typed_one() {
+        // The measured gas: an empty key field plus a set variable name is the documented way to
+        // reach a gateway that wants a key, yet the request went out bare and the gateway answered
+        // 401. The panel's own label ("empty = read from environment") is the behaviour under test.
+        let name = "BAUDET_FETCH_KEY_TEST_ENV";
+        // Safety: same-thread test; no other test reads or writes this name.
+        unsafe { std::env::set_var(name, "a-fake-value-for-tests-only") };
+        let mut panel = view();
+        panel.api_key_env_var = name.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        panel.request_fetch(&tx);
+        let fetched = match rx.try_recv() {
+            Ok(SettingsCommand::Fetch { endpoint, api_key }) => {
+                assert_eq!(endpoint, "http://127.0.0.1:8000/v1");
+                api_key
+            }
+            other => panic!("expected a fetch command, got {:?}", other.is_ok()),
+        };
+        assert_eq!(fetched.as_deref(), Some("a-fake-value-for-tests-only"));
+
+        // The typed value wins over the environment, exactly as `resolved_key` defines it, so a
+        // person overriding a stale variable is not silently ignored.
+        let mut typed = panel;
+        typed.api_key = "typed-wins".to_string();
+        answer_fetch(&mut typed, &rx);
+        typed.request_fetch(&tx);
+        let SettingsCommand::Fetch { api_key, .. } = rx.try_recv().unwrap() else {
+            panic!("expected a fetch command");
+        };
+        assert_eq!(api_key.as_deref(), Some("typed-wins"));
+
+        // Nothing answers: no typed key and a name that points nowhere. Then the fetch is a bare
+        // request, which is right for a server that asks for nothing — absence stays an answer.
+        unsafe { std::env::remove_var(name) };
+        let mut bare = view();
+        bare.api_key_env_var = name.to_string();
+        bare.request_fetch(&tx);
+        answer_fetch(&mut bare, &rx);
+        bare.request_fetch(&tx);
+        let SettingsCommand::Fetch { api_key, .. } = rx.try_recv().unwrap() else {
+            panic!("expected a fetch command");
+        };
+        assert_eq!(api_key, None, "an unresolved key must not become an empty string in a header");
+    }
+
+    #[test]
+    fn a_failed_listing_counts_as_an_answer_but_not_as_a_current_list() {
+        // The gas this guards: the waiter for a screenshot asked whether a listing had landed and got
+        // the question "is the list current", which a failure can never answer. So it waited out its
+        // own ceiling and drew the status line of a fetch it had asked for — the one thing the run
+        // exists to capture.
+        let mut view = view();
+        assert!(!view.listing_answered(), "nothing asked yet, nothing answered");
+        view.request_fetch(&std::sync::mpsc::channel().0);
+        assert!(view.fetching, "a request is in flight");
+        view.apply_event(SettingsEvent::Listing(
+            Err(ListingError::NotAListing {
+                endpoint: "http://127.0.0.1:8000/v1/models".to_string(),
+                status: 401,
+                detail: "API key required".to_string(),
+            }),
+            "http://127.0.0.1:8000/v1".to_string(),
+        ));
+        assert!(view.listing_answered(), "a named failure is an answer");
+        assert!(!view.fetching);
+        assert!(view.status.contains("401"), "the failure is what the panel shows: {}", view.status);
+        // And it stays true to the other rule: no listing means no current models for this endpoint.
+        assert_eq!(view.fetched_for, None, "a failure must not claim the picker is current");
+
+        // A new endpoint is a new question, so the answer to the old one cannot settle the new wait.
+        view.set_endpoint("http://192.168.1.2:8000/v1");
+        assert!(!view.listing_answered());
     }
 
     #[test]

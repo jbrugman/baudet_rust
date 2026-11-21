@@ -58,6 +58,10 @@ pub struct TranscriptApp {
     frames: u32,
     /// Whether the picture has been written, so the run closes once instead of repeatedly.
     shot_done: bool,
+    /// Whether to fire a model fetch on the first paint (set by `--fetch-models`). It is a flag, not
+    /// an immediate send, because the fetch is asynchronous and a screenshot must be able to wait
+    /// for its answer.
+    fetch_models_on_start: bool,
     /// The left panel: the folder under inspection and its tree.
     workspace: Workspace,
     /// The right panel: the paths git reports for that folder.
@@ -106,6 +110,7 @@ impl TranscriptApp {
             shot: None,
             frames: 0,
             shot_done: false,
+            fetch_models_on_start: false,
             workspace: Workspace::default(),
             changes: Changes::default(),
             settings_open: false,
@@ -135,6 +140,21 @@ impl TranscriptApp {
     /// reaches.
     pub fn with_settings_open(mut self) -> TranscriptApp {
         self.settings_open = true;
+        self
+    }
+
+    /// Ask the endpoint for its models on the first paint, through the panel's own request path.
+    /// Paired with a screenshot it makes the run capture a real listing (or a real failure) rather
+    /// than an empty picker; for a person it is the same command the Fetch button sends.
+    pub fn with_fetch_models(mut self) -> TranscriptApp {
+        self.fetch_models_on_start = true;
+        self
+    }
+
+    /// Point the panel's endpoint field at `address`, the same way `with_workspace` points the
+    /// folder field: one assignment the field would make itself, so the fetch that follows uses it.
+    pub fn with_endpoint(mut self, address: &str) -> TranscriptApp {
+        self.settings.set_endpoint(address);
         self
     }
 
@@ -202,6 +222,7 @@ impl TranscriptApp {
         // are not dropped: a fetch or save result is a single fact the person is waiting on, and
         // there is at most one in flight.
         while let Ok(event) = self.settings_events.try_recv() {
+
             self.settings.apply_event(event);
         }
 
@@ -315,7 +336,15 @@ impl TranscriptApp {
         // One frame after `paint` has folded a snapshot where the turn is no longer live and the
         // transcript is not empty, the rows on screen are the settled transcript. `busy` only ever
         // falls in `paint`, so this cannot be satisfied by a stale frame.
-        let settled = !self.busy && !self.rows.is_empty();
+        // A turn is settled once it is no longer live and something rendered. When a model fetch
+        // was asked for, the picture also waits until that listing has landed — success or a named
+        // failure — so a fetch the run requested cannot be cut out of its own picture. SHOT_FRAMES
+        // still caps the wait, so a server that never answers fails by writing the window as-is.
+        let listing_settled = !self.fetch_models_on_start || self.settings.listing_answered();
+        let settled = !self.busy && !self.rows.is_empty() && listing_settled;
+        if self.frames % 120 == 0 {
+            let _ = (&self.settings, self.frames);
+        }
         if settled || self.frames >= Self::SHOT_FRAMES {
             if !settled {
                 eprintln!(
@@ -356,6 +385,9 @@ impl eframe::App for TranscriptApp {
             // honest cold start, which is true but shows nothing of the app.
             if self.frames == 0 {
                 let _ = self.intents.send(Intent::Submit("Show me how the Rust rewrite renders a turn.".to_string()));
+                if self.fetch_models_on_start {
+                    self.settings.request_fetch(&self.settings_tx);
+                }
             }
             self.frames += 1;
             self.take_screenshot(&ctx);
@@ -617,6 +649,14 @@ pub struct Startup {
     /// Open the settings panel on startup. Same reason as `workspace`: a headless `--screenshot` gets
     /// no keystrokes, so the only way to draw a panel that starts closed is to start it open.
     pub settings: bool,
+    /// Ask the endpoint for its models on startup, as if Fetch were clicked. A headless run has no
+    /// click, so this is the only way to capture the *result* of a fetch rather than its empty panel.
+    pub fetch_models: bool,
+    /// The endpoint to point the panel at on startup, through the same path as a path typed into the
+    /// field — it replaces the stored base URL for this run. It exists for the same reason as
+    /// `workspace`: a headless run cannot type an address, so without it `--fetch-models` could only
+    /// ever probe the default, which is usually not where a server actually is.
+    pub endpoint: Option<std::path::PathBuf>,
 }
 
 impl Startup {
@@ -654,6 +694,15 @@ impl Startup {
                 out.workspace = Some(std::path::PathBuf::from(rest));
             } else if arg == "--settings" {
                 out.settings = true;
+            } else if arg == "--fetch-models" {
+                out.fetch_models = true;
+            } else if arg == "--endpoint" {
+                match args.next() {
+                    Some(value) => out.endpoint = Some(std::path::PathBuf::from(value)),
+                    None => return Err(format!("{USAGE}\n--endpoint needs an address")),
+                }
+            } else if let Some(rest) = arg.strip_prefix("--endpoint=") {
+                out.endpoint = Some(std::path::PathBuf::from(rest));
             } else {
                 return Err(format!("{USAGE}\nunknown option: {arg}"));
             }
@@ -662,7 +711,8 @@ impl Startup {
     }
 }
 
-const USAGE: &str = "usage: baudet-ui [--screenshot=<file.png>] [--workspace=<folder>] [--settings]";
+const USAGE: &str =
+    "usage: baudet-ui [--screenshot=<file.png>] [--workspace=<folder>] [--settings] [--fetch-models] [--endpoint=<address>]";
 const HELP: &str = "
 Baudet - a local-first coding assistant
 
@@ -672,6 +722,10 @@ usage: baudet-ui [option]
   --screenshot=<file>   without taking focus from what you are doing
   --workspace <folder>  open <folder> in the workspace panel on startup
   --settings            open the settings panel on startup
+  --fetch-models        on startup, ask the endpoint for its models (with --settings,
+                        the picture waits for the listing so it cannot miss the fetch)
+  --endpoint <address>  point the panel at <address> on startup, instead of the stored endpoint
+  --endpoint=<address>  (needed with --fetch-models whenever the server is not the default)
   -h, --help            show this text";
 
 /// Start the window with `startup`'s arguments.
@@ -712,6 +766,8 @@ pub fn run_from(startup: Startup) -> eframe::Result {
     let screenshot = startup.screenshot.clone();
     let workspace = startup.workspace.clone();
     let settings = startup.settings;
+    let fetch_models = startup.fetch_models;
+    let endpoint = startup.endpoint.clone();
     eframe::run_native(
         "Baudet",
         options,
@@ -723,6 +779,12 @@ pub fn run_from(startup: Startup) -> eframe::Result {
             }
             if settings {
                 app = app.with_settings_open();
+            }
+            if let Some(address) = &endpoint {
+                app = app.with_endpoint(&address.to_string_lossy());
+            }
+            if fetch_models {
+                app = app.with_fetch_models();
             }
             if let Some(path) = &screenshot {
                 app = app.with_screenshot(path);
