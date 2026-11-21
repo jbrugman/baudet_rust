@@ -72,6 +72,10 @@ pub struct TranscriptApp {
     /// an immediate send, because the fetch is asynchronous and a screenshot must be able to wait
     /// for its answer.
     fetch_models_on_start: bool,
+    /// The question a screenshot run sends instead of the scripted demo (set by `--live --send`). It
+    /// is a flag held until the first paint for the same reason as `fetch_models_on_start`: the turn
+    /// is asynchronous and the picture must be able to wait for it to settle. `None` keeps the demo.
+    shot_send: Option<String>,
     /// The left panel: the folder under inspection and its tree.
     workspace: Workspace,
     /// The right panel: the paths git reports for that folder.
@@ -124,6 +128,7 @@ impl TranscriptApp {
             frames: 0,
             shot_done: false,
             fetch_models_on_start: false,
+            shot_send: None,
             workspace: Workspace::default(),
             changes: Changes::default(),
             settings_open: false,
@@ -184,6 +189,14 @@ impl TranscriptApp {
     /// than an empty picker; for a person it is the same command the Fetch button sends.
     pub fn with_fetch_models(mut self) -> TranscriptApp {
         self.fetch_models_on_start = true;
+        self
+    }
+
+    /// Ask `question` of the live server on the first paint, as if it were typed into the composer.
+    /// Only reached from a `--live` window: the scripted window's demo answer is the picture the
+    /// screenshots are made of and must not be replaced by a turn nobody sent to a server.
+    pub fn with_shot_send(mut self, question: impl Into<String>) -> TranscriptApp {
+        self.shot_send = Some(question.into());
         self
     }
 
@@ -363,14 +376,27 @@ impl TranscriptApp {
     /// that is still arranging itself, which reads as a broken app rather than as an early frame.
     /// Frames a screenshot run may wait for a settled transcript, not a fixed count to wait out.
     ///
-    /// The picture is taken once the demo turn has drained (see `take_screenshot`), so this is only
-    /// a ceiling for the case where the stream never closes. It is generous because a screenshot is
+    /// The picture is taken once a turn has drained (see `take_screenshot`), so this is only a
+    /// ceiling for the case where the stream never closes. It is generous because a screenshot is
     /// never on a person's critical path. On the timeout the window is still written, as-is, with
     /// the unfinished turn in it, and the miss is named on stderr: an honest picture of a turn that
     /// is still running is worth more to whoever asked for the picture than no picture at all, and
     /// the reason the ceiling exists at all is to bound a stream that never closes rather than a
     /// model that answers slowly.
-    const SHOT_FRAMES: u32 = 600;
+    ///
+    /// The number is measured (2026-11-21, a local gemma over `/chat/completions`). A shot run
+    /// repaints at ~111 frames/s, so 600 frames was a ceiling of ~5.4 s. The same block asks gemma
+    /// and drained a long answer in 3420 frames / 30.7 s, and a raw stream of an unbounded answer
+    /// took 24.4 s (1180 deltas, first at 0.73 s) -- so 600 cut off every answer longer than a
+    /// sentence and wrote a half-finished window while the stream was perfectly healthy.
+    ///
+    /// The ceiling cannot be the turn's watchdog, because the watchdog belongs to the transport:
+    /// [`baudet_backend::transport::READ_TIMEOUT`] is 30 minutes per read, matching the reference
+    /// app, and a stream that trickles is by design allowed to run. So this only has to outlast an
+    /// answer no read timeout will end. 30 minutes of a streaming run is ~200 000 frames; 20 000
+    /// outlasts a slow answer by a wide margin and still closes a window that froze without waiting
+    /// on the transport.
+    const SHOT_FRAMES: u32 = 20_000;
 
     /// Ask for a picture once enough frames have been drawn, write it, then close.
     ///
@@ -431,7 +457,13 @@ impl eframe::App for TranscriptApp {
             // `pump` the turn-flow tests already protect. Without this the picture would be an
             // honest cold start, which is true but shows nothing of the app.
             if self.frames == 0 {
-                let _ = self.intents.send(Intent::Submit("Show me how the Rust rewrite renders a turn.".to_string()));
+                // A live --send window asks its own question; every other picture keeps the scripted
+                // demo, which is the fixed text the reference screenshots are compared against.
+                let question = self
+                    .shot_send
+                    .clone()
+                    .unwrap_or_else(|| "Show me how the Rust rewrite renders a turn.".to_string());
+                let _ = self.intents.send(Intent::Submit(question));
                 if self.fetch_models_on_start {
                     self.settings.request_fetch(&self.settings_tx);
                 }
@@ -799,6 +831,11 @@ pub struct Startup {
     /// network answers with whatever that machine happens to be running. Without a stored protocol
     /// there is nothing to send to, so the flag alone does not invent an endpoint.
     pub live: bool,
+    /// The question a `--screenshot` run sends on its own. A headless window receives no keystrokes,
+    /// so without a typed question it can only show its scripted demo. `Some` only means something
+    /// beside `live`: it puts a real turn on the wire so the picture can capture a server answering,
+    /// which is the point of `--live`. It reuses the same `Intent::Submit` a keystroke uses.
+    pub send: Option<String>,
 }
 
 impl Startup {
@@ -840,6 +877,13 @@ impl Startup {
                 out.fetch_models = true;
             } else if arg == "--live" {
                 out.live = true;
+            } else if arg == "--send" {
+                match args.next() {
+                    Some(text) => out.send = Some(text),
+                    None => return Err(format!("{USAGE}\n--send needs a question")),
+                }
+            } else if let Some(rest) = arg.strip_prefix("--send=") {
+                out.send = Some(rest.to_string());
             } else if arg == "--endpoint" {
                 match args.next() {
                     Some(value) => out.endpoint = Some(std::path::PathBuf::from(value)),
@@ -856,7 +900,7 @@ impl Startup {
 }
 
 const USAGE: &str =
-    "usage: baudet-ui [--screenshot=<file.png>] [--workspace=<folder>] [--settings] [--fetch-models] [--endpoint=<address>] [--live]";
+    "usage: baudet-ui [--screenshot=<file.png>] [--workspace=<folder>] [--settings] [--fetch-models] [--endpoint=<address>] [--live] [--send=<question>]";
 const HELP: &str = "
 Baudet - a local-first coding assistant
 
@@ -872,6 +916,9 @@ usage: baudet-ui [option]
   --endpoint=<address>  (needed with --fetch-models whenever the server is not the default)
   --live                send turns to the stored endpoint instead of the scripted player;
                         it needs a protocol in the settings file, which Scan endpoint writes
+  --send <question>     on startup, ask <question> of the live server (with --screenshot, the
+                        picture waits for that turn to settle); it needs --live
+  --send=<question>     (a window with --live but no --send shows its scripted demo)
   -h, --help            show this text";
 
 /// Start the window with `startup`'s arguments.
@@ -915,6 +962,7 @@ pub fn run_from(startup: Startup) -> eframe::Result {
     let fetch_models = startup.fetch_models;
     let endpoint = startup.endpoint.clone();
     let live = startup.live;
+    let shot_send = startup.send.clone();
     // Chosen here rather than inside the closure, because the answer comes from the settings file and
     // nothing in the creation context, and because `startup` is moved into that closure below.
     let (backend, fell_back) = chosen_backend(&startup);
@@ -954,6 +1002,14 @@ pub fn run_from(startup: Startup) -> eframe::Result {
             }
             if let Some(path) = &screenshot {
                 app = app.with_screenshot(path);
+                // A live window drawing a picture asks the server its own question, so the shot can
+                // capture a real turn settling. Without --live the demo stands; without a question
+                // there is nothing to ask, and inventing one is the endpoint's owner's decision.
+                if live {
+                    if let Some(question) = &shot_send {
+                        app = app.with_shot_send(question.clone());
+                    }
+                }
             }
             Ok(Box::new(app))
         }),

@@ -50,6 +50,17 @@ fn sending_turns_to_a_server_is_opt_in() {
 }
 
 #[test]
+fn a_question_to_send_is_opt_in_and_needs_a_value() {
+    // Only --send puts a real question on the wire; the default is None so a scripted window keeps
+    // its fixed demo. A --send with no question is refused rather than guessed -- a question invented
+    // by a flag would make a screenshot answer a turn nobody asked.
+    assert_eq!(parse(&["b", "--live"]).unwrap().send, None);
+    assert_eq!(parse(&["b", "--send=why"]).unwrap().send.as_deref(), Some("why"));
+    assert_eq!(parse(&["b", "--send", "why"]).unwrap().send.as_deref(), Some("why"));
+    assert!(parse(&["b", "--send"]).is_err(), "a --send without a question is an error, not a window");
+}
+
+#[test]
 fn a_screenshot_without_a_file_is_an_error_not_a_window() {
     assert!(parse(&["b", "--screenshot"]).is_err());
 }
