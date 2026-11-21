@@ -12,6 +12,7 @@
 use baudet_core::{CoreError, ThreadEvent};
 use tokio::sync::mpsc;
 
+pub mod openai;
 pub mod scripted;
 pub mod sse;
 
