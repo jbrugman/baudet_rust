@@ -39,6 +39,37 @@ impl Model {
     pub fn display(&self) -> &str {
         self.label.as_deref().filter(|l| !l.trim().is_empty()).unwrap_or(&self.id)
     }
+
+    /// The window in the fewest characters that still read as a window: `256k` for 262144, `8k`
+    /// for 8192, `1m` for 1048576, `4095` for a count that is not a whole power of two.
+    ///
+    /// Rounding to the nearest power of two rather than dividing by a thousand twice, because the
+    /// numbers servers publish *are* powers of two (measured on the gateway: 262144, 128000,
+    /// 1048576, 8194) and `262k` makes a person wonder what the 2 is doing there. The nearest
+    /// rather than the floor, so 8194 reads as `8k` instead of as a raw count.
+    ///
+    /// `None` yields `None` and not "unknown": a server that says nothing about its window is a
+    /// server whose window is nobody's claim, and an invented `128k` beside a name is the kind of
+    /// confident number a person then believes.
+    pub fn window_label(&self) -> Option<String> {
+        let tokens = self.context_window?;
+        if tokens < 1024 {
+            return Some(tokens.to_string());
+        }
+        // The power of two nearest to `tokens`, found by halving from the first power above it, so
+        // no float and no log turns up in a crate whose job is to parse a listing.
+        let mut power: u64 = 1024;
+        while power < tokens as u64 {
+            power *= 2;
+        }
+        let lower = power / 2;
+        let nearest = if lower >= 1024 && (tokens as u64) - lower < power - (tokens as u64) { lower } else { power };
+        let kibibytes = nearest / 1024;
+        if kibibytes >= 1024 && kibibytes % 1024 == 0 {
+            return Some(format!("{}m", kibibytes / 1024));
+        }
+        Some(format!("{kibibytes}k"))
+    }
 }
 
 /// Why a listing failed, in words a panel can show without guessing.
@@ -353,6 +384,28 @@ mod tests {
         let models = parse_listing(bare).unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].context_window, Some(4096), "the alias must be read too");
+    }
+
+    /// The window is only worth showing once something can read it, and what it may say is a
+    /// contract of its own: the numbers below are the ones the gateway publishes, and `None` is a
+    /// server that published nothing.
+    #[test]
+    fn a_window_is_worded_the_way_a_picker_shows_it() {
+        let windowed = |tokens| Model { id: "m".to_string(), label: None, context_window: tokens };
+        // Measured on the gateway: Qwen 262144, GLM 1048576, the embedder 8194.
+        assert_eq!(windowed(Some(262144)).window_label().as_deref(), Some("256k"));
+        assert_eq!(windowed(Some(128000)).window_label().as_deref(), Some("128k"));
+        assert_eq!(windowed(Some(1048576)).window_label().as_deref(), Some("1m"));
+        assert_eq!(windowed(Some(8194)).window_label().as_deref(), Some("8k"));
+        // The nearest power of two, so a hair under one still reads as that one: 4095 really is a
+        // 4k window wearing a rounding seam. The raw count is reserved for what no power of two
+        // covers at all, which is everything a server reports below one kibibyte.
+        assert_eq!(windowed(Some(4095)).window_label().as_deref(), Some("4k"));
+        assert_eq!(windowed(Some(2048)).window_label().as_deref(), Some("2k"));
+        assert_eq!(windowed(Some(1023)).window_label().as_deref(), Some("1023"));
+        assert_eq!(windowed(Some(1024)).window_label().as_deref(), Some("1k"));
+        // Nothing said is nothing shown: no word, no invented ceiling.
+        assert_eq!(windowed(None).window_label(), None);
     }
 
     #[test]

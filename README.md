@@ -109,15 +109,28 @@ is een UI-gedragswijziging die een eigen besluit en een eigen meting verdient.
 
 ### Klussen die nog open staan
 
-1. **Het modelvenster wordt gelezen en nergens gebruikt.** Gemeten op de gateway: elk model noemt
-   daar `max_model_len` (Qwen 262144, DeepSeek 128000) en `Entry` leest die spelling — naast
-   `context_length` en `max_context_length` — al, met een test die de alias afdwingt. Wat wél ontbreekt,
-   is de consument: `Model::context_window` staat in de plukker maar wordt door geen enkele rij of
-   label gelezen, dus de persoon ziet nergens hoe groot een venster is. Een getal kopiëren naar de
-   eigen instelling is een ander gesprek en is bewust niet gedaan: de server mag zelf beslissen wat
-   hij aanvaardt, en `context_length_exceeded` bereikt ons nu al als fout van de server zelf.
-2. **Echte beurt tonen** — de app-toepassing van de transport: een live-venster dat een server
+1. **Echte beurt tonen** — de app-toepassing van de transport: een live-venster dat een server
    kiest, scant, en antwoordt zonder dat er iets aan de code gesleuteld hoeft te worden.
+
+### Het modelvenster staat in de plukker
+
+`Model::context_window` werd al gelezen door de parser en door verder niemand. De consumer is er nu en is bewust
+klein: `row_for` in `baudet-ui/src/settings.rs` plakt het venster achter de naam, via
+`Model::window_label`, en de combo box blijft de **id** dragen — een suffix bereikt het
+instellingenbestand dus niet, wat door een eigen test wordt afgedwongen.
+
+De wording is de moeite waard, want de getallen die servers publiceren zijn machten van twee.
+Gemeten op de gateway, die voor elk model `max_model_len` noemt: 262144 wordt `256k`, 128000
+wordt `128k`, 1048576 wordt `1m`, 8194 wordt `8k`; `window_label` rondt naar de dichtstbijzijnde
+macht van twee, zodat 8194 niet als een rauwe telling leest. Een model zonder vensterveld —
+gemeten: LM Studio, dat in het geheel geen lengteveld teruggeeft — krijgt zijn kale naam, dus de
+plukker krijgt geen lege kolom en verzint geen plafond.
+
+Twee dingen zijn bewust níet gedaan. Het venster wordt niet overgenomen als eigen instelling: de
+server mag zelf beslissen wat hij aanvaardt, en `context_length_exceeded` bereikt ons nu al als
+fout van de server zelf. En de keus van het model wordt op id onthouden in plaats van op het label,
+want een rij die "Qwen … · 256k" leest matcht een kale id niet — anders zou de plukker "choose…"
+tonen boven een keuze die gewoon gezet is.
 
 ## Bouten
 

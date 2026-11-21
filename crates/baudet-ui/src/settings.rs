@@ -462,27 +462,53 @@ fn model_row(ui: &mut Ui, view: &mut SettingsView) {
         return;
     }
     // A combo box over the *fetched* ids, so the panel cannot name a model the endpoint lacks. The
-    // picker shows display() (a friendly name when the server gave one) but stores the id.
+    // row is what a person reads and the id is what gets stored: `row_for` adds the window to the
+    // name, and the choice below is carried as the id, so a suffix can never reach the settings file.
+    let row_labels: Vec<String> = view.models.iter().map(row_for).collect();
     let current = view.model.clone().unwrap_or_default();
-    let mut labels: Vec<String> = view.models.iter().map(|m| m.display().to_string()).collect();
+    let mut labels: Vec<String> = row_labels.clone();
     // Offer "keep current" when a saved model is not in the list (an offline endpoint), so opening
     // the panel never silently drops a working choice.
     if let Some(saved) = view.model.as_ref().filter(|s| !view.models.iter().any(|m| &m.id == *s)) {
         labels.insert(0, format!("{saved}  (not listed)"));
     }
+    // The choice is carried as the id and only *drawn* as a row. Matching the stored id against the
+    // label instead would find nothing once a row reads "Qwen … · 256k", and the picker would open
+    // as "choose…" above a model that is still selected.
     let mut chosen = current.clone();
-    egui::ComboBox::from_id_salt("settings-model")
-        .selected_text(labels.iter().find(|l| *l == &current).cloned().unwrap_or_else(|| "choose…".into()))
-        .show_ui(ui, |ui| {
-            for model in view.models.iter() {
-                ui.selectable_value(&mut chosen, model.display().to_string(), model.display());
-            }
-        });
-    // Map the display label back to the id; the "(not listed)" entry leaves the choice untouched.
-    if chosen != current {
-        if let Some(model) = view.models.iter().find(|m| m.display() == chosen) {
-            view.model = Some(model.id.clone());
+    // The "(not listed)" entry is the one label equal to a bare id, so it is found by this lookup
+    // and every listed model by its row: the field shows exactly what its row shows.
+    let selected = view
+        .models
+        .iter()
+        .find(|m| m.id == current)
+        .map(row_for)
+        .or_else(|| labels.iter().find(|l| *l == &current).cloned())
+        .unwrap_or_else(|| "choose…".to_string());
+    egui::ComboBox::from_id_salt("settings-model").selected_text(selected).show_ui(ui, |ui| {
+        for (model, label) in view.models.iter().zip(row_labels.iter()) {
+            ui.selectable_value(&mut chosen, model.id.clone(), label.as_str());
         }
+    });
+    // Only a listed id is stored; "choose…" and the "(not listed)" entry leave the choice untouched.
+    if chosen != current && view.models.iter().any(|m| m.id == chosen) {
+        view.model = Some(chosen);
+    }
+}
+
+/// A picker row: the name the server prefers, and its window when the server said one.
+///
+/// This is the consumer `Model::context_window` was waiting for. The gateway publishes every
+/// model's ceiling (measured: Qwen 262144, DeepSeek 128000, GLM 1048576) and while there was no
+/// consumer, not one of those numbers reached the screen.
+///
+/// A model that says nothing gets its bare name, so the picker does not grow an "unknown" column:
+/// a server without a window field — measured: LM Studio, which returns no length field at all —
+/// lists models just as well as one that has it.
+fn row_for(model: &Model) -> String {
+    match model.window_label() {
+        Some(window) => format!("{} · {}", model.display(), window),
+        None => model.display().to_string(),
     }
 }
 
@@ -716,6 +742,23 @@ mod tests {
         assert_eq!(settings.base_url, "http://127.0.0.1:8000/v1");
     }
 
+    /// Draw a row, store the choice, save it: the suffix belongs to the screen and must not
+    /// survive into the file. What goes out is the id the row was built from, so a picker that
+    /// reads "… · 256k" still writes the name the endpoint actually accepts.
+    #[test]
+    fn a_row_with_a_window_still_saves_the_bare_id() {
+        let mut panel = view();
+        panel.models =
+            vec![Model { id: "Qwen3.8-Flash-Next-oQ4e-mtp".to_string(), label: None, context_window: Some(262144) }];
+        panel.model = Some("Qwen3.8-Flash-Next-oQ4e-mtp".to_string());
+        // The row a person reads, and the draft a save would write, from the same state.
+        assert_eq!(super::row_for(&panel.models[0]), "Qwen3.8-Flash-Next-oQ4e-mtp · 256k");
+        let settings = panel.draft().unwrap();
+        // Equality with the id is the whole claim; the row's own suffix must be absent from it.
+        assert_eq!(settings.model.as_deref(), Some("Qwen3.8-Flash-Next-oQ4e-mtp"));
+        assert!(!settings.model.as_deref().unwrap().contains(" · "), "a stored model id carries no row suffix");
+    }
+
     #[test]
     fn a_listing_only_counts_when_it_answers_the_endpoint_still_on_screen() {
         let mut panel = view();
@@ -770,5 +813,26 @@ mod tests {
         recovered.path = Some(PathBuf::from("/tmp/baudet-tests/settings.json"));
         recovered.apply_event(SettingsEvent::Saved(Ok(())));
         assert!(recovered.status.contains("saved to"), "{}", recovered.status);
+    }
+
+    /// The row a person reads. `Model::context_window` was parsed and read by nobody, so the
+    /// gateway's published ceilings reached no screen; `row_for` is that consumer, and this test is
+    /// the reason it cannot silently become unread again.
+    #[test]
+    fn a_fetched_window_shows_beside_the_name_it_belongs_to() {
+        let windowed = |id: &str, tokens| Model { id: id.to_string(), label: None, context_window: tokens };
+        // Measured on the gateway, in the gateway's own numbers.
+        assert_eq!(
+            super::row_for(&windowed("Qwen3.8-Flash-Next-oQ4e-mtp", Some(262144))),
+            "Qwen3.8-Flash-Next-oQ4e-mtp · 256k"
+        );
+        // A server that publishes no window — measured: LM Studio — gets the bare name, so the
+        // picker shows no empty column and invents no ceiling.
+        assert_eq!(super::row_for(&windowed("google/gemma-4-26b-a4b", None)), "google/gemma-4-26b-a4b");
+        // The friendly name wins over the id, as it does without a window: the suffix is added to
+        // what display() already chose, not to the id.
+        let named =
+            Model { id: "qwen-turbo".to_string(), label: Some("Turbo".to_string()), context_window: Some(131072) };
+        assert_eq!(super::row_for(&named), "Turbo · 128k");
     }
 }
