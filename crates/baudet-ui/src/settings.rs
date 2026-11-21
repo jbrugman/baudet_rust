@@ -302,11 +302,20 @@ pub fn panel(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<
         .id(egui::Id::new("settings-panel"))
         .open(open)
         .collapsible(false)
-        .default_size([320.0, 300.0])
+        // Zonder anker kiest egui een positie, en die zette het paneel hier de helft boven de
+        // venstertop: precies de statusregel ("N models from ...") en het transcript eraf.
+        .default_pos([96.0, 64.0])
+        .default_size([360.0, 340.0])
         .resizable(true)
         .frame(egui::Frame::side_top_panel(ui.style()))
         .show(ui, |ui| {
             ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                // De status bovenaan: hij staat of naast de Fetch-knop die hem veroorzaakt, of onder
+                // aan het formulier. Hier is hij altijd het eerste wat na een listing te lezen is.
+                if !view.status.is_empty() {
+                    ui.label(dim(&view.status));
+                    ui.separator();
+                }
                 endpoint_row(ui, view, &mut commands);
                 ui.separator();
                 model_row(ui, view);
