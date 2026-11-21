@@ -118,6 +118,10 @@ impl TranscriptApp {
             })
             .event(start(T1, item_tool(T1)))
             .event(start(T1, item_plan(T1)))
+            // A plan is a row like any other, so it closes the same way: the turn does not end
+            // while a row still claims to work. Leaving it open would paint a marker that never
+            // stops under a header that already says idle.
+            .event(ThreadEvent::ItemCompleted { thread_id: TH.into(), turn_id: T1.into(), item: finished_plan(T1) })
             .event(ThreadEvent::TurnCompleted {
                 thread_id: TH.into(),
                 turn_id: T1.into(),
@@ -691,6 +695,18 @@ fn item_tool(turn: &str) -> Item {
         ok: true,
         output: "24443 lines of front end, which is why the web route stayed on the table.".into(),
     })
+}
+
+/// The same plan, closed. A streamed row keeps its own status until its `ItemCompleted` arrives,
+/// so the demo has to carry the plan's closing item the way [`finish`] carries the answer's.
+/// The entry markers stay as they were: closing a row says the plan is no longer being streamed,
+/// not that every step of it is now true.
+fn finished_plan(turn: &str) -> Item {
+    let mut item = item_plan(turn);
+    if let Item::Plan(plan) = &mut item {
+        plan.status = ItemStatus::Completed;
+    }
+    item
 }
 
 fn item_plan(turn: &str) -> Item {

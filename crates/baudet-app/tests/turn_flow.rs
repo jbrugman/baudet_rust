@@ -144,6 +144,46 @@ fn a_stopped_turn_leaves_its_open_rows_interrupted_not_failed() {
     assert_eq!(open[0].status(), ItemStatus::Interrupted, "a deliberate Stop is not a failure");
 }
 
+/// A closed turn must not leave a row claiming to work.
+///
+/// The reducer deliberately never invents an item status: the stream owns it, and `TurnCompleted`
+/// closes the turn rather than every row inside it. That is only honest while the sender keeps its
+/// side of the deal and closes each item it opened. A row left `InProgress` after a clean close is
+/// a stream that broke its own contract, and in the window it reads as a marker that keeps moving
+/// under a header that already says idle -- so the demo turn is held to it here.
+#[test]
+fn a_cleanly_closed_turn_leaves_no_row_working() {
+    let (_backend, state) = state_for(answer("th_1", "tu_1"));
+    run_turn(&state, "ga");
+    // An open row on the way in, so the assertion below proves the close settled it rather than
+    // proving that a row was never opened at all.
+    state.apply(&ThreadEvent::ItemStarted {
+        thread_id: "th_1".into(),
+        turn_id: "tu_1".into(),
+        item: Item::Plan(PlanItem {
+            item_id: "tu_1/plan".into(),
+            entries: vec![PlanEntry::new("gui", PlanEntryStatus::InProgress)],
+            status: ItemStatus::InProgress,
+        }),
+    });
+    assert!(
+        state.rows().iter().any(|item| item.status() == ItemStatus::InProgress),
+        "the fixture should have left a working row to settle"
+    );
+    state.apply(&ThreadEvent::ItemCompleted {
+        thread_id: "th_1".into(),
+        turn_id: "tu_1".into(),
+        item: Item::Plan(PlanItem {
+            item_id: "tu_1/plan".into(),
+            entries: vec![PlanEntry::new("gui", PlanEntryStatus::InProgress)],
+            status: ItemStatus::Completed,
+        }),
+    });
+    let working: Vec<ItemKind> =
+        state.rows().iter().filter(|item| item.status() == ItemStatus::InProgress).map(|item| item.kind()).collect();
+    assert_eq!(working, Vec::<ItemKind>::new(), "a closed turn must not paint a working row");
+}
+
 #[test]
 fn a_second_turn_appends_rather_than_replaces() {
     let backend: Arc<ScriptedBackend> = Arc::new(ScriptedBackend::new(vec![
