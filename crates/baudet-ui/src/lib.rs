@@ -15,7 +15,9 @@
 //!    channels is both simpler and free of lock ordering.
 
 mod app;
+mod palette;
 mod rows;
 
-pub use app::{run, TranscriptApp};
+pub use app::{run, run_from, Startup, TranscriptApp};
+pub use palette::DiffLine;
 pub use rows::Row;

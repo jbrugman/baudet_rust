@@ -12,10 +12,27 @@ license.workspace = true
 baudet-core = { workspace = true }
 baudet-backend = { workspace = true }
 baudet-app = { workspace = true }
+baudet-store = { workspace = true }
 tokio = { workspace = true }
 egui = { workspace = true }
 egui_extras = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "glow"] }
+
+# Only for `--screenshot`: the picture egui hands back is a `Vec<Color32>`, and this turns it into
+# a PNG file. It is not a new dependency: `eframe` already pulls `image`, which already pulls this
+# exact `png`, so the graph gains one edge (this crate -> png) and no new package. Reach for `png`
+# rather than `image` because the only format that matters here is the one we are asked to write,
+# and `image`'s other ~30 decoders are not something a screenshot needs.
+png = "0.18"
+
+# Only for macOS: the flag that keeps `--screenshot` from activating the app and stealing focus
+# sits on winit's event-loop builder, and eframe only reaches it through
+# `NativeOptions::event_loop_builder`. This is not a new package either: `eframe` and `egui-winit`
+# already depend on this exact `winit`, so it cannot disagree with the one the window is built on.
+# Gated to macOS because that is the only platform whose builder has the method, and because a
+# version bump of eframe on another platform must not look like a breaking change here.
+[target.'cfg(target_os = "macos")'.dependencies]
+winit = "0.30"
 
 # No `accesskit` yet: on macOS eframe reaches the screen through its own objc2 path, and the
 # feature only drags in `accesskit_unix` -> `zvariant` for Linux. Screen-reader support is a real

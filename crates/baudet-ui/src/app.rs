@@ -16,13 +16,14 @@
 //! already protect -- one reader, folded while draining, stops when the stream closes -- and a
 //! frame clock that stops draining would otherwise be a second, subtly different turn loop.
 
+use crate::palette;
 use crate::rows::Row;
 use baudet_app::session::pump;
 use baudet_app::AppState;
 use baudet_backend::scripted::{Script, ScriptedBackend};
 use baudet_core::{AgentMessageItem, Item, ItemStatus, ThreadEvent};
 use eframe::egui;
-use egui::{CentralPanel, Frame, Panel, ScrollArea};
+use egui::{CentralPanel, ColorImage, Frame, Panel, ScrollArea};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -48,6 +49,12 @@ pub struct TranscriptApp {
     intents: mpsc::Sender<Intent>,
     snapshots: ampcc::UnboundedReceiver<(Vec<Row>, bool)>,
     worker: Option<std::thread::JoinHandle<()>>,
+    /// Where `--screenshot` must write its picture. `None` for a normal start.
+    shot: Option<std::path::PathBuf>,
+    /// Frames drawn so far in a screenshot run.
+    frames: u32,
+    /// Whether the picture has been written, so the run closes once instead of repeatedly.
+    shot_done: bool,
 }
 
 impl TranscriptApp {
@@ -66,7 +73,16 @@ impl TranscriptApp {
             intents: intent_tx,
             snapshots: snap_rx,
             worker: Some(worker),
+            shot: None,
+            frames: 0,
+            shot_done: false,
         }
+    }
+
+    /// Point this window at a PNG file it must draw and then write. Used only by `--screenshot`.
+    pub fn with_screenshot(mut self, path: impl Into<std::path::PathBuf>) -> TranscriptApp {
+        self.shot = Some(path.into());
+        self
     }
 
     /// The demo conversation the window ships with, so a first run shows a real transcript: a
@@ -75,15 +91,18 @@ impl TranscriptApp {
         let answer = Script::new()
             .event(ThreadEvent::TurnStarted { thread_id: TH.into(), turn_id: T1.into() })
             .event(start(T1, agent(T1, "")))
-            .event(delta(T1, "agentMessage", "Here is what I found. "))
-            .event(delta(
-                T1,
-                "agentMessage",
-                "The Kotlin front end and this Rust rewrite agree on the item vocabulary.",
-            ))
+            .event(delta(T1, "Here is what I found. "))
+            .event(delta(T1, "The Kotlin front end and this Rust rewrite agree on the item vocabulary."))
+            .event(ThreadEvent::ItemCompleted {
+                thread_id: TH.into(),
+                turn_id: T1.into(),
+                item: finish(
+                    T1,
+                    "Here is what I found. The Kotlin front end and this Rust rewrite agree on the item vocabulary.",
+                ),
+            })
             .event(start(T1, item_tool(T1)))
             .event(start(T1, item_plan(T1)))
-            .event(start(T1, agent(T1, "Two facts, one table, no backend process.")))
             .event(ThreadEvent::TurnCompleted {
                 thread_id: TH.into(),
                 turn_id: T1.into(),
@@ -95,8 +114,12 @@ impl TranscriptApp {
         let echo = Script::new()
             .event(ThreadEvent::TurnStarted { thread_id: TH.into(), turn_id: T2.into() })
             .event(start(T2, agent(T2, "")))
-            .event(delta(T2, "agentMessage", "You said that back to a scripted player. The real transport comes next."))
-            .event(start(T2, agent(T2, "")))
+            .event(delta(T2, "You said that back to a scripted player. The real transport comes next."))
+            .event(ThreadEvent::ItemCompleted {
+                thread_id: TH.into(),
+                turn_id: T2.into(),
+                item: finish(T2, "You said that back to a scripted player. The real transport comes next."),
+            })
             .event(ThreadEvent::TurnCompleted {
                 thread_id: TH.into(),
                 turn_id: T2.into(),
@@ -179,9 +202,77 @@ impl TranscriptApp {
     }
 }
 
+impl TranscriptApp {
+    /// How many frames a `--screenshot` run draws before asking for the picture, so panels, fonts
+    /// and the first-frame layout work have all settled. A picture taken earlier shows a window
+    /// that is still arranging itself, which reads as a broken app rather than as an early frame.
+    /// Frames a screenshot run may wait for a settled transcript, not a fixed count to wait out.
+    ///
+    /// The picture is taken once the demo turn has drained (see `take_screenshot`), so this is only
+    /// a ceiling for the case where the stream never closes. It is generous because a screenshot is
+    /// never on a person's critical path, and it still fails loudly rather than drawing nothing:
+    /// on the timeout the window is captured as-is and the run exits non-zero.
+    const SHOT_FRAMES: u32 = 600;
+
+    /// Ask for a picture once enough frames have been drawn, write it, then close.
+    ///
+    /// The pixels come back through egui as an event, and eframe's painter has already put the
+    /// rows in the top-down order a PNG file wants. Nothing here waits: a run that never receives
+    /// its picture simply keeps drawing, so a check fails by not producing a file rather than by
+    /// hanging.
+    fn take_screenshot(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.shot.clone() else { return };
+        if self.shot_done {
+            return;
+        }
+        // One frame after `paint` has folded a snapshot where the turn is no longer live and the
+        // transcript is not empty, the rows on screen are the settled transcript. `busy` only ever
+        // falls in `paint`, so this cannot be satisfied by a stale frame.
+        let settled = !self.busy && !self.rows.is_empty();
+        if settled || self.frames >= Self::SHOT_FRAMES {
+            if !settled {
+                eprintln!(
+                    "screenshot: the turn had not settled after {} frames; writing the window as-is",
+                    self.frames
+                );
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+        let picture = ctx.input(|i| {
+            i.events.iter().find_map(|event| match event {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        let Some(picture) = picture else { return };
+        if let Err(error) = write_png(&path, &picture) {
+            eprintln!("could not write the picture to {}: {error}", path.display());
+            std::process::exit(1);
+        }
+        self.shot_done = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+}
+
 impl eframe::App for TranscriptApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // A screenshot run receives no input -- an unfocused window gets none -- and nothing else
+        // in this program asks for a redraw, so without this the window draws once and goes still
+        // and the picture never arrives.
+        if self.shot.is_some() {
+            ctx.request_repaint();
+            // No input reaches an unfocused window, so nothing would ever be sent. Rather than a
+            // second data path, start the conversation exactly the way a keystroke in the composer
+            // does -- `Intent::Submit` -- and let the worker drain the script through the same
+            // `pump` the turn-flow tests already protect. Without this the picture would be an
+            // honest cold start, which is true but shows nothing of the app.
+            if self.frames == 0 {
+                let _ = self.intents.send(Intent::Submit("Show me how the Rust rewrite renders a turn.".to_string()));
+            }
+            self.frames += 1;
+            self.take_screenshot(&ctx);
+        }
         // Row spacing belongs to this Ui, set once before any row is painted. Per-row style
         // nudges would make the effective spacing depend on what was painted last.
         ui.style_mut().spacing.item_spacing.y = 6.0;
@@ -270,6 +361,40 @@ fn worker_loop(
     }
 }
 
+/// The working indicator, on the row's own line: a thin line with a marker travelling over it.
+///
+/// `egui::Spinner` was tried and dropped. It allocates a square of `interact_size.y` = 18 pt,
+/// draws an 11 pt ring with a 3 pt stroke inside it, and on a Retina screen the closed arc plus
+/// its mitred corners read as a 10 x 8 pixel wedge beside the header -- a smudge rather than
+/// motion, because a ring that small cannot carry a readable turn.
+///
+/// A stock progress bar was the second attempt and is also dropped: a full-width filled track
+/// is the loudest thing in the panel, and it promises a fraction that is not known yet. A
+/// streamed turn has no length to divide by, so what is honest is a *ruler with a marker on it*
+/// -- movement without a claim -- which is also how the Kotlin panel showed a running command.
+fn progress_indicator(ui: &mut egui::Ui) {
+    let height = 12.0;
+    let width = ui.available_width();
+    if width < 8.0 {
+        ui.add_space(height);
+        return;
+    }
+    let (rect, _response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    ui.request_repaint();
+    let time = ui.input(|i| i.time);
+    // The line spans the row; the marker crosses it and turns around, so it never jumps.
+    let line =
+        egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.center().y), egui::pos2(rect.max.x, rect.center().y));
+    ui.painter().line_segment([line.min, line.max], egui::Stroke::new(1.0, palette::BORDER));
+    let span = (width / 2.0 - 6.0).max(0.0);
+    let half = span * (1.0 - (time * 0.7).cos() as f32) / 2.0;
+    let centre = egui::pos2(rect.min.x + 6.0 + half, rect.center().y);
+    ui.painter().circle_filled(centre, 2.5, palette::ACCENT);
+}
+
 /// One row. Prose reads as text; anything with a body of its own gets an expander so a long turn
 /// stays skimmable, and every row carries a status that does not depend on colour alone.
 fn paint_row(ui: &mut egui::Ui, row: &Row) {
@@ -285,11 +410,20 @@ fn paint_row(ui: &mut egui::Ui, row: &Row) {
                 ui.label(egui::RichText::new(row.status_word()).size(11.0).color(status_color(ui, row)))
             });
         });
-        if row.in_progress() {
-            ui.spinner();
-        }
         if row.body.is_empty() {
+            // Nothing of its own to show yet. While the item is live the spinner says so, but it
+            // replaces the blank line rather than adding to it: an empty row beside a spinner reads
+            // as a rendering glitch, and the spinner is already the whole message.
+            // De spinner is een boog van acht punten met een sluitvlak; op Retina groeit die
+            // uit tot een wiggetje van 10 x 8 px. Bij `interact_size.y` = 16 is de boog 8 px
+            // en blijft hij als spinner herkenbaar.
+            if row.in_progress() {
+                progress_indicator(ui);
+            }
             return;
+        }
+        if row.in_progress() {
+            progress_indicator(ui);
         }
         if row.collapsed {
             // A disclosure that opens lazily is the difference between a transcript and a dump:
@@ -341,19 +475,132 @@ fn row_background(ui: &egui::Ui, row: &Row) -> egui::Color32 {
 
 /// Opens the window. `app_creator` is where a real transport gets wired in: it is the one place
 /// holding a `CreationContext`, so it is the honest seam, and no placeholder is needed beside it.
+/// Start the window.
 pub fn run() -> eframe::Result {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([820.0, 640.0]).with_min_inner_size([520.0, 360.0]),
+    run_from(Startup::default())
+}
+
+/// How the window should start.
+#[derive(Debug, Clone, Default)]
+pub struct Startup {
+    /// Where `--screenshot` writes its picture; `None` opens a window as usual.
+    pub screenshot: Option<std::path::PathBuf>,
+}
+
+impl Startup {
+    /// Read the process's own arguments.
+    pub fn from_env() -> Result<Startup, String> {
+        Startup::parse(std::env::args())
+    }
+
+    /// Parse `args`, where `args[0]` is the program name.
+    ///
+    /// An unknown option is an error rather than something to ignore: a mistyped flag that is
+    /// quietly dropped starts a window nobody asked for, which in a scripted check hangs instead
+    /// of failing.
+    pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Startup, String> {
+        let mut out = Startup::default();
+        let mut args = args.into_iter();
+        let _program = args.next();
+        while let Some(arg) = args.next() {
+            if arg == "--help" || arg == "-h" {
+                return Err(HELP.trim_start().to_string());
+            }
+            if arg == "--screenshot" {
+                match args.next() {
+                    Some(path) => out.screenshot = Some(std::path::PathBuf::from(path)),
+                    None => return Err(format!("{USAGE}\n--screenshot needs a file name")),
+                }
+            } else if let Some(rest) = arg.strip_prefix("--screenshot=") {
+                out.screenshot = Some(std::path::PathBuf::from(rest));
+            } else {
+                return Err(format!("{USAGE}\nunknown option: {arg}"));
+            }
+        }
+        Ok(out)
+    }
+}
+
+const USAGE: &str = "usage: baudet-ui [--screenshot=<file.png>]";
+const HELP: &str = "
+Baudet - a local-first coding assistant
+
+usage: baudet-ui [option]
+
+  --screenshot <file>   draw the window, save a picture of it to <file> and exit,
+  --screenshot=<file>   without taking focus from what you are doing
+  -h, --help            show this text";
+
+/// Start the window with `startup`'s arguments.
+///
+/// The window is 1040x720, which is the size the original opens at; the minimum is ours, sized so
+/// that a transcript row and the composer both stay reachable on a small laptop screen.
+pub fn run_from(startup: Startup) -> eframe::Result {
+    let mut builder =
+        egui::ViewportBuilder::default().with_inner_size([1040.0, 720.0]).with_min_inner_size([520.0, 360.0]);
+    // A screenshot must not steal focus from what the person is doing. `with_active` is a no-op on
+    // X11/Wayland, and the window only goes to the back on Windows, where that is the documented
+    // way; on macOS and Linux lowering a window can stop it drawing at all, so it is not lowered
+    // there.
+    if startup.screenshot.is_some() {
+        builder = builder.with_active(false);
+    }
+    #[cfg(target_os = "windows")]
+    if startup.screenshot.is_some() {
+        builder = builder.with_window_level(egui::WindowLevel::AlwaysOnBottom);
+    }
+    let mut options = eframe::NativeOptions {
+        viewport: builder,
         // Software rasterising is the default when `glow` is the only backend, and it is what lets
         // this window appear on a machine whose GL path is untrusted. wgpu stays opt-in.
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
+    // On macOS the flag that keeps the app from activating sits on winit's event-loop builder,
+    // which eframe only exposes through this hook. It is set last because a `NativeOptions` clone
+    // drops the hook.
+    #[cfg(target_os = "macos")]
+    if startup.screenshot.is_some() {
+        use winit::platform::macos::EventLoopBuilderExtMacOS as _;
+        options.event_loop_builder = Some(Box::new(|builder| {
+            builder.with_activate_ignoring_other_apps(false);
+        }));
+    }
+    let screenshot = startup.screenshot.clone();
     eframe::run_native(
         "Baudet",
         options,
-        Box::new(|_cc| Ok(Box::new(TranscriptApp::new(TranscriptApp::demo_backend())))),
+        Box::new(move |cc| {
+            palette::install(&cc.egui_ctx);
+            let app = TranscriptApp::new(TranscriptApp::demo_backend());
+            Ok(Box::new(match &screenshot {
+                Some(path) => app.with_screenshot(path),
+                None => app,
+            }))
+        }),
     )
+}
+
+/// Write egui's picture to `path` as an 8-bit RGBA PNG.
+///
+/// `to_srgba_unmultiplied` rather than `to_array`: they agree for an opaque pixel, and the former
+/// is the documented way to get bytes that mean sRGB, which is what an image file declares.
+fn write_png(path: &std::path::Path, picture: &ColorImage) -> Result<(), String> {
+    let [width, height] = picture.size;
+    if width == 0 || height == 0 {
+        return Err("the window drew nothing".to_string());
+    }
+    let bytes: Vec<u8> = picture.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
+    let file = std::fs::File::create(path).map_err(|e| format!("create: {e}"))?;
+    let mut writer = png::Encoder::new(file, width as u32, height as u32);
+    writer.set_color(png::ColorType::Rgba);
+    writer.set_depth(png::BitDepth::Eight);
+    let mut stream = writer.write_header().map_err(|e| format!("header: {e}"))?;
+    stream.write_image_data(&bytes).map_err(|e| format!("pixels: {e}"))?;
+    stream.finish().map_err(|e| format!("finish: {e}"))
 }
 
 const TH: &str = "th_1";
@@ -364,7 +611,7 @@ fn start(turn: &str, item: Item) -> ThreadEvent {
     ThreadEvent::ItemStarted { thread_id: TH.into(), turn_id: turn.into(), item }
 }
 
-fn delta(turn: &str, _kind: &str, text: &str) -> ThreadEvent {
+fn delta(turn: &str, text: &str) -> ThreadEvent {
     ThreadEvent::ItemDelta {
         thread_id: TH.into(),
         turn_id: turn.into(),
@@ -379,6 +626,17 @@ fn agent(turn: &str, text: &str) -> Item {
         item_id: format!("{turn}/msg"),
         text: text.into(),
         status: ItemStatus::InProgress,
+    })
+}
+
+/// The completed form of the turn's answer. A streaming message stays `InProgress` until its
+/// `ItemCompleted` arrives -- `TurnCompleted` builds no closing row of its own -- so this is what
+/// turns "working" into "done" once the whole answer is on screen.
+fn finish(turn: &str, text: &str) -> Item {
+    Item::AgentMessage(AgentMessageItem {
+        item_id: format!("{turn}/msg"),
+        text: text.into(),
+        status: ItemStatus::Completed,
     })
 }
 
