@@ -16,6 +16,7 @@
 
 mod app;
 mod palette;
+mod panels;
 mod rows;
 
 pub use app::{run, run_from, Startup, TranscriptApp};

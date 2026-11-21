@@ -17,6 +17,7 @@
 //! frame clock that stops draining would otherwise be a second, subtly different turn loop.
 
 use crate::palette;
+use crate::panels::{self, Changes, Workspace};
 use crate::rows::Row;
 use baudet_app::session::pump;
 use baudet_app::AppState;
@@ -55,6 +56,10 @@ pub struct TranscriptApp {
     frames: u32,
     /// Whether the picture has been written, so the run closes once instead of repeatedly.
     shot_done: bool,
+    /// The left panel: the folder under inspection and its tree.
+    workspace: Workspace,
+    /// The right panel: the paths git reports for that folder.
+    changes: Changes,
 }
 
 impl TranscriptApp {
@@ -76,12 +81,22 @@ impl TranscriptApp {
             shot: None,
             frames: 0,
             shot_done: false,
+            workspace: Workspace::default(),
+            changes: Changes::default(),
         }
     }
 
     /// Point this window at a PNG file it must draw and then write. Used only by `--screenshot`.
     pub fn with_screenshot(mut self, path: impl Into<std::path::PathBuf>) -> TranscriptApp {
         self.shot = Some(path.into());
+        self
+    }
+
+    /// Choose the folder the workspace panel shows, through the same `open` the panel's own field
+    /// uses. Nothing else has to know this happened: `panels::left` notices the folder is unprobed
+    /// and asks git, which is the refresh a typed path triggers.
+    pub fn with_workspace(mut self, path: impl AsRef<std::path::Path>) -> TranscriptApp {
+        self.workspace.open(&path.as_ref().to_string_lossy());
         self
     }
 
@@ -132,6 +147,16 @@ impl TranscriptApp {
     }
 
     fn paint(&mut self, ui: &mut egui::Ui) {
+        // Side panels first. egui allocates a panel's strip from whatever the enclosing `Ui` still
+        // has at the moment of the call, so a central panel painted first would take the whole
+        // width and leave the flanks to overlap it.
+        // Asking git is bounded by the probe's own timeout, so it happens on the turn an opening or
+        // a switch commits rather than from a paint.
+        if panels::left(ui, &mut self.workspace, self.changes.meta()) {
+            self.changes.refresh(self.workspace.cwd());
+        }
+        panels::right(ui, &self.changes, self.workspace.cwd());
+
         // Drain every pending snapshot and paint the newest. Intermediate frames are dropped on
         // purpose: a row's value is its *current* folded text, so an old snapshot has nothing a
         // later one lacks, and skipping it is what keeps a burst of deltas cheap.
@@ -485,6 +510,11 @@ pub fn run() -> eframe::Result {
 pub struct Startup {
     /// Where `--screenshot` writes its picture; `None` opens a window as usual.
     pub screenshot: Option<std::path::PathBuf>,
+    /// A folder to open on startup. It travels the same road as a path typed into the panel:
+    /// `Workspace::open` followed by the git probe `panels::left` asks for. A scripted picture needs
+    /// it because an unfocused window receives no keystrokes, and it is not a second way of choosing
+    /// a folder -- it is the same one, entered by a flag.
+    pub workspace: Option<std::path::PathBuf>,
 }
 
 impl Startup {
@@ -513,6 +543,13 @@ impl Startup {
                 }
             } else if let Some(rest) = arg.strip_prefix("--screenshot=") {
                 out.screenshot = Some(std::path::PathBuf::from(rest));
+            } else if arg == "--workspace" {
+                match args.next() {
+                    Some(path) => out.workspace = Some(std::path::PathBuf::from(path)),
+                    None => return Err(format!("{USAGE}\n--workspace needs a folder")),
+                }
+            } else if let Some(rest) = arg.strip_prefix("--workspace=") {
+                out.workspace = Some(std::path::PathBuf::from(rest));
             } else {
                 return Err(format!("{USAGE}\nunknown option: {arg}"));
             }
@@ -521,7 +558,7 @@ impl Startup {
     }
 }
 
-const USAGE: &str = "usage: baudet-ui [--screenshot=<file.png>]";
+const USAGE: &str = "usage: baudet-ui [--screenshot=<file.png>] [--workspace=<folder>]";
 const HELP: &str = "
 Baudet - a local-first coding assistant
 
@@ -529,6 +566,7 @@ usage: baudet-ui [option]
 
   --screenshot <file>   draw the window, save a picture of it to <file> and exit,
   --screenshot=<file>   without taking focus from what you are doing
+  --workspace <folder>  open <folder> in the workspace panel on startup
   -h, --help            show this text";
 
 /// Start the window with `startup`'s arguments.
@@ -567,16 +605,20 @@ pub fn run_from(startup: Startup) -> eframe::Result {
         }));
     }
     let screenshot = startup.screenshot.clone();
+    let workspace = startup.workspace.clone();
     eframe::run_native(
         "Baudet",
         options,
         Box::new(move |cc| {
             palette::install(&cc.egui_ctx);
-            let app = TranscriptApp::new(TranscriptApp::demo_backend());
-            Ok(Box::new(match &screenshot {
-                Some(path) => app.with_screenshot(path),
-                None => app,
-            }))
+            let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+            if let Some(path) = &workspace {
+                app = app.with_workspace(path);
+            }
+            if let Some(path) = &screenshot {
+                app = app.with_screenshot(path);
+            }
+            Ok(Box::new(app))
         }),
     )
 }
