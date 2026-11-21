@@ -66,6 +66,129 @@ impl SessionContext {
     pub fn none() -> SessionContext {
         SessionContext::default()
     }
+
+    /// The folder the process was started in, with its repository probed.
+    ///
+    /// The only way a UI gets a real cwd without a back-end, and the reason the right-hand panel
+    /// can show a real checkout while the transport is still scripted.
+    pub fn current() -> SessionContext {
+        let cwd = std::env::current_dir().ok().and_then(|p| p.to_str().map(|s| s.to_owned())).unwrap_or_default();
+        if cwd.is_empty() {
+            return SessionContext::default();
+        }
+        SessionContext { cwd: Some(cwd.clone()), git: probe_git(&cwd) }
+    }
+}
+
+/// One path a working tree holds differently from its commit.
+///
+/// A `changed files` list is the one panel a reader trusts only when its counts are git's own, so
+/// the two fields come from `diff --numstat` and nothing else. They stay `Option`: a path can be
+/// changed without `numstat` ever reporting a line count for it, and writing 0 there would claim
+/// git counted an empty change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedFile {
+    /// Repository-relative path, exactly as git spelled it.
+    pub path: String,
+    /// Lines added, when git counted them. `None` for a binary path, for `numstat`'s `-`.
+    pub additions: Option<u32>,
+    /// Lines removed, with the same absence.
+    pub deletions: Option<u32>,
+    /// Git's own one-character state, mapped to a word so the UI never has to read porcelain.
+    pub change: ChangeKind,
+    /// The name a rename or copy came from, which git reports as a separate record. `None` for
+    /// every other state, so the panel can print `old -> new` without parsing porcelain itself.
+    pub old_path: Option<String>,
+}
+
+impl ChangedFile {
+    /// The last component of the path: what a panel column shows when it has room for one word.
+    /// The full path stays available through `path`, which is what a hover or an "open" wants.
+    pub fn name(&self) -> String {
+        std::path::Path::new(&self.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.path.clone())
+    }
+}
+
+/// What git says happened to a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    /// Written to, tracked.
+    Modified,
+    /// On disk, not in the index yet.
+    Untracked,
+    /// In the index, absent from the commit.
+    Added,
+    /// On the disk or in the index, absent now.
+    Deleted,
+    /// Tracked and renamed; `path` names the new spelling.
+    Renamed,
+    /// Tracked and copied.
+    Copied,
+    /// The path is in the working tree while the index is mid-conflict.
+    Unmerged,
+    /// Tracked and gone from the working tree, with the index untouched: git's `" D"`. Not
+    /// `Deleted`, which is git's `"D "` — a deletion that was staged — and not `Unmerged`, which
+    /// would claim a conflict in a repository that has none.
+    Removed,
+    /// A porcelain state this version does not name. Shown rather than guessed at.
+    Other,
+}
+
+impl ChangeKind {
+    /// Git's two status bytes for one path, mapped. Whitespace is significant in porcelain, so
+    /// this reads the pair it is given and never a trimmed approximation of it.
+    pub fn from_xy(x: char, y: char) -> ChangeKind {
+        // A written-on-disk file is `" M"`: the space in the first position says the index is
+        // clean, and it is a byte of the format rather than padding to remove. Measured against a
+        // repository whose tracked file had been rewritten, which is the common case in a panel
+        // that is showing what the user is working on.
+        match (x, y) {
+            ('?', '?') => ChangeKind::Untracked,
+            // The two-letters-both-set merge states come first: the single-letter arms below
+            // would otherwise swallow them, since `('D', _)` matches `DD`, which git writes for a
+            // path deleted in both trees mid-merge. `UU` is the state measured for a content
+            // conflict; `AA` and `DD` are git's other two unmerged states.
+            ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D') => ChangeKind::Unmerged,
+            ('A', _) => ChangeKind::Added,
+            // Each state letter is read from the column that gives it its meaning. X names the
+            // index, so a letter there is a staged change; Y names the working tree, so the
+            // trailing space there means the index change is the whole story and a letter means
+            // the working tree added something of its own.
+            ('D', ' ') => ChangeKind::Deleted,
+            ('D', _) => ChangeKind::Removed,
+            (' ', 'D') => ChangeKind::Removed,
+            ('R', _) => ChangeKind::Renamed,
+            ('C', _) => ChangeKind::Copied,
+            ('M', _) | (_, 'M') => ChangeKind::Modified,
+            _ => ChangeKind::Other,
+        }
+    }
+
+    /// The word the panel prints.
+    pub fn word(&self) -> &'static str {
+        match self {
+            ChangeKind::Modified => "modified",
+            ChangeKind::Untracked => "new",
+            ChangeKind::Added => "staged",
+            ChangeKind::Deleted => "deleted",
+            ChangeKind::Renamed => "renamed",
+            ChangeKind::Copied => "copied",
+            ChangeKind::Unmerged => "conflict",
+            ChangeKind::Removed => "removed",
+            ChangeKind::Other => "changed",
+        }
+    }
+
+    /// Whether the path still exists on disk. A list that shows a deleted path as though it could
+    /// be opened is a list that lies about the folder.
+    pub fn exists_on_disk(&self) -> bool {
+        // Both deletions name a path that is gone; the difference between them is whether the
+        // removal was staged, not whether the file is there.
+        !matches!(self, ChangeKind::Deleted | ChangeKind::Removed)
+    }
 }
 
 /// The longest a git probe may take before the folder is reported as unproven.
@@ -90,20 +213,194 @@ pub fn probe_git(cwd: &str) -> Option<GitMeta> {
     if ask(cwd, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true") {
         return None;
     }
-    let meta = GitMeta {
+    // Reaching this point means git itself answered `true` to being inside a work tree, which is
+    // the repository fact. The three fields below are decoration on top of it, and they fail
+    // together in the ordinary case of a repository without a commit — measured: `rev-parse HEAD`
+    // and `rev-parse --abbrev-ref HEAD` both exit 128 with `bad revision`, while
+    // `--is-inside-work-tree` still prints `true`. Returning `None` there told the panel a fresh
+    // repository was not a repository at all, so its files vanished from the change list.
+    Some(GitMeta {
         repository_url: ask(cwd, &["config", "--get", "remote.origin.url"]),
         branch: ask(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|b| b != "HEAD"),
         commit_hash: ask(cwd, &["rev-parse", "HEAD"]),
-    };
-    if meta.is_empty() {
-        None
-    } else {
-        Some(meta)
-    }
+    })
 }
 
-/// One git query in `cwd`, or `None` for anything that is not a clean, timely, successful answer.
+/// The paths `cwd` holds differently from its commit, or `None` when there is no repository to
+/// ask.
+///
+/// Two queries and no more. `status --porcelain=v1 -z` names the paths and their state, and
+/// `diff --numstat HEAD` supplies the counts; the `-z` form is what makes this parseable at all,
+/// because git then separates records with NUL and stops quoting non-ASCII paths, so a folder
+/// called `café` arrives as `café` rather than as an octal escape a caller would have to undo.
+///
+/// The two queries disagree routinely, and both shapes are correct. A path deleted on disk shows
+/// in `status` and in no `numstat` row at all — there is no diff against nothing to count — and a
+/// binary path shows as counted-but-uncountable, `-` in both columns. Neither becomes a zero.
+pub fn probe_changes(cwd: &str) -> Option<Vec<ChangedFile>> {
+    probe_git(cwd)?;
+    let status = raw(cwd, &["status", "--porcelain=v1", "-z", "--untracked-files=all"])?;
+    // Counting needs a commit to count against, and before the first commit there is none: measured,
+    // `diff --numstat HEAD --` exits 128 with `bad revision 'HEAD'`. A query that cannot be made is
+    // not a probe that failed, so paths are still listed and carry git's absence of counts.
+    let counts = raw(cwd, &["diff", "--numstat", "HEAD", "--"]).as_deref().and_then(parse_numstat).unwrap_or_default();
+    let mut files = Vec::new();
+    let mut pending_old_path: Option<String> = None;
+    for record in status.split('\0') {
+        if record.is_empty() {
+            continue;
+        }
+        // Two measured shapes. A state record is `XY path`, and porcelain v1 writes the pair
+        // followed by a space only when X is a letter: a written-on-disk file is `" M f.txt"` and
+        // an untracked one is `"?? brandnew.rs"` with no space at all — a parser that insists on
+        // the space loses every untracked path. The other shape is the old name of a rename or
+        // copy, which git emits immediately before its `R`/`C` record as a bare path: no letters,
+        // no space. It is consumed as the origin of the record that follows it, so a rename shows
+        // as one honest row instead of one row plus a phantom.
+        let mut chars = record.chars();
+        let (Some(x), Some(y)) = (chars.next(), chars.next()) else { continue };
+        let path: String;
+        let change;
+        if x != '?' && chars.next() == Some(' ') {
+            change = ChangeKind::from_xy(x, y);
+            path = chars.collect();
+        } else if x == '?' && y == '?' {
+            change = ChangeKind::Untracked;
+            path = record[3..].to_string();
+        } else {
+            pending_old_path = Some(record.to_string());
+            continue;
+        }
+        if path.is_empty() {
+            continue;
+        }
+        // A rename counts against the name it came from, so the row carries the old name rather
+        // than the new one: measured, `git mv g.md sub/café.md` reports `0\t2\tg.md` while status
+        // names `sub/café.md`. A staged rename also has no `HEAD` diff of its own, which is why its
+        // counts are usually absent rather than wrong.
+        let lookup = match &change {
+            ChangeKind::Renamed | ChangeKind::Copied => pending_old_path.clone().unwrap_or_else(|| path.clone()),
+            _ => path.clone(),
+        };
+        let (additions, deletions) = counts.get(&lookup).copied().unwrap_or((None, None));
+        let old_path = if matches!(change, ChangeKind::Renamed | ChangeKind::Copied) {
+            pending_old_path.take()
+        } else {
+            pending_old_path = None;
+            None
+        };
+        files.push(ChangedFile { path, additions, deletions, change, old_path });
+    }
+    // Git emits status in path order already; sorting again keeps that true on a repository whose
+    // collation differs, which is the only reason it is here.
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Some(files)
+}
+
+/// `numstat` rows as a path map. `None` only when the query itself failed, so an empty repository
+/// with nothing to count yields an empty map rather than nothing.
+/// The path git's `diff --numstat` printed, back to the bytes on disk.
+///
+/// Measured: `status -z` writes paths verbatim — `"sub/caf\303\251.md"` never appears there, and a
+/// name with a space stays plain — while `numstat` quotes any path with a non-ASCII byte as
+/// `"sub/caf\303\251.md"`. Those two spellings have to be reconciled before one can look up the
+/// other, or every accented path silently loses its counts while plain paths keep theirs.
+fn unquote_git_path(path: &str) -> String {
+    let Some(rest) = path.strip_prefix('"').and_then(|p| p.strip_suffix('"')) else {
+        return path.to_string();
+    };
+    let bytes = rest.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        // C-style escapes, git's source being `quote_c_style`. Only the forms git emits here are
+        // handled; anything else keeps its backslash rather than guessing at a byte.
+        let Some(&next) = bytes.get(i + 1) else {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        };
+        match next {
+            b'n' => out.push(b'\n'),
+            b't' => out.push(b'\t'),
+            b'r' => out.push(b'\r'),
+            b'0' => out.push(0),
+            b'\\' => out.push(b'\\'),
+            b'"' => out.push(b'"'),
+            b if b.is_ascii_digit() => {
+                // One to three octal digits, which is how git writes every byte above 0x7f.
+                let mut value: u32 = 0;
+                let mut taken = 0;
+                while taken < 3 {
+                    match bytes.get(i + 1 + taken) {
+                        Some(d @ b'0'..=b'7') => {
+                            value = value * 8 + u32::from(d - b'0');
+                            taken += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                out.push(value as u8);
+                // `i` sits on the backslash and the digits start after it, so the escape is
+                // consumed as one plus the digits taken; counting the backslash twice decodes
+                // `\303\251` into the wrong bytes.
+                i += 1 + taken;
+                continue;
+            }
+            _ => out.push(b'\\'),
+        }
+        i += 2;
+    }
+    // A path is bytes, not necessarily UTF-8; a name git escaped from invalid UTF-8 stays readable
+    // through `from_utf8_lossy` rather than being dropped.
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Line counts per path, keyed by the path as it appears on disk. A count is `None` when git
+/// declined to give one, which `numstat` spells `-`.
+type Numstat = std::collections::HashMap<String, (Option<u32>, Option<u32>)>;
+
+fn parse_numstat(output: &str) -> Option<Numstat> {
+    let mut map = std::collections::HashMap::new();
+    for line in output.lines() {
+        let mut fields = line.split('\t');
+        let (Some(add), Some(del), Some(path)) = (fields.next(), fields.next(), fields.next()) else {
+            continue;
+        };
+        // A binary path is reported as `-` in both columns. That is git declining to count, which
+        // is not the same claim as "zero lines".
+        map.insert(unquote_git_path(path), (add.parse::<u32>().ok(), del.parse::<u32>().ok()));
+    }
+    Some(map)
+}
+
+/// One git query in `cwd`, trimmed, or `None` for anything that is not a clean, timely,
+/// successful answer.
+///
+/// The trim is what makes this the right accessor for a single fact — a branch name, a hash, a
+/// `true` — where git's trailing newline is noise. It is deliberately *not* what the change list
+/// reads through: trimming a NUL-separated porcelain stream destroys the separator between records
+/// and shifts every field by one byte, which is the difference between a path and a state letter.
 fn ask(cwd: &str, args: &[&str]) -> Option<String> {
+    raw(cwd, args).and_then(non_empty_trimmed)
+}
+
+/// Git's trailing newline removed, and an answer that is whitespace alone read as no answer.
+fn non_empty_trimmed(output: String) -> Option<String> {
+    let trimmed = output.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// One git query in `cwd`, verbatim. `None` on a missing git, a non-zero exit, or a stalled child.
+///
+/// Used where the bytes between records are the data: `status -z` delimits with NUL and `numstat`
+/// delimits with tabs, and neither survives a trim of the whole stream.
+fn raw(cwd: &str, args: &[&str]) -> Option<String> {
     let child = std::process::Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -138,10 +435,7 @@ fn wait_output(mut child: std::process::Child) -> Option<String> {
     });
     match rx.recv_timeout(GIT_PROBE_TIMEOUT) {
         Ok(Some(output)) => match child.wait().ok() {
-            Some(status) if status.success() => {
-                let trimmed = output.trim();
-                (!trimmed.is_empty()).then(|| trimmed.to_string())
-            }
+            Some(status) if status.success() => Some(output),
             // Non-zero means "no answer here", which is an ordinary answer from git.
             _ => None,
         },
@@ -224,5 +518,249 @@ mod tests {
     fn emptiness_is_distinguished_from_absence() {
         assert!(GitMeta::default().is_empty());
         assert!(!GitMeta { commit_hash: Some("abc".into()), ..Default::default() }.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod changes_tests {
+    use super::*;
+
+    /// A repository shaped like the ones the panel has to survive: a written file, a deleted one,
+    /// an untracked one, a binary, and a non-ASCII name. Built here rather than assumed, because
+    /// the shapes are the thing under test.
+    fn scratch() -> Option<tempfile::TempDir> {
+        let dir = tempfile::TempDir::new().ok()?;
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        if !run(&["init", "-q"])
+            || !run(&["config", "user.email", "t@example.com"])
+            || !run(&["config", "user.name", "Baudet Test"])
+        {
+            return None;
+        }
+        std::fs::write(dir.path().join("f.txt"), "a\nb\nc\n").ok()?;
+        std::fs::write(dir.path().join("bin.dat"), [0u8, 1, 2, 3]).ok()?;
+        std::fs::create_dir_all(dir.path().join("sub")).ok()?;
+        std::fs::write(dir.path().join("sub").join("g.md"), "x\n").ok()?;
+        std::fs::write(dir.path().join("café.txt"), "koffie\n").ok()?;
+        run(&["add", "-A"]);
+        if !run(&["commit", "-q", "-m", "begin"]) {
+            return None;
+        }
+        std::fs::write(dir.path().join("f.txt"), "a\nB\nc\nd\n").ok()?;
+        std::fs::write(dir.path().join("bin.dat"), [0u8, 1, 2, 3, 4, 5]).ok()?;
+        std::fs::remove_file(dir.path().join("sub").join("g.md")).ok()?;
+        std::fs::write(dir.path().join("brandnew.rs"), "nieu\n").ok()?;
+        std::fs::write(dir.path().join("café.txt"), "koffie\nmet melk\n").ok()?;
+        Some(dir)
+    }
+
+    /// The probe run over a fresh scratch repository, with the folder kept alive until the paths
+    /// have been read: a temporary directory removed before the probe answered describes nothing.
+    fn probe() -> Vec<ChangedFile> {
+        let Some(dir) = scratch() else { return Vec::new() };
+        let found = probe_changes(&dir.path().to_string_lossy());
+        let found = found.expect("a repository must answer");
+        drop(dir);
+        found
+    }
+
+    #[test]
+    fn a_written_file_carries_git_counts() {
+        let found = probe();
+        if found.is_empty() {
+            return;
+        }
+        let f = found.iter().find(|f| f.path == "f.txt").expect("f.txt must appear");
+        assert_eq!(f.change, ChangeKind::Modified);
+        assert_eq!(f.additions, Some(2), "measured: two added lines");
+        assert_eq!(f.deletions, Some(1), "measured: one removed line");
+    }
+
+    #[test]
+    fn a_path_removed_on_disk_is_listed_without_invented_counts() {
+        let found = probe();
+        if found.is_empty() {
+            return;
+        }
+        let gone = found.iter().find(|f| f.path == "sub/g.md").expect("the removed path must appear");
+        // Status reports `" D"`, and the truth table says that is not git's staged `"D "` deletion
+        // nor a conflict: the path is tracked and simply gone from the working tree.
+        assert_eq!(gone.change, ChangeKind::Removed);
+        // `diff --numstat HEAD --` does count the removal against the commit — measured as `0\t1` —
+        // so it is reported with git's own numbers rather than as an absence. The case with no
+        // counts at all is the unborn-HEAD test, and the uncountable one is the binary test.
+        assert_eq!(gone.additions, Some(0));
+        assert_eq!(gone.deletions, Some(1));
+        assert!(!gone.change.exists_on_disk());
+    }
+
+    #[test]
+    fn a_binary_path_is_listed_but_never_reads_as_an_empty_change() {
+        let found = probe();
+        if found.is_empty() {
+            return;
+        }
+        let bin = found.iter().find(|f| f.path == "bin.dat").expect("the binary must appear");
+        assert_eq!(bin.change, ChangeKind::Modified);
+        assert_eq!(bin.additions, None, "git writes `-` for a binary, which is not zero");
+        assert_eq!(bin.deletions, None);
+    }
+
+    #[test]
+    fn an_untracked_path_is_reported_as_new() {
+        let found = probe();
+        if found.is_empty() {
+            return;
+        }
+        let fresh = found.iter().find(|f| f.path == "brandnew.rs").expect("untracked must appear");
+        assert_eq!(fresh.change, ChangeKind::Untracked);
+        assert!(fresh.change.exists_on_disk());
+    }
+
+    #[test]
+    fn a_non_ascii_path_survives_the_probe_unquoted() {
+        let found = probe();
+        if found.is_empty() {
+            return;
+        }
+        // With `-z` git stops octal-escaping, so the accented name must arrive as itself, and its
+        // counts must still be found: `numstat` does quote it, and a lookup keyed on the escaped
+        // spelling silently returns nothing while every plain path keeps its numbers.
+        let coffee = found.iter().find(|f| f.path == "café.txt").unwrap_or_else(|| {
+            panic!(
+                "a `café` path must not come back as an escape: {:?}",
+                found.iter().map(|f| f.path.as_str()).collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(coffee.change, ChangeKind::Modified);
+        assert_eq!(coffee.additions, Some(1), "measured: one line added to café.txt");
+        assert_eq!(coffee.deletions, Some(0));
+    }
+
+    /// The complete mapping, as measured over the state letters git writes. A content conflict
+    /// measures as `UU`; `AA` and `DD` are git's other two unmerged states.
+    #[test]
+    fn the_measured_status_letters_map_to_their_kinds() {
+        use ChangeKind::*;
+        let cases = [
+            ((' ', 'M'), Modified),
+            ((' ', 'D'), Removed),
+            (('D', ' '), Deleted),
+            (('D', 'D'), Unmerged),
+            (('A', ' '), Added),
+            (('R', ' '), Renamed),
+            (('C', ' '), Copied),
+            (('U', 'U'), Unmerged),
+            (('A', 'A'), Unmerged),
+        ];
+        for (pair, want) in cases {
+            assert_eq!(ChangeKind::from_xy(pair.0, pair.1), want, "{:?}", pair);
+        }
+        assert_eq!(Removed.word(), "removed");
+        assert!(!Removed.exists_on_disk());
+    }
+
+    /// Git quotes a non-ASCII path in `numstat` and prints it verbatim in `status`; the counts only
+    /// reach the panel once the two spellings agree. The first case is the measured row
+    /// `3\t0\t"sub/caf\303\251.md"`.
+    #[test]
+    fn a_quoted_numstat_path_becomes_the_path_on_disk() {
+        assert_eq!(unquote_git_path("\"sub/caf\\303\\251.md\""), "sub/café.md");
+        assert_eq!(unquote_git_path("plain/path.txt"), "plain/path.txt");
+        assert_eq!(unquote_git_path("\"a\\tb\""), "a\tb");
+    }
+
+    #[test]
+    fn a_plain_folder_has_no_changes_to_show() {
+        let dir = tempfile::TempDir::new().unwrap();
+        assert_eq!(probe_changes(&dir.path().to_string_lossy()), None);
+    }
+
+    #[test]
+    fn a_clean_repository_answers_with_an_empty_list() {
+        // Built inline rather than through `scratch`, because this case needs a repository with
+        // nothing to report and every other fixture deliberately has something.
+        if !clean_repo_setup() {
+            return;
+        }
+        let dir = CLEAN_DIR.with(|cell| cell.borrow_mut().take()).expect("setup promises a folder");
+        assert_eq!(probe_changes(&dir.path().to_string_lossy()), Some(Vec::new()));
+    }
+
+    /// A committed, untouched repository, kept in a thread-local so the test above can probe it
+    /// without the folder being removed before the probe has answered.
+    fn clean_repo_setup() -> bool {
+        let Ok(dir) = tempfile::TempDir::new() else { return false };
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        if !run(&["init", "-q"])
+            || !run(&["config", "user.email", "t@example.com"])
+            || !run(&["config", "user.name", "Baudet Test"])
+        {
+            return false;
+        }
+        if std::fs::write(dir.path().join("only.txt"), "x\n").is_err() {
+            return false;
+        }
+        run(&["add", "-A"]);
+        if !run(&["commit", "-q", "-m", "begin"]) {
+            return false;
+        }
+        CLEAN_DIR.with(|d| *d.borrow_mut() = Some(dir));
+        true
+    }
+
+    thread_local! {
+        static CLEAN_DIR: std::cell::RefCell<Option<tempfile::TempDir>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    #[test]
+    fn a_repository_without_a_commit_is_a_repository() {
+        let Ok(dir) = tempfile::TempDir::new() else { return };
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        if !run(&["init", "-q"]) {
+            return;
+        }
+        if std::fs::write(dir.path().join("a.txt"), "x\n").is_err() {
+            return;
+        }
+        // `git rev-parse --is-inside-work-tree`, unlike `rev-parse HEAD`, succeeds before the first
+        // commit — measured exit 0 — so an unborn HEAD is a repository and its untracked file is a
+        // path the panel should show. It carries no counts because there is no commit to count
+        // against, which is git's absence rather than a zero invented here.
+        let found = probe_changes(&dir.path().to_string_lossy()).expect("an unborn HEAD is still a repo");
+        assert!(found.iter().any(|f| f.path == "a.txt"));
+        assert_eq!(found.iter().find(|f| f.path == "a.txt").unwrap().additions, None);
     }
 }

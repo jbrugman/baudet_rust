@@ -20,7 +20,7 @@ pub mod msg;
 pub mod protocol;
 pub mod usage;
 
-pub use context::{probe_git, GitMeta, SessionContext, GIT_PROBE_TIMEOUT};
+pub use context::{probe_changes, probe_git, ChangeKind, ChangedFile, GitMeta, SessionContext, GIT_PROBE_TIMEOUT};
 pub use error::CoreError;
 pub use event::{delta_method, ApprovalRequest, ThreadEvent};
 pub use item::{
