@@ -11,6 +11,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
+# The blocking client, declared here rather than only in the GUI so the wire shape and the code
+# that reads it cannot drift apart on TLS backend choice.
+reqwest = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

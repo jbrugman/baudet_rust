@@ -177,6 +177,7 @@ version = "0.1.0"
 dependencies = [
  "baudet-core",
  "futures-util",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
