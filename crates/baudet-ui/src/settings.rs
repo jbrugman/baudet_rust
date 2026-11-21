@@ -494,14 +494,26 @@ mod tests {
         assert_eq!(settings.api_key, None);
     }
 
-    /// End one request the way the app does — with the worker's report — because `request_fetch`
-    /// refuses to fire a second while one is in flight. A test that skipped this would be testing a
-    /// state the panel can never be in.
-    fn answer_fetch(view: &mut SettingsView, rx: &std::sync::mpsc::Receiver<SettingsCommand>) {
-        let SettingsCommand::Fetch { endpoint, .. } = rx.recv().unwrap() else {
-            panic!("expected a fetch command");
+    /// Send a fetch, read back what it carried, and end the request the way the app does — with the
+    /// worker's report — because `request_fetch` refuses to fire a second while one is in flight. A
+    /// test that skipped that last step would be testing a state the panel can never be in.
+    ///
+    /// `try_recv` rather than `recv`: this runs on the test's own thread, so a blocking wait would
+    /// wait for a sender only this same thread could serve. That hang is the reason the choice is
+    /// spelled out here.
+    fn fetch_of(
+        view: &mut SettingsView,
+        tx: &std::sync::mpsc::Sender<SettingsCommand>,
+        rx: &std::sync::mpsc::Receiver<SettingsCommand>,
+    ) -> (String, Option<String>) {
+        view.request_fetch(tx);
+        let SettingsCommand::Fetch { endpoint, api_key } =
+            rx.try_recv().expect("the fetch command this helper just sent")
+        else {
+            unreachable!("request_fetch only ever sends a fetch")
         };
-        view.apply_event(SettingsEvent::Listing(Ok(Vec::new()), endpoint));
+        view.apply_event(SettingsEvent::Listing(Ok(Vec::new()), endpoint.clone()));
+        (endpoint, api_key)
     }
 
     #[test]
@@ -515,39 +527,25 @@ mod tests {
         let mut panel = view();
         panel.api_key_env_var = name.to_string();
         let (tx, rx) = std::sync::mpsc::channel();
-        panel.request_fetch(&tx);
-        let fetched = match rx.try_recv() {
-            Ok(SettingsCommand::Fetch { endpoint, api_key }) => {
-                assert_eq!(endpoint, "http://127.0.0.1:8000/v1");
-                api_key
-            }
-            other => panic!("expected a fetch command, got {:?}", other.is_ok()),
-        };
-        assert_eq!(fetched.as_deref(), Some("a-fake-value-for-tests-only"));
+        let fetched = fetch_of(&mut panel, &tx, &rx);
+        assert_eq!(fetched.0, "http://127.0.0.1:8000/v1");
+        assert_eq!(fetched.1.as_deref(), Some("a-fake-value-for-tests-only"));
 
         // The typed value wins over the environment, exactly as `resolved_key` defines it, so a
         // person overriding a stale variable is not silently ignored.
-        let mut typed = panel;
-        typed.api_key = "typed-wins".to_string();
-        answer_fetch(&mut typed, &rx);
-        typed.request_fetch(&tx);
-        let SettingsCommand::Fetch { api_key, .. } = rx.try_recv().unwrap() else {
-            panic!("expected a fetch command");
-        };
-        assert_eq!(api_key.as_deref(), Some("typed-wins"));
+        panel.api_key = "typed-wins".to_string();
+        assert_eq!(fetch_of(&mut panel, &tx, &rx).1.as_deref(), Some("typed-wins"));
 
         // Nothing answers: no typed key and a name that points nowhere. Then the fetch is a bare
         // request, which is right for a server that asks for nothing — absence stays an answer.
         unsafe { std::env::remove_var(name) };
         let mut bare = view();
         bare.api_key_env_var = name.to_string();
-        bare.request_fetch(&tx);
-        answer_fetch(&mut bare, &rx);
-        bare.request_fetch(&tx);
-        let SettingsCommand::Fetch { api_key, .. } = rx.try_recv().unwrap() else {
-            panic!("expected a fetch command");
-        };
-        assert_eq!(api_key, None, "an unresolved key must not become an empty string in a header");
+        assert_eq!(
+            fetch_of(&mut bare, &tx, &rx).1,
+            None,
+            "an unresolved key must not become an empty string in a header"
+        );
     }
 
     #[test]

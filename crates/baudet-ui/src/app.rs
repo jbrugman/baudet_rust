@@ -222,7 +222,6 @@ impl TranscriptApp {
         // are not dropped: a fetch or save result is a single fact the person is waiting on, and
         // there is at most one in flight.
         while let Ok(event) = self.settings_events.try_recv() {
-
             self.settings.apply_event(event);
         }
 
@@ -342,9 +341,6 @@ impl TranscriptApp {
         // still caps the wait, so a server that never answers fails by writing the window as-is.
         let listing_settled = !self.fetch_models_on_start || self.settings.listing_answered();
         let settled = !self.busy && !self.rows.is_empty() && listing_settled;
-        if self.frames % 120 == 0 {
-            let _ = (&self.settings, self.frames);
-        }
         if settled || self.frames >= Self::SHOT_FRAMES {
             if !settled {
                 eprintln!(
