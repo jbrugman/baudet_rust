@@ -122,6 +122,15 @@ impl Provider {
         &self.base_url
     }
 
+    /// The credential this provider will offer, or `None` when it will send a bare request.
+    ///
+    /// Exposed for the same reason `base_url` is: a caller that probes an endpoint has to offer the
+    /// credential the turn after it will offer, and reading the shared state again to guess at that
+    /// is how a panel and a request end up authenticated differently.
+    pub fn api_key(&self) -> Option<&str> {
+        self.api_key.as_deref()
+    }
+
     /// The listing URL, the OpenAI-shaped one the reference app already calls.
     pub fn models_url(&self) -> String {
         format!("{}/models", self.base_url)
@@ -210,8 +219,9 @@ struct Entry {
     id: String,
     #[serde(default)]
     name: Option<String>,
-    /// Two spellings are seen in the wild and both mean the same thing to a picker.
-    #[serde(default, rename = "context_length", alias = "max_context_length")]
+    /// Three spellings are seen in the wild and all three mean the same thing to a picker;
+    /// `max_model_len` is what a GGUF-backed server (measured: LM Studio) calls it.
+    #[serde(default, rename = "context_length", alias = "max_context_length", alias = "max_model_len")]
     context_window: Option<u32>,
 }
 
@@ -339,7 +349,7 @@ mod tests {
         // No name, no label: the id is what shows.
         assert_eq!(models[1].display(), "b-model");
 
-        let bare = r#"[{"id":"only","max_context_length":4096}]"#;
+        let bare = r#"[{"id":"only","max_model_len":4096}]"#;
         let models = parse_listing(bare).unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].context_window, Some(4096), "the alias must be read too");

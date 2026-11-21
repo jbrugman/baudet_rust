@@ -14,6 +14,14 @@ baudet-backend = { workspace = true }
 baudet-app = { workspace = true }
 baudet-store = { workspace = true }
 baudet-settings = { workspace = true }
+# Only for the settings panel's Scan button: the probe it sends is a blocking request made from the
+# settings worker, and it goes through `baudet_backend::protocol::scan`, which is where the dialect
+# rules live. Declared at the workspace for the reason already stated there — the GUI and the
+# transport must not disagree about the HTTP stack.
+reqwest = { workspace = true }
+# The probe's answer is judged from its JSON body — that is the scan's rule — so the panel's worker
+# reads JSON too. Not a new package: `baudet-settings` and `baudet-backend` already carry it.
+serde_json = { workspace = true }
 tokio = { workspace = true }
 egui = { workspace = true }
 egui_extras = { workspace = true }

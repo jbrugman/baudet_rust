@@ -23,6 +23,9 @@ use crate::settings::{self, SettingsCommand, SettingsEvent, SettingsView};
 use baudet_app::session::pump;
 use baudet_app::AppState;
 use baudet_backend::scripted::{Script, ScriptedBackend};
+use baudet_backend::protocol::Protocol;
+use baudet_backend::transport::{Endpoint, ResponsesBackend};
+use baudet_backend::Backend;
 use baudet_core::{AgentMessageItem, Item, ItemStatus, ThreadEvent};
 use baudet_settings::Provider;
 use eframe::egui;
@@ -38,6 +41,13 @@ enum Intent {
     Submit(String),
     Stop,
     Quit,
+    /// The panel chose a model or a reasoning level. Carried to the worker rather than applied on
+    /// the paint side because `AppState`, which stamps them on a request, is owned there.
+    Configure {
+        model: Option<String>,
+        reasoning: Option<String>,
+        max_output_tokens: Option<u32>,
+    },
 }
 
 /// The app's own state: the last painted snapshot and the buttons' words. No conversation truth
@@ -69,6 +79,9 @@ pub struct TranscriptApp {
     /// Whether the settings panel is painted. Owned by the window and toggled from the header, so
     /// one boolean answers "is it showing" for both the header label and the panel.
     settings_open: bool,
+    /// Why this window is not talking to a server, when `--live` asked it to. `None` for the normal
+    /// scripted start, which is not a fallback and must not read as one.
+    fell_back: Option<String>,
     /// The settings panel's own state: the view-model, the last listing, the last status line.
     settings: SettingsView,
     /// Commands out to the settings worker (a fetch, a save). The worker never reaches back into the
@@ -114,6 +127,7 @@ impl TranscriptApp {
             workspace: Workspace::default(),
             changes: Changes::default(),
             settings_open: false,
+            fell_back: None,
             settings,
             settings_tx,
             settings_events,
@@ -135,11 +149,33 @@ impl TranscriptApp {
         self
     }
 
+    /// Build the window over a backend that talks to a server.
+    ///
+    /// Separate from [`TranscriptApp::new`] rather than a flag on it, because the difference is not a
+    /// preference but a different object: the scripted window is the picture the screenshots are taken
+    /// of, and a window whose first turn reaches a network is a different promise. What the two share
+    /// is everything that matters -- `AppState`, the reducer, the pump, the panels -- which is the
+    /// point of the `Backend` seam.
+    fn with_backend(backend: Arc<dyn Backend>) -> TranscriptApp {
+        TranscriptApp::new(backend)
+    }
+
     /// Open the settings panel on startup. A scripted picture has no clicks, so this is the only way
     /// to draw a panel whose default is closed; for a person it is the same state the header button
     /// reaches.
     pub fn with_settings_open(mut self) -> TranscriptApp {
         self.settings_open = true;
+        self
+    }
+
+    /// Say why the window is not live, in the header's own line.
+    ///
+    /// A setter rather than a second argument to [`TranscriptApp::new`], because the reason is known
+    /// only to whoever chose the backend, and a window that silently answers from a script after
+    /// being asked for a server is the failure this exists to make visible.
+    fn with_status(mut self, reason: String) -> TranscriptApp {
+        self.status = reason.clone();
+        self.fell_back = Some(reason);
         self
     }
 
@@ -160,7 +196,7 @@ impl TranscriptApp {
 
     /// The demo conversation the window ships with, so a first run shows a real transcript: a
     /// streamed answer, a tool row, a plan, and an answer that arrives as raw SSE lines.
-    fn demo_backend() -> Arc<ScriptedBackend> {
+    pub(crate) fn demo_backend() -> Arc<ScriptedBackend> {
         let answer = Script::new()
             .event(ThreadEvent::TurnStarted { thread_id: TH.into(), turn_id: T1.into() })
             .event(start(T1, agent(T1, "")))
@@ -222,6 +258,15 @@ impl TranscriptApp {
         // are not dropped: a fetch or save result is a single fact the person is waiting on, and
         // there is at most one in flight.
         while let Ok(event) = self.settings_events.try_recv() {
+            // The session's choice is forwarded before the panel sees it, so a save and the model
+            // the next turn asks cannot disagree even for one frame.
+            if let SettingsEvent::Adopted { model, reasoning, max_output_tokens } = &event {
+                let _ = self.intents.send(Intent::Configure {
+                    model: model.clone(),
+                    reasoning: reasoning.clone(),
+                    max_output_tokens: *max_output_tokens,
+                });
+            }
             self.settings.apply_event(event);
         }
 
@@ -235,7 +280,10 @@ impl TranscriptApp {
         if let Some((rows, busy)) = newest {
             self.rows = rows;
             self.busy = busy;
-            self.status = if busy { "streaming" } else { "idle" }.to_string();
+            self.status = match (&self.fell_back, busy) {
+                (Some(reason), false) => reason.clone(),
+                (_, busy) => if busy { "streaming" } else { "idle" }.to_string(),
+            };
         }
 
         Panel::top("header").show(ui, |ui| {
@@ -473,12 +521,21 @@ fn worker_loop(
                             publish(&state, false);
                             return;
                         }
+                        Ok(Intent::Configure { .. }) => {
+                            // Te laat voor de turn die loopt, en er is niets tussen wachend:
+                            // de wachtlus hierboven pakt het op zodra deze drain ended is.
+                        }
                         Err(_) => {}
                     }
                 }
                 drain.join().ok();
             }
             Intent::Stop => state.cancel_turn(),
+            // Stamped before the next Submit can read them; a turn already running keeps the
+            // request it already sent, which is why this is an intent and not a shared field.
+            Intent::Configure { model, reasoning, max_output_tokens } => {
+                state.set_request_choices(model, reasoning, max_output_tokens)
+            }
         }
         publish(&state, state.live_turns() > 0);
     }
@@ -505,12 +562,93 @@ fn settings_worker_loop(commands: mpsc::Receiver<SettingsCommand>, report: mpsc:
                 };
                 let _ = report.send(SettingsEvent::Listing(result, endpoint));
             }
+            SettingsCommand::Probe { endpoint, api_key } => {
+                let outcome = scan_endpoint(&endpoint, api_key);
+                let _ = report.send(SettingsEvent::Probed(
+                    outcome.map(|o| o.protocol).map_err(|problem| problem.to_string()),
+                    endpoint,
+                ));
+            }
             SettingsCommand::Save(settings) => {
-                let _ = report
-                    .send(SettingsEvent::Saved(baudet_settings::SettingsFile::default_location().write(&settings)));
+                let outcome = baudet_settings::SettingsFile::default_location().write(&settings);
+                // The choices travel to the session with the file, because a person who saved a
+                // model means the next turn to use it. Reported whatever the write did: a session
+                // asking the model on screen is right even when the file refused, and the save's own
+                // outcome still lands in the panel's status line.
+                let _ = report.send(SettingsEvent::Adopted {
+                    model: settings.model,
+                    reasoning: settings.reasoning,
+                    max_output_tokens: settings.max_output_tokens,
+                });
+                let _ = report.send(SettingsEvent::Saved(outcome));
             }
         }
     }
+}
+
+/// Ask one endpoint what it is, on the settings worker's thread.
+///
+/// The rules themselves live in [`baudet_backend::protocol::scan`] — listing first, one probe, the
+/// answer's body rather than its status deciding the dialect. What lives here is only the two sides
+/// of it, because this is the crate holding the credential and the HTTP client: the listing is the
+/// provider's own call, and the probe is the same POST the transport would make.
+///
+/// The listing's models arrive in the picker's order, so the model a probe names is the one a person
+/// would see first. That is not tidiness: naming a model can make a server page it in, which on this
+/// machine displaces the resident model, so a scan only ever names a server already answering.
+fn scan_endpoint(
+    endpoint: &str,
+    api_key: Option<String>,
+) -> Result<baudet_backend::protocol::ScanOutcome, baudet_settings::ListingError> {
+    let provider = baudet_settings::Provider::with_key(endpoint, api_key)?;
+    let address = provider.base_url().to_string();
+    Ok(baudet_backend::protocol::scan(
+        &address,
+        || {
+            provider
+                .list_models()
+                .map(|models| models.into_iter().map(|model| model.id).collect())
+                .map_err(|error| error.to_string())
+        },
+        |path, model, body| probe_dialect(&provider, &address, path, model, body),
+    ))
+}
+
+/// One probe, answered in the transport's own terms: the status and the body it carried.
+///
+/// `model` and `body` come from the scan, which is where the rules about what may be named live; this
+/// function adds nothing to that decision, it only makes the request and reads the answer. The
+/// credential is offered when one is known because that is what the transport will do on the turn
+/// that follows a successful scan — a probe that answers without a key and a turn that sends one are
+/// two different servers as far as a person is concerned.
+fn probe_dialect(
+    provider: &baudet_settings::Provider,
+    address: &str,
+    path: &str,
+    _model: &str,
+    body: &serde_json::Map<String, serde_json::Value>,
+) -> (Option<baudet_backend::protocol::Protocol>, String) {
+    let url = format!("{address}{path}");
+    let client = match reqwest::blocking::Client::builder().timeout(baudet_backend::protocol::PROBE_TIMEOUT).build() {
+        Ok(client) => client,
+        Err(error) => return (None, format!("no request could be built: {error}")),
+    };
+    let body = serde_json::Value::Object(body.clone());
+    let mut request = client.post(&url).json(&body);
+    if let Some(key) = provider.api_key() {
+        request = request.bearer_auth(key);
+    }
+    let answer = match request.send() {
+        Ok(answer) => answer,
+        Err(error) => return (None, format!("no answer from {url}: {error}")),
+    };
+    let status = answer.status().as_u16();
+    // The body is read whatever the status, because the scan's whole rule is that a body settles the
+    // dialect and a status does not: a refusal carrying `{"error": …}` at 200 is a refusal, and a
+    // named server that answers 404 with a chat body would be a chat server.
+    let text = answer.text().unwrap_or_default();
+    let value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::Value::String(text));
+    baudet_backend::protocol::judge_probe(baudet_backend::protocol::Protocol::ChatCompletions, status, &value)
 }
 
 /// The working indicator, on the row's own line: a thin line with a marker travelling over it.
@@ -653,6 +791,11 @@ pub struct Startup {
     /// `workspace`: a headless run cannot type an address, so without it `--fetch-models` could only
     /// ever probe the default, which is usually not where a server actually is.
     pub endpoint: Option<std::path::PathBuf>,
+    /// Ask a server instead of the scripted player. Opt-in, because the two are different promises:
+    /// the scripted window draws the same picture on every machine, and a window that reaches a
+    /// network answers with whatever that machine happens to be running. Without a stored protocol
+    /// there is nothing to send to, so the flag alone does not invent an endpoint.
+    pub live: bool,
 }
 
 impl Startup {
@@ -692,6 +835,8 @@ impl Startup {
                 out.settings = true;
             } else if arg == "--fetch-models" {
                 out.fetch_models = true;
+            } else if arg == "--live" {
+                out.live = true;
             } else if arg == "--endpoint" {
                 match args.next() {
                     Some(value) => out.endpoint = Some(std::path::PathBuf::from(value)),
@@ -708,7 +853,7 @@ impl Startup {
 }
 
 const USAGE: &str =
-    "usage: baudet-ui [--screenshot=<file.png>] [--workspace=<folder>] [--settings] [--fetch-models] [--endpoint=<address>]";
+    "usage: baudet-ui [--screenshot=<file.png>] [--workspace=<folder>] [--settings] [--fetch-models] [--endpoint=<address>] [--live]";
 const HELP: &str = "
 Baudet - a local-first coding assistant
 
@@ -722,6 +867,8 @@ usage: baudet-ui [option]
                         the picture waits for the listing so it cannot miss the fetch)
   --endpoint <address>  point the panel at <address> on startup, instead of the stored endpoint
   --endpoint=<address>  (needed with --fetch-models whenever the server is not the default)
+  --live                send turns to the stored endpoint instead of the scripted player;
+                        it needs a protocol in the settings file, which Scan endpoint writes
   -h, --help            show this text";
 
 /// Start the window with `startup`'s arguments.
@@ -764,12 +911,19 @@ pub fn run_from(startup: Startup) -> eframe::Result {
     let settings = startup.settings;
     let fetch_models = startup.fetch_models;
     let endpoint = startup.endpoint.clone();
+    let live = startup.live;
+    // Chosen here rather than inside the closure, because the answer comes from the settings file and
+    // nothing in the creation context, and because `startup` is moved into that closure below.
+    let (backend, fell_back) = chosen_backend(&startup);
     eframe::run_native(
         "Baudet",
         options,
         Box::new(move |cc| {
             palette::install(&cc.egui_ctx);
-            let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+            let mut app = TranscriptApp::with_backend(backend);
+            if let Some(reason) = fell_back {
+                app = app.with_status(reason);
+            }
             if let Some(path) = &workspace {
                 app = app.with_workspace(path);
             }
@@ -778,6 +932,19 @@ pub fn run_from(startup: Startup) -> eframe::Result {
             }
             if let Some(address) = &endpoint {
                 app = app.with_endpoint(&address.to_string_lossy());
+            }
+            if live {
+                // The panel's choices reach the session over the same channel a save uses, so a
+                // window opened with --live asks the stored model from its first turn instead of
+                // leaving that to the endpoint. Only for a live window: the scripted player's answer
+                // is the picture the screenshots are taken of, and it must not be stamped with a
+                // model nobody sent it to.
+                let choices = app.settings.draft().ok();
+                let _ = app.intents.send(Intent::Configure {
+                    model: choices.as_ref().and_then(|draft| draft.model.clone()),
+                    reasoning: choices.as_ref().and_then(|draft| draft.reasoning.clone()),
+                    max_output_tokens: choices.as_ref().and_then(|draft| draft.max_output_tokens),
+                });
             }
             if fetch_models {
                 app = app.with_fetch_models();
@@ -788,6 +955,70 @@ pub fn run_from(startup: Startup) -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+/// The backend this window will answer with: a server when `--live` can name one, the scripted
+/// player otherwise.
+///
+/// Returns the fallback's reason beside the backend rather than returning an error, because "no
+/// server tonight" is not a reason to refuse to start a window: the scripted transcript is what the
+/// screenshots and the demo are made of, and a person who forgot to scan an endpoint still gets the
+/// app. What it must not get is the impression the answers came from a model, which is what the
+/// reason in the header is for.
+fn chosen_backend(startup: &Startup) -> (Arc<dyn Backend>, Option<String>) {
+    if !startup.live {
+        return (TranscriptApp::demo_backend(), None);
+    }
+    // Read the file the window itself would read, rather than trusting a copy: the dialect and the
+    // endpoint have to be the ones a save would write, or the header could claim a server the
+    // settings panel does not show.
+    let file = baudet_settings::SettingsFile::default_location();
+    let settings = file.read().settings().clone();
+    match endpoint_from_settings(&settings).and_then(|endpoint| {
+        let reasoning = settings.reasoning.clone();
+        ResponsesBackend::new(endpoint, reasoning)
+            .map(|backend| Arc::new(backend) as Arc<dyn Backend> as _)
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(backend) => (backend, None),
+        Err(problem) => (
+            TranscriptApp::demo_backend(),
+            Some(format!("scripted player: {problem}")),
+        ),
+    }
+}
+
+/// Translate the settings file into the transport's endpoint.
+///
+/// This lives in the UI crate rather than in `baudet-backend` because of the direction of the arrow:
+/// `baudet-settings` already knows the provider and the credential, while the backend crate knows
+/// neither and must stay that way — a transport that reads a settings file could no longer be driven
+/// by a test that hands it an endpoint. The window is the only crate in the graph that sees both
+/// sides, so the translation happens here and the backend keeps taking a plain [`Endpoint`].
+///
+/// An unset dialect is an error rather than a default for the reason stated on
+/// [`baudet_settings::Settings::protocol`]: guessing a dialect sends a turn built for one server to
+/// another, and a wrong answer is worse than an absent one.
+fn endpoint_from_settings(settings: &baudet_settings::Settings) -> Result<Endpoint, String> {
+    let key = settings.resolved_key();
+    let provider = baudet_settings::Provider::with_key(&settings.base_url, key.clone())
+        .map_err(|error| error.to_string())?;
+    let dialect = settings
+        .protocol_word()
+        .and_then(Protocol::from_word)
+        .ok_or("no protocol chosen; use Scan endpoint in settings")?;
+    Ok(Endpoint {
+        base_url: provider.base_url().to_string(),
+        credential: match key {
+            Some(value) => baudet_backend::transport::Credential::typed(value),
+            None => baudet_backend::transport::Credential::none(),
+        },
+        protocol: dialect,
+        model: settings.model.clone().unwrap_or_default(),
+        // No chaining: the reference app replays its own transcript, and a chat-completions server
+        // keeps nothing between turns. Responses stays opt-in until a server is measured to chain.
+        store: false,
+    })
 }
 
 /// Write egui's picture to `path` as an 8-bit RGBA PNG.

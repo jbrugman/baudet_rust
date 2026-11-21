@@ -214,6 +214,7 @@ mod tests {
             max_output_tokens: Some(4096),
             api_key: Some("sk-local".into()),
             api_key_env_var: "SOME_OTHER_KEY".into(),
+            protocol: Some("chat_completions".into()),
         };
         file.write(&settings).unwrap();
         assert_eq!(file.read().settings(), &settings);

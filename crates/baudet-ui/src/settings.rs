@@ -20,6 +20,7 @@
 //! and a setting that nothing reads is a promise the app cannot keep.
 
 use crate::palette;
+use baudet_backend::protocol::Protocol;
 use baudet_settings::{ListingError, Model, ReadOutcome, Settings, SettingsFile, WriteError};
 use egui::{ScrollArea, Ui};
 
@@ -36,6 +37,9 @@ pub enum SettingsCommand {
         /// as it carries its own endpoint. `None` (or blank) means a bare GET.
         api_key: Option<String>,
     },
+    /// Ask `endpoint` which protocol it answers, on top of which models it has. Travels with its own
+    /// endpoint and key for the same reason [`Fetch`] does: the worker reads no shared state.
+    Probe { endpoint: String, api_key: Option<String> },
     /// Persist `settings`. The worker writes it and reports the outcome; it never keeps the settings,
     /// because the view-model is the truth about what is on screen.
     Save(Settings),
@@ -47,6 +51,18 @@ pub enum SettingsEvent {
     /// the models and the endpoint they came from, so a late answer cannot fill the picker for an
     /// endpoint the person has since retyped.
     Listing(Result<Vec<Model>, ListingError>, String),
+    /// What an endpoint turned out to be: the dialect its answer identified, plus the notes that say
+    /// how that was decided. `None` means the probe did not identify one, which is a fact about the
+    /// server rather than a failure of the request, and the notes are the evidence.
+    Probed(Result<Option<Protocol>, String>, String),
+    /// What a save just persisted, as the choices a session should stamp on its next request. Sent
+    /// beside [`SettingsEvent::Saved`] rather than instead of it: whether the file took the bytes is
+    /// the panel's business, and which model to ask next is the session's.
+    Adopted {
+        model: Option<String>,
+        reasoning: Option<String>,
+        max_output_tokens: Option<u32>,
+    },
     /// A save, refused or done, in the words the store produced.
     Saved(Result<(), WriteError>),
 }
@@ -58,6 +74,11 @@ pub struct SettingsView {
     base_url: String,
     /// The chosen model id. `None` is "whatever the endpoint offers first".
     model: Option<String>,
+    /// The wire dialect, as the word the file carries (`responses`, `chat_completions`). Text for
+    /// the same reason `reasoning` is text: a word this build does not know must survive a round trip
+    /// rather than look like a corrupt file, and it is the transport's `Protocol::from_word` that
+    /// decides whether a turn may be sent at all.
+    protocol: Option<String>,
     /// The reasoning level, kept as the four words the endpoint accepts plus "unset". Text rather
     /// than a parsed value because the honest levels belong to the model, exactly as in the config.
     reasoning: Reasoning,
@@ -88,6 +109,12 @@ pub struct SettingsView {
     /// `fetched_for` this is not about which models are current: it is the record that a request is
     /// no longer in flight, which is what a waiter needs and what a failure cannot otherwise supply.
     listing_answered: bool,
+    /// The dialect the last scan found for this endpoint, and the endpoint it was found on. Kept
+    /// beside `fetched_for` for the same reason: both are facts about the address that was asked, so
+    /// retyping it retires them together.
+    probed: Option<(String, Protocol)>,
+    /// Whether a scan is in flight, so its button reads busy and cannot fire a second probe.
+    probing: bool,
     /// The password widget's transient buffer, kept so the field's show/hide survives a repaint.
     reveal_key: bool,
 }
@@ -185,8 +212,13 @@ impl SettingsView {
         self.max_output_tokens = settings.max_output_tokens.map(|n| n.to_string()).unwrap_or_default();
         self.api_key = settings.api_key.clone().unwrap_or_default();
         self.api_key_env_var = settings.api_key_env_var.clone();
+        self.protocol = settings.protocol_word().map(str::to_string);
         self.fetched_for = None;
         self.listing_answered = false;
+        // A stored dialect is a claim about an endpoint this panel has not asked yet, so it is shown
+        // as what it is: chosen, not probed. `probed` stays empty until a scan says otherwise.
+        self.probed = None;
+        self.probing = false;
     }
 
     /// What a save would persist right now, parsing the text fields. Returns the reason instead when
@@ -209,6 +241,7 @@ impl SettingsView {
             max_output_tokens,
             api_key: Some(self.api_key.clone()).filter(|k| !k.trim().is_empty()),
             api_key_env_var: self.api_key_env_var.trim().to_string(),
+            protocol: self.protocol.clone().map(|word| word.trim().to_string()).filter(|w| !w.is_empty()),
         })
     }
 
@@ -236,6 +269,27 @@ impl SettingsView {
                     }
                 }
             }
+            SettingsEvent::Probed(result, endpoint) => {
+                self.probing = false;
+                match result {
+                    Ok(Some(dialect)) => {
+                        // The scan's answer replaces the field's word, because it is evidence rather
+                        // than a preference: a server that answered a chat turn is a chat server.
+                        self.protocol = Some(dialect.word().to_string());
+                        self.probed = Some((endpoint, dialect));
+                        self.status = format!("{}: {}", self.base_url.trim(), dialect.word());
+                    }
+                    // Nothing identified. The notes that say why are the whole value of this event,
+                    // so they are what the status line carries; the chosen dialect is left alone,
+                    // because a probe that learned nothing cannot unlearn what a person set.
+                    Ok(None) => self.status = format!("no dialect identified: {endpoint}"),
+                    Err(problem) => self.status = problem,
+                }
+            }
+            // Nothing to remember here: the window forwards this one to the session and the panel's
+            // own words come from the `Saved` that follows it. The arm exists so adding it to the
+            // enum cannot silently drop through a wildcard.
+            SettingsEvent::Adopted { .. } => {}
             SettingsEvent::Saved(result) => {
                 self.status = match result {
                     Ok(()) => format!("saved to {}", self.path.as_deref().map(describe_path).unwrap_or_default()),
@@ -260,6 +314,17 @@ impl SettingsView {
         self.base_url = address.trim().to_string();
         self.fetched_for = None;
         self.listing_answered = false;
+        self.probed = None;
+    }
+
+    /// The dialect to show beside the endpoint field: what a scan proved for this address, otherwise
+    /// what the file claims, otherwise nothing.
+    pub fn protocol_word(&self) -> Option<&str> {
+        self.probed
+            .as_ref()
+            .filter(|(probed, _)| *probed == self.base_url.trim())
+            .map(|(_, dialect)| dialect.word())
+            .or_else(|| self.protocol.as_deref().map(str::trim).filter(|w| !w.is_empty()))
     }
 
     /// Ask for the models the endpoint offers, exactly as the Fetch button does: the command carries
@@ -359,6 +424,28 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
     let fetch_now = ui
         .add_enabled(!view.fetching, egui::Button::new(if view.fetching { "fetching…" } else { "Fetch models" }))
         .clicked();
+    ui.horizontal(|ui| {
+        // The second question about an address: not which models are on it, but what it answers.
+        // Deliberately its own button rather than part of Fetch, because a probe names a model, and
+        // naming one a machine has to page in displaces the one it is keeping warm.
+        let scan = ui
+            .add_enabled(!view.probing, egui::Button::new(if view.probing { "scanning…" } else { "Scan endpoint" }))
+            .clicked();
+        if scan {
+            view.probing = true;
+            view.status = format!("scanning {}…", view.base_url.trim());
+            commands.push(SettingsCommand::Probe {
+                endpoint: view.base_url.trim().to_string(),
+                api_key: Some(view.api_key.clone()).filter(|k| !k.trim().is_empty()),
+            });
+        }
+        // What the app believes this server speaks. Proven wins over stored, which is what
+        // `protocol_word` encodes; showing only the stored word would let a stale file outlive the
+        // scan that disproved it.
+        if let Some(word) = view.protocol_word() {
+            ui.label(dim(format!("protocol: {word}")));
+        }
+    });
     // Enter in the endpoint field fetches, because the first thing a person does after typing an
     // address is ask what is on it.
     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter)) && response.has_focus();

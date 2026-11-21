@@ -42,10 +42,30 @@ impl Sent {
 pub struct AppState {
     backend: Arc<dyn Backend>,
     system: String,
+    /// The model and reasoning level from settings, stamped on every request. `AppState` does not
+    /// know what they mean -- it hands them to the backend, which does -- but the request is built
+    /// here, so this is the only place they can enter it.
+    ///
+    /// Behind a `Mutex` for the same reason `rows` is: the value is written from the window's paint
+    /// pass, when the settings panel saves, and read on the worker thread that builds the request.
+    /// A plain field would make `AppState` `!Sync`, and every caller here already holds it in an
+    /// `Arc`. Held for a clone only, never across a request.
+    choices: Mutex<RequestChoices>,
     rows: Mutex<Rows>,
     live_turns: AtomicUsize,
     turn_counter: AtomicUsize,
     live: Mutex<Option<Arc<Mutex<TurnHandle>>>>,
+}
+
+/// What the settings panel chose for the next request.
+#[derive(Debug, Clone, Default)]
+pub struct RequestChoices {
+    pub model: Option<String>,
+    pub reasoning: Option<String>,
+    /// The ceiling every subsequent turn may spend, from the same panel. `None` leaves the decision
+    /// to the endpoint, which is what an empty field means and why this is an option rather than a
+    /// number with a default: inventing a budget here would cap an answer nobody capped.
+    pub max_output_tokens: Option<u32>,
 }
 
 /// A turn is already running. Baudet's rule: the running turn keeps the session, so a second send
@@ -86,11 +106,27 @@ impl AppState {
         AppState {
             backend,
             system: system.into(),
+            choices: Mutex::new(RequestChoices::default()),
             rows: Mutex::new(Rows::new()),
             live_turns: AtomicUsize::new(0),
             turn_counter: AtomicUsize::new(0),
             live: Mutex::new(None),
         }
+    }
+
+    /// Set the model and reasoning level every subsequent request names.
+    ///
+    /// A setter rather than a constructor argument because these are the settings panel's values, and
+    /// the panel can change them while a conversation is open; a turn already running keeps whatever
+    /// it was sent with, since its request has already left.
+    pub fn set_request_choices(
+        &self,
+        model: Option<String>,
+        reasoning: Option<String>,
+        max_output_tokens: Option<u32>,
+    ) {
+        *self.choices.lock().unwrap() =
+            RequestChoices { model, reasoning, max_output_tokens };
     }
 
     /// Rows as they stand right now, oldest first. The only accessor a renderer needs.
@@ -131,6 +167,7 @@ impl AppState {
             },
         );
 
+        let choices = self.choices.lock().unwrap().clone();
         let request = SendRequest {
             system: self.system.clone(),
             user_text: user_text.to_string(),
@@ -138,7 +175,9 @@ impl AppState {
             previous_response_id: None,
             tools: None,
             image: None,
-            max_output_tokens: None,
+            max_output_tokens: choices.max_output_tokens,
+            model: choices.model.clone(),
+            reasoning: choices.reasoning.clone(),
         };
 
         let handle = match self.backend.send(request) {

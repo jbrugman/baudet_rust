@@ -49,6 +49,14 @@ pub struct Settings {
     /// so a person with several local servers does not have to choose between their shell and the
     /// app.
     pub api_key_env_var: String,
+    /// The wire dialect to send turns to: `responses` or `chat_completions`. Text rather than an
+    /// enum for the same reason `reasoning` is: a newer server may answer a dialect this build has
+    /// no name for, and that must read as an unknown word, not as a corrupt file.
+    ///
+    /// `None` means "not chosen", and the absence is load-bearing: a turn is only sent to a server
+    /// whose dialect is known, so an unset dialect keeps the window on its scripted player instead
+    /// of letting it guess a dialect against a server that may not speak it.
+    pub protocol: Option<String>,
 }
 
 impl Default for Settings {
@@ -64,6 +72,8 @@ impl Default for Settings {
             // The variable this machine's local server actually uses, which is why it is the default
             // rather than a generic `BAUDET_API_KEY`.
             api_key_env_var: DEFAULT_KEY_ENV_VAR.to_string(),
+            // Nothing is known about the server behind a default endpoint, so nothing is claimed.
+            protocol: None,
         }
     }
 }
@@ -93,6 +103,12 @@ impl Settings {
     /// Whether anything at all answers for a credential, without saying what it is.
     pub fn has_key(&self) -> bool {
         self.resolved_key().is_some()
+    }
+
+    /// The wire dialect the file names, in the words the transport uses, or `None` when the file
+    /// names none. Untrusted words stay `None` for the reason stated on the field.
+    pub fn protocol_word(&self) -> Option<&str> {
+        self.protocol.as_deref().map(str::trim).filter(|word| !word.is_empty())
     }
 }
 

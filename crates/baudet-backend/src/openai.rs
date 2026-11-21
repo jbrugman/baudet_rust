@@ -355,7 +355,7 @@ fn string_field(object: &Map<String, Value>, key: &str) -> Option<String> {
 
 /// Token accounting, reading both vocabularies: `input_tokens` is what the Responses API calls it,
 /// `prompt_tokens` what a chat-completions server does. A number a server omits stays omitted.
-fn parse_usage(usage: &Map<String, Value>) -> Usage {
+pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
     let number = |keys: [&str; 2]| keys.into_iter().filter_map(|key| usage.get(key)).find_map(Value::as_i64);
     Usage::new(
         number(["input_tokens", "prompt_tokens"]),

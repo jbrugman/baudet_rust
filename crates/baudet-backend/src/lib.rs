@@ -13,8 +13,10 @@ use baudet_core::{CoreError, ThreadEvent};
 use tokio::sync::mpsc;
 
 pub mod openai;
+pub mod protocol;
 pub mod scripted;
 pub mod sse;
+pub mod transport;
 
 /// What one turn asks the backend to answer.
 ///
@@ -32,6 +34,13 @@ pub struct SendRequest {
     pub image: Option<String>,
     /// The ceiling this turn may spend, so a backend that invents a budget can be held to it.
     pub max_output_tokens: Option<u32>,
+    /// The model to name in the request. `None` means "whatever the endpoint was chosen for", which
+    /// the backend answers from its own configuration -- the two are different because a person can
+    /// point one endpoint at a second model without reconfiguring the endpoint.
+    pub model: Option<String>,
+    /// The reasoning level to ask for, as the settings word it (`minimal`..`high`), or `None` for
+    /// "the model's own default". Kept as text: the honest values belong to the model.
+    pub reasoning: Option<String>,
 }
 
 /// Where a turn went wrong, in terms a listener can act on.
