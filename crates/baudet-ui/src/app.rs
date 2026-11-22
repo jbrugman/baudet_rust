@@ -147,7 +147,7 @@ pub struct TranscriptApp {
     shot_send: Option<String>,
     /// The left panel: the folder under inspection and its tree.
     workspace: Workspace,
-    /// Het draft-veld van de map-rij. Het lééft hier en niet lokaal in `panels::left`, omdat een
+    /// Het draft-veld van de map-rij. Het lééft hier en niet lokaal in `panels::file_tree_controls`, omdat
     /// `TextEdit::singleline(&mut draft)` zijn tekst uit de meegegeven string haalt en erin schrijft:
     /// `TextEditState` bewaart alleen cursor en offset, geen tekst (text_edit/builder.rs:551). Een
     /// lokaal `let mut draft = String::new();` bij elke paint wist dus elke toetsaanslag vóórdat de
@@ -273,8 +273,8 @@ impl TranscriptApp {
         self
     }
 
-    /// Choose the folder the workspace panel shows, through the same `open` the panel's own field
-    /// uses. Nothing else has to know this happened: `panels::left` notices the folder is unprobed
+    /// Choose the folder the filetree panel shows, through the same `open` its folder field uses.
+    /// Nothing else has to know this happened: `panels::file_tree` notices an unprobed folder
     /// and asks git, which is the refresh a typed path triggers.
     pub fn with_workspace(mut self, path: impl AsRef<std::path::Path>) -> TranscriptApp {
         self.workspace.open(&path.as_ref().to_string_lossy());
@@ -396,13 +396,12 @@ impl TranscriptApp {
         // het project van de zojuist gemaakte keuze, niet dat van de vorige pass.
         self.apply_sidebar_intents(intents);
         // De bestandsboom staat rechts, naast het middenvlak — `[ ProjectSidebar | Chat/Settings ]
-        // [ FileTree ]` zoals `Main.kt:161-170` het opzet. Vóór deze wissel stond hij links, wat de
-        // klacht "sinds wanneer staat de folderstructuur links" opleverde.
-        if panels::left(ui, &mut self.workspace, &mut self.folder_draft, self.changes.meta(), self.changes.paths()) {
+        // [ Files + Changes ]` zoals `Main.kt:161-170` het opzet. De mapkiezer en de git-lijst
+        // delen één rechterstrook; er staat geen derde paneel naast de projectsidebar.
+        if self.show_filetree
+            && panels::file_tree(ui, &mut self.workspace, &mut self.folder_draft, &self.changes)
+        {
             self.changes.refresh(self.workspace.cwd());
-        }
-        if self.show_filetree {
-            panels::right(ui, &self.changes, self.workspace.cwd());
         }
         // Drain every worker report the settings panel asked for. Unlike transcript snapshots these
         // are not dropped: a fetch or save result is a single fact the person is waiting on, and
@@ -594,9 +593,9 @@ impl TranscriptApp {
         self.data_root.as_deref()
     }
 
-    /// De map die het workspace-pane op dat moment toont, of `None` als er nog geen gekozen is.
+    /// De map die het rechterpane op dat moment toont, of `None` als er nog geen gekozen is.
     ///
-    /// Een lezer, geen schrijver: `Workspace::cwd` houdt één eigenaar en `panels::left` blijft de
+    /// Een lezer, geen schrijver: `Workspace::cwd` houdt één eigenaar en `panels::file_tree` blijft de
     /// enige die er via `open` naar schrijft. Public zodat een test kan vragen "heeft de rij deze map
     /// geopend" zonder het pane-self te hoeven aanroepen — precies de vraag waarmee de draft-fix zich
     /// bewijst (een klik op `Open` na een getypt pad móet hier uitkomen).
@@ -1568,7 +1567,7 @@ pub struct Startup {
     /// Where `--screenshot` writes its picture; `None` opens a window as usual.
     pub screenshot: Option<std::path::PathBuf>,
     /// A folder to open on startup. It travels the same road as a path typed into the panel:
-    /// `Workspace::open` followed by the git probe `panels::left` asks for. A scripted picture needs
+    /// `Workspace::open` followed by the git probe `panels::file_tree` asks for. A scripted picture needs
     /// it because an unfocused window receives no keystrokes, and it is not a second way of choosing
     /// a folder -- it is the same one, entered by a flag.
     pub workspace: Option<std::path::PathBuf>,
@@ -1671,7 +1670,7 @@ usage: baudet-ui [option]
 
   --screenshot <file>   draw the window, save a picture of it to <file> and exit,
   --screenshot=<file>   without taking focus from what you are doing
-  --workspace <folder>  open <folder> in the workspace panel on startup
+  --workspace <folder>  open <folder> in the filetree panel on startup
   --settings            open the settings panel on startup
   --fetch-models        on startup, ask the endpoint for its models (with --settings,
                         the picture waits for the listing so it cannot miss the fetch)

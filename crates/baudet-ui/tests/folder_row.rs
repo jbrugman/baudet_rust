@@ -7,14 +7,14 @@
 //! rectangle. Both buttons then landed beyond the panel's edge with nothing said about it. Measured
 //! here before anything was changed: the buttons ended at x = 10 072 and x = 10 120.
 //!
-//! So the widths are decided in `panels::left` from the measured button sizes, and this file checks
+//! So the widths are decided in `panels::file_tree_controls` from the measured button sizes, and this file checks
 //! the one claim that matters: the row ends inside the panel. It repeats the row's own arithmetic on
 //! purpose — calling into the panel would need the module public for no other reason, and a pixel
 //! measurement would only show one panel width. What is *not* repeated is the guess: the constants
 //! below are what egui gives those two labels, asserted here so that a font or spacing change that
 //! makes them wrong fails in this test rather than in a screenshot nobody took.
 
-/// What egui measured for `Browse…` and `Open` at the default text style. `panels::left` rounds the
+/// What egui measured for `Browse…` and `Open` at the default text style. `panels::file_tree_controls` rounds the
 /// first up (64.4) and uses the second as-is; both are checked to still leave room below.
 const BROWSE_WIDTH: f32 = 64.4;
 const OPEN_WIDTH: f32 = 40.2;
@@ -50,7 +50,7 @@ fn row_end(panel_width: f32, min_size: f32) -> (f32, f32) {
 
 #[test]
 fn the_buttons_are_the_widths_the_panel_budgets_for() {
-    // If this fails, the constants in panels::left are stale: the row would then either clip the
+    // If this fails, the constants in panels::file_tree_controls are stale: the row would then either clip the
     // field's text or push Open past the edge — which is exactly the silent failure this whole file
     // exists to prevent, so it is measured here rather than assumed from a screenshot.
     let ctx = egui::Context::default();

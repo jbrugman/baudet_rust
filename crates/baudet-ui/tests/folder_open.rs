@@ -1,7 +1,7 @@
 //! De folderrij opent een map, en de `Open`-knop is daar een werkende deur op — bewezen, niet geraden.
 //!
 //! De klacht uit het levende venster was: "de folder-kiezer opent niet, de Open-knop doet niets".
-//! Twee onafhankelijke doodslagen in `panels::left` verklaarden dat, beide hier vastgezet:
+//! Twee onafhankelijke doodslagen in `panels::file_tree_controls` verklaarden dat, beide hier vastgezet:
 //!
 //!  * De `Open`-knop was een kale `small_button`: diens auto-adres is relatief aan de paneel-`Ui`
 //!    en van buiten niet te reconstrueren, dus hij verdween voorbij de rand en was onklikbaar
@@ -94,7 +94,7 @@ fn een_klik_op_open_is_klikbaar_tot_op_het_adres() {
 
 #[test]
 fn een_pad_in_de_draft_opent_de_map() {
-    // Het commit-pad, buiten de lay-out gemeten: `panels::left` moet een niet-lege draft doorzetten
+    // Het commit-pad, buiten de lay-out gemeten: `panels::file_tree_controls` moet een niet-lege draft doorzetten
     // naar `Workspace::open`. We kunnen hier niet in het kolom-veld typen, dus we zetten de veld-basis
     // via een publieke ingang niet — in plaats daarvan controleren we de eigenschap die de fix
     // rechtstreeks draagt: een map die werkelijk op schijf bestaat, verzet de workspace.

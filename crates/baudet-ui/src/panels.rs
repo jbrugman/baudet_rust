@@ -1,10 +1,13 @@
-//! The two flanking panels: the workspace on the left, the work in progress on the right.
+//! De flankerende panelen: links projecten en sessies, rechts de map en daaronder de wijzigingen.
 //!
-//! Both read the filesystem and git through `baudet-core`, and neither holds a copy of anything the
-//! transcript owns. That asymmetry is why the right panel can exist before a backend does: git is
-//! already a source of truth for "what changed", so the panel lists measured paths, while an
-//! unreadable folder or a folder that is not a repository says so in words and lists nothing. An
-//! honest cold start beats a screen of invented rows.
+//! Dit volgt `Main.kt:161-170`: `[ProjectSidebar | Chat/Settings] | FileTreePanel`. De mapstate
+//! `Workspace` heet historisch zo omdat ze het werkgebond aanwijst; ze staat niet meer in een eigen
+//! linkerstrook. De linkerboom is en blijft de project-/sessieboom, terwijl de rechterstrook laat
+//! zien wat er in de map staat en wat git ervan zegt.
+//!
+//! Beide rechts lezen hun feiten uit `baudet-core` en bezitten niets van het transcript. Git is al
+//! een bron van waarheid voor "wat er veranderde", dus de lijst toont gemeten paden. Een onleesbare
+//! map of een map zonder repository zegt dat met woorden en verzint geen rijen.
 //!
 //! Refresh happens when a folder becomes the subject -- on opening one and on switching to another
 //! -- and never on a timer, bounded by the probe's own budget ([`baudet_core::GIT_PROBE_TIMEOUT`] per
@@ -36,7 +39,7 @@ const MAX_ENTRIES_PER_DIR: usize = 200;
 /// file, so it survives and the head gives way.
 const KEEP_TAIL: usize = 22;
 
-/// The left panel's view of a folder.
+/// De mapachtergrond van het rechterpaneel: wat er staat en of git erover kon praten.
 ///
 /// Whether a directory is open is *not* stored here. egui keeps that state per widget identity, and
 /// a second copy in this struct would be a second answer to the same question — the kind that ends
@@ -162,13 +165,14 @@ impl Changes {
     }
 }
 
-/// The left panel: the chosen folder, its tree, the branch it is on.
+/// Het vooraantal van de rechterfiletree: map kiezen, paden, branch.
 ///
+/// De functie heet niet `left`: de layoutopdracht van de origineler plaatst deze inhoud rechts.
 /// Returns whether the caller should ask git about the folder now: true for a folder that has not
 /// been probed yet and for every switch, false while the same folder stays the subject. A folder
 /// that cannot be read asks once as well, because "no repository" is git's honest answer there and
 /// not one the panel may invent.
-pub fn left(
+pub fn file_tree_controls(
     ui: &mut Ui,
     workspace: &mut Workspace,
     draft: &mut String,
@@ -183,19 +187,10 @@ pub fn left(
     // maar overleeft hij wél wat er wél getypt is. Het is nog steeds geen tweede display van `cwd`
     // (daarvoor is de folder-regel hieronder); het is alleen de invoer, en die leeft buiten de paint.
     let mut requested: Option<String> = None;
-    let frame = Panel::left("workspace")
-        .resizable(true)
-        .default_size(220.0)
-        // 146 pt, niet 150: de vloer is een gevolg van de twee knoppen en niet van smaak. De
-        // budgetten in tests/folder_row.rs (64,4 + 40,2 pt) plus hun twee ruimtes zijn 110,6 pt, en
-        // de breedste meting in die test — `Open` op een vloer van 130 pt — eindigt pas voorbij de
-        // rand; 146 pt is de vloer waaronder die rij per constructie wél sluit. `min_size` is de
-        // grens die egui bij een sleep of een klein venster in acht neemt (panel.rs:763 clamped
-        // daartoe terug), dus een smaller venster komt er niet onder.
-        .min_size(146.0)
-        .frame(egui::Frame::side_top_panel(ui.style()));
-    frame.show(ui, |ui| {
-        ui.strong("Workspace");
+    // Geen eigen `Panel`: de mapkinderen delen de rechterstrook met `changes_body`, zodat egui
+    // hier één flank overhoudt, zoals de Kotlin `SplitPane`.
+    {
+        ui.strong("Files");
         // Eén rij: het veld zo breed als overblijft, de knoppen ernaast. Het veld blijft de plek om
         // te typen — een dialoog die een pad kiest, is een toevoeging en geen vervanging, want een
         // pad dat iemand uit het hoofd typt, is sneller dan drie klikken door een boom.
@@ -205,7 +200,7 @@ pub fn left(
         // beschikbare ruimte — in een root-UI 10 000 pt — en `Ui::put` knipt die.rect niet af, dus
         // elke knop ernaast verdween voorbij de rand: stil, zonder foutmelding, en op een plaatje niet
         // te onderscheiden van "erbij vergeten". Uitsluitend `add_sized` met een eindige breedte houdt
-        // de rij binnen de paneel, en dan sluit die per constructie aan op de rand.
+        // de rij binnen de rechterstrook, en dan sluit die per constructie aan op de rand.
         let row_width = ui.available_width();
         let spacing = ui.spacing().item_spacing.x;
         // De twee knoppen meten 64,3 en 40,2 pt (gemeten in tests/folder_row.rs); 64,4 en 40,2 is
@@ -308,7 +303,7 @@ pub fn left(
                 });
             }
         }
-    });
+    }
     if requested.is_some() {
         // `open` already cleared `probed`, so the answer is read from the state it just left rather
         // than recomputed from the field: the panel cannot claim a refresh the state disagrees with.
@@ -783,42 +778,60 @@ fn file_row(ui: &mut Ui, path: &Path, change: Option<ChangeKind>) {
         .on_hover_text(path.display().to_string());
 }
 
-/// The right panel: the paths git reports as different from the commit.
-pub fn right(ui: &mut Ui, changes: &Changes, chosen: Option<&str>) {
-    let frame = Panel::right("changes")
-        .resizable(true)
-        .default_size(260.0)
-        .min_size(170.0)
-        .frame(egui::Frame::side_top_panel(ui.style()));
-    frame.show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.strong("Changes");
+/// Het achterantwoord van de rechterfiletree: git-wijzigingen onder de mappenboom.
+fn changes_body(ui: &mut Ui, changes: &Changes, chosen: Option<&str>) {
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.strong("Changes");
             if !changes.paths.is_empty() {
                 ui.label(dim(format!("{}", changes.paths.len())));
             }
         });
-        ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            if chosen.is_none() {
-                ui.label(dim("No folder chosen."));
-                return;
-            }
-            if changes.unavailable {
-                ui.label(dim("git did not answer."));
-                return;
-            }
-            if changes.meta.is_none() {
-                ui.label(dim("no repository"));
-                return;
-            }
-            if changes.paths.is_empty() {
-                ui.label(dim("nothing changed"));
-                return;
-            }
-            for file in &changes.paths {
-                change_row(ui, file);
-            }
-        });
+    ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        if chosen.is_none() {
+            ui.label(dim("No folder chosen."));
+            return;
+        }
+        if changes.unavailable {
+            ui.label(dim("git did not answer."));
+            return;
+        }
+        if changes.meta.is_none() {
+            ui.label(dim("no repository"));
+            return;
+        }
+        if changes.paths.is_empty() {
+            ui.label(dim("nothing changed"));
+            return;
+        }
+        for file in &changes.paths {
+            change_row(ui, file);
+        }
     });
+}
+
+/// De rechterflank zoals `Main.kt:170` hem aan het venster vraagt: eerst de map, dan de wijzigingen.
+pub fn file_tree(
+    ui: &mut Ui,
+    workspace: &mut Workspace,
+    draft: &mut String,
+    changes: &Changes,
+) -> bool {
+    let frame = Panel::right("filetree")
+        .resizable(true)
+        .default_size(280.0)
+        // De rij met Browse/Open en het veld moet ook in de smaller wordende rechterstrook sluiten.
+        // 220 pt is de brede default uit de oude workspacestrook plus de nodige marge voor de
+        // Changes-rijen; 180 pt is de ondergrens die de gemeten folderrij per constructie aankan.
+        .min_size(180.0)
+        .frame(egui::Frame::side_top_panel(ui.style()));
+    let chosen = workspace.cwd().map(|s| s.to_string());
+    let mut refresh: Option<bool> = None;
+    frame.show(ui, |ui| {
+        refresh = Some(file_tree_controls(ui, workspace, draft, changes.meta(), changes.paths()));
+        changes_body(ui, changes, chosen.as_deref());
+    });
+    refresh.unwrap_or(false)
 }
 
 /// One path git reports: its state, its name, and git's own counts.

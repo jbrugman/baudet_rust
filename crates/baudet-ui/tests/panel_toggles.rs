@@ -121,7 +121,7 @@ fn de_oost_toggle_verbergt_de_bestandboom_en_houdt_zijn_breedte() {
     let ctx = addressable_context();
     let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
     paint_once(&ctx, &mut app);
-    let before = remembered_width(&ctx, "changes").expect("changes moet een breedte onthouden hebben");
+    let before = remembered_width(&ctx, "filetree").expect("filetree moet een breedte onthouden hebben");
 
     let center = toggle_rect(&ctx, &mut app, "filetree").center();
     click(&ctx, &mut app, center);
@@ -132,6 +132,6 @@ fn de_oost_toggle_verbergt_de_bestandboom_en_houdt_zijn_breedte() {
     click(&ctx, &mut app, center);
     assert!(app.filetree_visible(), "oost-toggle haalde de bestandboom niet terug");
     paint_once(&ctx, &mut app);
-    let after = remembered_width(&ctx, "changes").expect("changes moet na terugkeer nog Meetbaar zijn");
+    let after = remembered_width(&ctx, "filetree").expect("filetree moet na terugkeer nog Meetbaar zijn");
     assert_eq!(before, after, "de breedte van de bestandboom ging over een verbergen verloren");
 }
