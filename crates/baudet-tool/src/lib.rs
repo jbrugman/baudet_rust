@@ -12,9 +12,12 @@
 pub mod command_signature;
 pub mod diff;
 pub mod edit_file;
+pub mod execute_tool;
+pub mod execute_workspace;
 pub mod folder_boundary;
 pub mod folder_listing;
 pub mod patch;
+pub mod process_runner;
 pub mod read_file;
 pub mod safe_commands;
 pub mod tool;

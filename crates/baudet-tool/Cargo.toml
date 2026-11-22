@@ -12,6 +12,6 @@ baudet-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-
-[dev-dependencies]
+# Het stallings-script van run_command heeft een echt tijdelijk bestand nodig, dus tempfile is hier
+# geen test-hulpmiddel maar productiecode.
 tempfile = { workspace = true }
