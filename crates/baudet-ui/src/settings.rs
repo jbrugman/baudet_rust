@@ -104,6 +104,14 @@ pub struct SettingsView {
     /// "lus uit" het limiet van de persoon stilletjes op 8 terugzetten — een wijziging die hij niet
     /// maakte en die pas terugkomt zodra hij de lus weer aanzet.
     stored_max_tool_iterations: u32,
+    /// Het contextbeleid zoals het bestand het draagt.
+    ///
+    /// De panel heeft er nog geen widgets voor, dus `draft` draagt deze woordelik terug. De reden is
+    /// de `max_tool_iterations`-regel hierboven: een panel zonder veld voor een getal mag het bij een
+    /// opslag niet op de standaard terugzetten, want dan verliest een persoon zijn ingestelde budget
+    /// door iets volslagen anders te wijzigen — en het geleerde venster is precies het getal dat bij
+    /// een geweigerde beurt werd betaald. Zodra er widgets voor komen, wordt dit de bron die ze tonen.
+    stored_context: Settings,
     /// The credential as typed. A separate field from the password widget's buffer is not needed:
     /// this is that buffer, and empty means "not typed" (so the environment still answers).
     api_key: String,
@@ -238,6 +246,14 @@ impl SettingsView {
         self.api_key_env_var = settings.api_key_env_var.clone();
         self.protocol = settings.protocol_word().map(str::to_string);
         self.tool_mode = settings.tool_mode;
+        // Alleen het contextbeleid wordt overgenomen, en dan als hele kopie: de velden die de panel
+        // zélf draagt, horen bij die widgets en niet bij deze voorraad.
+        self.stored_context.context_budget_tokens = settings.context_budget_tokens;
+        self.stored_context.context_strategy = settings.context_strategy;
+        self.stored_context.context_keep_recent_messages = settings.context_keep_recent_messages;
+        self.stored_context.use_server_session = settings.use_server_session;
+        self.stored_context.learned_context_window = settings.learned_context_window;
+        self.stored_context.learned_context_key = settings.learned_context_key.clone();
         self.fetched_for = None;
         self.listing_answered = false;
         // A stored dialect is a claim about an endpoint this panel has not asked yet, so it is shown
@@ -283,6 +299,12 @@ impl SettingsView {
             api_key_env_var: self.api_key_env_var.trim().to_string(),
             protocol: self.protocol.clone().map(|word| word.trim().to_string()).filter(|w| !w.is_empty()),
             tool_mode: self.tool_mode,
+            context_budget_tokens: self.stored_context.context_budget_tokens,
+            context_strategy: self.stored_context.context_strategy,
+            context_keep_recent_messages: self.stored_context.context_keep_recent_messages,
+            use_server_session: self.stored_context.use_server_session,
+            learned_context_window: self.stored_context.learned_context_window,
+            learned_context_key: self.stored_context.learned_context_key.clone(),
         })
     }
 

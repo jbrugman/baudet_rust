@@ -70,6 +70,80 @@ impl ToolMode {
     }
 }
 
+/// Wat er gebeurt als een gesprek het venster van het model voorbije groeit.
+///
+/// Poort van `config/ContextStrategy.kt`. De knijp-logica zelf staat al in `baudet-store::window`
+/// en de rekensommen eromheen in `baudet-store::budget`; dit is de keuze van de persoon, dus de
+/// instelling-variant van de enum staat hier — dezelfde plek als [`ToolMode`] koos, om dezelfde
+/// reden: de enum is de instelling, niet het algoritme.
+///
+/// De Dependitie-richting is de reden dat dit twee enums zijn in plaats van één hergebruikte:
+/// `baudet-settings` hangt af van `baudet-store`, nooit omgekeerd. [`Settings::context_limits`] is
+/// de ene plek waar ze worden samengebracht, en hij is totaal — elke variant aan beide kanten, dus
+/// een nieuw lid mist niet stil.
+///
+/// De declaratievolgorde drijft ook hier de index van de settings-combo (`SettingsPanel.kt:341`),
+/// dus die volgorde blijft.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContextStrategy {
+    /// Stuur alleen de laatste beurten: de nieuwste plus `context_keep_recent_messages` ervoor. Dit
+    /// houdt een lokaal model bij het onderwerp, omdat het nooit een oud begin ziet met een ontbrekend
+    /// midden — de vorm waardoor het terugdraaide naar een onderwerp dat het gesprek al achter zich
+    /// had liet.
+    #[default]
+    RecentMessages,
+    /// Vul het venster zo vol als het model dragen kan en rol het oudste van de voorkant af.
+    RollingWindow,
+    /// Knip niets: weiger een te grote beurt vóórdat hij gaat, zodat de persoon zelf compakte of een
+    /// nieuw gesprek begint. De enige strategie waarbij een server-side keten de context mag dragen.
+    StopAtLimit,
+}
+
+impl ContextStrategy {
+    /// De index in de keuzelijst, volgens de claimvolgorde van de origineler.
+    pub fn index(self) -> usize {
+        match self {
+            ContextStrategy::RecentMessages => 0,
+            ContextStrategy::RollingWindow => 1,
+            ContextStrategy::StopAtLimit => 2,
+        }
+    }
+
+    /// Het woord zoals de instelling er in staat.
+    pub fn word(self) -> &'static str {
+        match self {
+            ContextStrategy::RecentMessages => "recent",
+            ContextStrategy::RollingWindow => "rolling",
+            ContextStrategy::StopAtLimit => "stop",
+        }
+    }
+
+    /// De positie van een woord in de lijst, of `None` als het woord er niet in staat — een
+    /// onbekend woord wordt geweigerd in plaats van stil op de default gezet.
+    pub fn from_word(word: &str) -> Option<ContextStrategy> {
+        match word.trim().to_ascii_lowercase().as_str() {
+            "recent" => Some(ContextStrategy::RecentMessages),
+            "rolling" => Some(ContextStrategy::RollingWindow),
+            "stop" => Some(ContextStrategy::StopAtLimit),
+            _ => None,
+        }
+    }
+
+    /// Of een server-side keten onder deze strategie context mag dragen. Alleen `StopAtLimit`:
+    /// knippen bewerkt wat we sturen en kan dus geen keten kleiner maken die de backend al houdt.
+    /// (Zie `chainedPrev` in `AppState.kt:668`.)
+    pub fn supports_server_session(self) -> bool {
+        self == ContextStrategy::StopAtLimit
+    }
+
+    /// Of het venster bij beurten wordt begrensd in plaats van bij de budget van het model, dus of
+    /// "houd N recente beurten" iets betekent.
+    pub fn trims_by_turn_count(self) -> bool {
+        self == ContextStrategy::RecentMessages
+    }
+}
+
 /// Everything the app remembers between starts.
 ///
 /// Every field is `#[serde(default)]`-tolerant on read and skips nothing on write, so a newer
@@ -131,6 +205,36 @@ pub struct Settings {
     /// De herkenning van de vloer staat hier en niet alleen in de lus: het veld mag geen waarde
     /// dragen die het bestand in leest als iets anders dan de app ernaar handelt.
     pub max_tool_iterations: u32,
+    /// De deksel op één gesprek, in tokens, waar een beurt tegen wordt afgetast.
+    ///
+    /// Poort van `AppConfig.kt:51` (`contextBudgetTokens`), default 0. Die 0 is een keuze en geen
+    /// ontbrekende waarde: de app leidt het plafond dan af uit het venster van het model — knip op
+    /// drie vierde daarvan, en weiger aan de rand ervan onder `StopAtLimit`. Een getyigd getal werkt
+    /// als extra plafond erboven, nooit als vloer, dus een klein getal houdt een gesprek bewust goedkoop
+    /// en een groot getal duwt een verzoek niet voorbij het model.
+    pub context_budget_tokens: u32,
+    /// Wat de app doet wanneer een gesprek die grens bereikt. Knippen is default, zoals in de
+    /// origineler, zodat een lang gesprek gewoon doorgaat in plaats van geweigerd te worden.
+    pub context_strategy: ContextStrategy,
+    /// Hoeveel beurten vóór de huidige teruggaan bij `RecentMessages`. Het systeemvoorstel gaat altijd
+    /// mee — het staat in de instructions en niet in dit venster — dus een kleine waarde verliest de
+    /// staande instructies niet. Vloer 1, zoals de origineler die in het panel afdwingt; de teller
+    /// wordt alleen gelezen door `RecentMessages` ([`ContextStrategy::trims_by_turn_count`]).
+    pub context_keep_recent_messages: u32,
+    /// Of `previous_response_id` mag mee. Uit voor backends die het veld alleen inslikken.
+    ///
+    /// Poort van `AppConfig.kt:76` (`useServerSession`), default aan. Inert onder een knippende
+    /// strategie: daar speelt [`ContextStrategy::supports_server_session`] de rol.
+    pub use_server_session: bool,
+    /// Het contextvenster dat een weigering ons leerde, of 0 wanneer nooit geleerd.
+    ///
+    /// Dit is géén instelling: de persoon typt het nooit. Het bestaat omdat de app een beurt anders
+    /// zou moeten af tasten tegen een grootte die niemand hem vertelde, en dat is precies hoe een
+    /// gesprek naar een backend gaat die het alleen maar kan weigeren.
+    pub learned_context_window: u32,
+    /// De `base_url|model` waaronder het getal hierboven werd geleerd, zodat een model- of
+    /// serverwissel geen stale getal achterlaat.
+    pub learned_context_key: String,
 }
 
 impl Default for Settings {
@@ -155,6 +259,13 @@ impl Default for Settings {
             // van deze herschrijving moet dezelfde lus-limiet hebben als het programma dat als
             // voorbeeld diende.
             max_tool_iterations: DEFAULT_MAX_TOOL_ITERATIONS,
+            // 0 laat de app afleiden, wat het enige eerlijke antwoord is zolang het model niet bekend is.
+            context_budget_tokens: 0,
+            context_strategy: ContextStrategy::default(),
+            context_keep_recent_messages: DEFAULT_KEEP_RECENT_MESSAGES,
+            use_server_session: true,
+            learned_context_window: 0,
+            learned_context_key: String::new(),
         }
     }
 }
@@ -167,6 +278,11 @@ pub const DEFAULT_KEY_ENV_VAR: &str = "OMLX_API_KEY";
 /// de default hier, de instellingskaart die hem toont en de test die een oud bestand leest —
 /// hetzelfde getal moeten dragen; een tweede letterlijke 8 is hoe ze uit elkaar gaan lopen.
 pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 8;
+
+/// Het aantal beurten dat `RecentMessages` teruggestuurt, uit `AppConfig.kt:64`. Een eigen naam
+/// omdat de default hier, de settingskaart en de test die een oud bestand leest hetzelfde getal
+/// moeten dragen.
+pub const DEFAULT_KEEP_RECENT_MESSAGES: u32 = 15;
 
 impl Settings {
     /// The credential to actually send: what was typed, otherwise what the named variable holds.
@@ -195,6 +311,52 @@ impl Settings {
     /// names none. Untrusted words stay `None` for the reason stated on the field.
     pub fn protocol_word(&self) -> Option<&str> {
         self.protocol.as_deref().map(str::trim).filter(|word| !word.is_empty())
+    }
+
+    /// The model this file names, or the empty string when it names none. An unnamed model has no
+    /// window to look up, which is the same answer as an unknown one and needs no third state.
+    pub fn model_name(&self) -> &str {
+        self.model.as_deref().unwrap_or("")
+    }
+
+    /// The measurements the ceilings are computed from, in the shape `baudet-store` reasons over.
+    ///
+    /// This is the one place the two vocabularies meet, and it is a pure read: nothing here decides
+    /// anything, it only hands the numbers over. `max_output_tokens` of `None` — the endpoint decides
+    /// — becomes "reserve nothing", because reserving an invented number would shrink a window nobody
+    /// asked to shrink.
+    pub fn context_limits(&self) -> baudet_store::ContextLimits {
+        baudet_store::ContextLimits {
+            strategy: match self.context_strategy {
+                ContextStrategy::RecentMessages => baudet_store::ContextStrategy::RecentMessages,
+                ContextStrategy::RollingWindow => baudet_store::ContextStrategy::RollingWindow,
+                ContextStrategy::StopAtLimit => baudet_store::ContextStrategy::StopAtLimit,
+            },
+            budget_tokens: self.context_budget_tokens,
+            max_output_tokens: self.max_output_tokens.unwrap_or(0),
+            learned_context_window: self.learned_context_window,
+            learned_context_key: self.learned_context_key.clone(),
+            keep_recent_messages: usize::try_from(self.context_keep_recent_messages.max(1))
+                .unwrap_or(usize::MAX),
+            model: self.model_name().to_string(),
+            base_url: self.base_url.clone(),
+        }
+    }
+
+    /// Leer het venster dat een weigering noemde, wanneer het er een noemde.
+    ///
+    /// `AppState.kt:681`. Direct persisten is de helft van de betekenis: het getal is precies zoveel
+    /// waard na een herstart als in de volgende beurt, en verliezen betekent opnieuw op dezelfde manier
+    /// falen. Dit verhoogt nooit wat de persoon zette — een typed budget verlaagt alleen
+    /// ([`baudet_store::ContextLimits::capped_by_budget`]).
+    pub fn learn_context_window(&mut self, claimed: Option<u32>, base_url: &str) {
+        let Some(claimed) = claimed.filter(|claimed| *claimed > 0) else { return };
+        let key = baudet_store::window_key(base_url, self.model_name());
+        if self.learned_context_window == claimed && self.learned_context_key == key {
+            return;
+        }
+        self.learned_context_window = claimed;
+        self.learned_context_key = key;
     }
 }
 
@@ -320,6 +482,158 @@ mod tests {
         assert_eq!(from_env.resolved_key(), None);
         assert!(!from_env.has_key());
         std::env::remove_var(name);
+    }
+
+    #[test]
+    fn the_context_defaults_are_the_reference_ones_and_survive_the_file() {
+        // De defaults van `AppConfig.kt:51-76`: knippende strategie, 15 beurten terug, niets
+        // getygd, niets geleerd. Een eigen bewijs omdat deze vijf velden samen één beleid vormen —
+        // wie ze afzonderlijk test, mist dat `RecentMessages` en 15 samen horen.
+        let settings = Settings::default();
+        assert_eq!(settings.context_strategy, ContextStrategy::RecentMessages);
+        assert_eq!(settings.context_keep_recent_messages, DEFAULT_KEEP_RECENT_MESSAGES);
+        assert_eq!(settings.context_budget_tokens, 0, "0 betekent: de app leidt het af");
+        assert!(settings.use_server_session);
+        assert_eq!(settings.learned_context_window, 0, "een venster wordt geleerd, niet ingetypt");
+        assert!(settings.learned_context_key.is_empty());
+
+        let written = Settings {
+            context_budget_tokens: 8_000,
+            context_strategy: ContextStrategy::StopAtLimit,
+            context_keep_recent_messages: 3,
+            use_server_session: false,
+            learned_context_window: 12_288,
+            learned_context_key: "http://a:8000/v1|m".into(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&written).unwrap();
+        assert!(json.contains("\"context_strategy\":\"stopatlimit\""), "het bestand noemt het veld: {json}");
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, written);
+    }
+
+    #[test]
+    fn an_older_file_without_the_context_fields_still_opens() {
+        // Forward-compatibiliteit voor deze velden: een bestand van vóór het contextbeleid moet
+        // openen met knippen als strategie en niet op `StopAtLimit` vallen — dat zou elk lang
+        // gesprek weigeren dat eerst gewoon doorging.
+        let json = r#"{"base_url":"http://studio:8000/v1","model":"gemma-3-4b-it"}"#;
+        let read: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(read.context_strategy, ContextStrategy::RecentMessages);
+        assert_eq!(read.context_keep_recent_messages, DEFAULT_KEEP_RECENT_MESSAGES);
+        assert_eq!(read.learned_context_window, 0);
+    }
+
+    #[test]
+    fn context_strategy_words_and_positions_match_the_reference_list() {
+        let strategies = [ContextStrategy::RecentMessages, ContextStrategy::RollingWindow, ContextStrategy::StopAtLimit];
+        for (expected, strategy) in strategies.iter().copied().enumerate() {
+            assert_eq!(strategy.index(), expected);
+            assert_eq!(ContextStrategy::from_word(strategy.word()), Some(strategy));
+        }
+        assert_eq!(ContextStrategy::from_word("lastFew"), None);
+        // Alleen `StopAtLimit` laat een serverketen toe, en alleen `RecentMessages` leest de
+        // beurtteller; die twee regels beslissen wat het panel grijs zet.
+        assert!(ContextStrategy::StopAtLimit.supports_server_session());
+        assert!(!ContextStrategy::RollingWindow.supports_server_session());
+        assert!(ContextStrategy::RecentMessages.trims_by_turn_count());
+        assert!(!ContextStrategy::RollingWindow.trims_by_turn_count());
+    }
+
+    #[test]
+    fn the_settings_hand_the_store_one_reading_of_every_number() {
+        // De brug naar `baudet-store` is de plek waar de twee talen mekaar raken; hij mag niets
+        // beslissen behalve wat `None` betekent.
+        let settings = Settings {
+            base_url: "http://a:8000/v1".into(),
+            model: Some("gemma-3-4b-it".into()),
+            max_output_tokens: Some(4_000),
+            context_budget_tokens: 8_000,
+            context_strategy: ContextStrategy::RollingWindow,
+            context_keep_recent_messages: 6,
+            learned_context_window: 16_384,
+            learned_context_key: "http://a:8000/v1|gemma-3-4b-it".into(),
+            ..Default::default()
+        };
+        let limits = settings.context_limits();
+        assert_eq!(limits.strategy, baudet_store::ContextStrategy::RollingWindow);
+        assert_eq!(limits.budget_tokens, 8_000);
+        assert_eq!(limits.max_output_tokens, 4_000);
+        assert_eq!(limits.keep_recent_messages, 6);
+        assert_eq!(limits.model, "gemma-3-4b-it");
+        assert_eq!(limits.base_url, "http://a:8000/v1");
+        // 16 384 is geleerd onder deze sleutel, dus het wint van de tabel: het plafond is
+        // min(8 000, 16 384 - 4 096) = 8 000.
+        assert_eq!(limits.hard_ceiling(), 8_000);
+
+        // `max_output_tokens: None` wordt "reserveer niets", niet "reserveer een getal". De brug
+        // mag er geen getal van maken, want "niets reserveren" is een keuze en "een getal" een ander.
+        let bare = Settings { model: Some("gemma-3-4b-it".into()), ..Default::default() };
+        assert_eq!(bare.context_limits().max_output_tokens, 0);
+
+        // Een bekend venster geeft altijd een plafond, ook zonder ingetypt budget: de herkomst is
+        // het venster zelf, minus de marge en minus de vaste overhead. "Geen budget" betekent bij
+        // een bekend model dus niet "uit", alleen "het app-besluit".
+        let limits = bare.context_limits();
+        // De getallen eronder staan als som, niet als letterlijke 28 672 / 26 672, omdat de regel die
+        // eronder hoort juist is: het venster minus de marge, en voor de lus nog minus de overhead.
+        let window = baudet_core::known_context_window("gemma-3-4b-it").unwrap();
+        assert_eq!(window, 32_768);
+        assert_eq!(limits.hard_ceiling(), window - baudet_store::WINDOW_MARGIN_TOKENS);
+        assert_eq!(
+            limits.context_ceiling(),
+            u64::from(window) - u64::from(baudet_store::WINDOW_MARGIN_TOKENS)
+                - u64::from(baudet_store::INPUT_OVERHEAD_TOKENS)
+        );
+
+        // Uit is uit op een model dat niemand kent: zonder venster én zonder budget wordt er niets
+        // verzonnen, en dat is het enige geval waarin het plafond 0 is.
+        let blind = Settings { model: Some("helemaal-niets-bekends".into()), ..Default::default() };
+        assert_eq!(blind.context_limits().hard_ceiling(), 0);
+        assert_eq!(blind.context_limits().context_ceiling(), 0, "geen venster en geen budget, dus uit");
+    }
+
+    #[test]
+    fn a_zero_turn_count_is_read_as_one_and_not_as_send_nothing() {
+        // De vloer van de origineler (`SettingsPanel.kt` wijst 0 af) leeft hier bij het lezen: het
+        // bestand zelf repareert niet — dat zou een waarde verzwijgen die erin stond — maar de lus
+        // mag nooit met een lege context gaan staan.
+        let settings = Settings { context_keep_recent_messages: 0, ..Default::default() };
+        assert_eq!(settings.context_limits().keep_recent_messages, 1);
+    }
+
+    #[test]
+    fn a_learned_window_lands_under_the_identity_and_never_rises_again() {
+        let mut settings = Settings {
+            base_url: "http://a:8000/v1".into(),
+            model: Some("gemma-3-4b-it".into()),
+            ..Default::default()
+        };
+        // Geen getal is niets te leren: een weigering zonder cijfer laat het beleid heel.
+        settings.learn_context_window(None, "http://a:8000/v1");
+        assert_eq!(settings.learned_context_window, 0);
+        settings.learn_context_window(Some(0), "http://a:8000/v1");
+        assert_eq!(settings.learned_context_window, 0);
+
+        settings.learn_context_window(Some(12_288), "http://a:8000/v1");
+        assert_eq!(settings.learned_context_window, 12_288);
+        assert_eq!(settings.learned_context_key, "http://a:8000/v1|gemma-3-4b-it");
+
+        // Idem onder dezelfde sleutel is geen wijziging en schrijft het bestand niet nieuw.
+        let before = settings.clone();
+        settings.learn_context_window(Some(12_288), "http://a:8000/v1");
+        assert_eq!(settings, before);
+
+        // Een aantal onder een andere sleutel is hier niet geleerd: de sleutel van het gesprek
+        // volgt de base url van de instellingen, dus het geleerde getal Verdwijnt eronder en valt
+        // het beleid terug op de tabel. Daarvoor zijn de twee apart gezet.
+        settings.learn_context_window(Some(4_096), "http://b:8000/v1");
+        assert_eq!(settings.learned_context_key, "http://b:8000/v1|gemma-3-4b-it");
+        assert_eq!(settings.context_limits().context_window(), Some(32_768),
+            "een getal dat op een andere server leerde, geld hier niet");
+        // Op die andere server gaat het getal wél terug wonnen.
+        settings.base_url = "http://b:8000/v1".into();
+        assert_eq!(settings.context_limits().context_window(), Some(4_096));
     }
 
     #[test]

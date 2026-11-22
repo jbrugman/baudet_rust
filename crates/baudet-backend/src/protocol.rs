@@ -10,14 +10,14 @@
 //! distributed through a transport as a chain of status-code checks.
 //!
 //! The measurement also settled which dialect is worth building first: every server on this machine
-//! implements `/v1/chat/completions`, so that is the dialect the probe asks about. Responses stays
+//! implements the `/v1/chat/completions` route, so that is the dialect the probe asks about. Responses stays
 //! the shape this app prefers -- `request_body` already builds it, and it is what the reference app
 //! speaks to gateways. `TurnAccumulator` has read `chat.completion.chunk` from the start, so what is
 //! new here is the request shape and the decision of when to use it, not a second parser.
 //!
 //! Corrected 2026-11-21, because a later measurement contradicted the first note above. LM Studio now
 //! answers `POST /v1/responses` with `200` and a real `{"object":"response", …, "status":"completed"}`
-//! body, so "no server here implements Responses" was true only of the build measured earlier. The
+//! body, so "no server here implements the Responses route" was true only of the build measured earlier. The
 //! sentence that mattered -- a status code cannot name a protocol -- stands, and is now supported from
 //! both sides: the gateway answers `404` + `{"error": …}` for a path it does not serve *and* for a
 //! model it does not have, on `/responses` as well as on `/chat/completions`, while LM Studio answers

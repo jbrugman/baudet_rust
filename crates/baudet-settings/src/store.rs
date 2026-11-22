@@ -219,6 +219,14 @@ mod tests {
             // Niet de default, zodat dit rondreisje bewijst dat het veld meegaat en niet op 8
             // terugvalt wanneer het bestand het wel bevatte.
             max_tool_iterations: 3,
+            // Ook de contextvelden moeten meegaan: een geleerd venster dat het schrijven kwijt
+            // raakt, betekent dat de app opnieuw op dezelfde manier faalt na een herstart.
+            context_budget_tokens: 24_000,
+            context_strategy: crate::config::ContextStrategy::RollingWindow,
+            context_keep_recent_messages: 4,
+            use_server_session: false,
+            learned_context_window: 32_768,
+            learned_context_key: "http://studio:8000/v1|Qwen3.8-Flash".into(),
         };
         file.write(&settings).unwrap();
         assert_eq!(file.read().settings(), &settings);
