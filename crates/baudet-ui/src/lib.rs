@@ -41,7 +41,7 @@ pub use panels::FOLDER_OPEN;
 // De intenties en het adres van de `Add project`-knop: tests/folder_open.rs en tests/project_tree.rs
 // klikken op dat adres, dus het moet van buiten te noemen zijn, zoals `FOLDER_OPEN`.
 pub use palette::DiffLine;
-pub use panels::{SidebarIntent, SIDEBAR_ADD};
+pub use panels::{SidebarIntent, PANEL_TOGGLES, SIDEBAR_ADD};
 pub use rows::Row;
 pub use sidebar::{Confirm, NameAsk, Selection, SidebarModel, SidebarOutcome};
 

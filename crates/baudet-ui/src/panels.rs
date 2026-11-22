@@ -17,6 +17,7 @@ use crate::palette;
 use crate::sidebar::{Confirm, NameAsk, PermissionState, Selection, SidebarModel, UNASSIGNED};
 use baudet_core::{probe_changes, probe_git, ChangeKind, ChangedFile, GitMeta};
 use egui::{Color32, Panel, ScrollArea, Ui};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Names that are build output rather than source. Measured on a workspace whose crate had been
@@ -153,6 +154,12 @@ impl Changes {
     pub fn meta(&self) -> Option<&GitMeta> {
         self.meta.as_ref()
     }
+
+    /// The paths git reported, for the left panel to colour its file rows with. A read-only view:
+    /// the tree never mutates a status, it only asks which ink a path wears.
+    pub fn paths(&self) -> &[ChangedFile] {
+        &self.paths
+    }
 }
 
 /// The left panel: the chosen folder, its tree, the branch it is on.
@@ -161,7 +168,13 @@ impl Changes {
 /// been probed yet and for every switch, false while the same folder stays the subject. A folder
 /// that cannot be read asks once as well, because "no repository" is git's honest answer there and
 /// not one the panel may invent.
-pub fn left(ui: &mut Ui, workspace: &mut Workspace, draft: &mut String, meta: Option<&GitMeta>) -> bool {
+pub fn left(
+    ui: &mut Ui,
+    workspace: &mut Workspace,
+    draft: &mut String,
+    meta: Option<&GitMeta>,
+    changes: &[ChangedFile],
+) -> bool {
     // De draft komt van de aanroeper (`TranscriptApp::folder_draft`) en niet uit een lokaal
     // `String::new()`. Dat laatste was de bug: `singleline(&mut draft)` haalt zijn tekst uit de
     // meegegeven string (`TextEditState` bewaart alleen cursor/offset), dus een verse lokale lege
@@ -260,13 +273,17 @@ pub fn left(ui: &mut Ui, workspace: &mut Workspace, draft: &mut String, meta: Op
         }
         ui.separator();
         let chosen = workspace.cwd().map(|s| s.to_string());
-        match chosen {
+        // The git statuses this folder was asked about, indexed once per paint so a file row is a
+        // lookup and not a scan of every changed path. Built from the folder that is about to be
+        // shown, because its paths are repository-relative to exactly that folder.
+        let status = FileStatus::build(chosen.as_deref(), changes);
+        match &chosen {
             None => {
                 ui.label(dim("No folder chosen."));
             }
             Some(cwd) => {
-                let root = PathBuf::from(&cwd);
-                ui.label(folder_name(&cwd)).on_hover_text(cwd.clone());
+                let root = PathBuf::from(cwd);
+                ui.label(folder_name(cwd)).on_hover_text(cwd.clone());
                 match meta {
                     Some(meta) => branch_line(ui, meta),
                     None => {
@@ -284,10 +301,10 @@ pub fn left(ui: &mut Ui, workspace: &mut Workspace, draft: &mut String, meta: Op
                     // chosen folder is open on the first paint and closed from the second onward
                     // only if the user said so. A panel that lists its own name and nothing else
                     // reads as an empty folder rather than as a collapsed one.
-                    egui::CollapsingHeader::new(folder_name(&cwd))
+                    egui::CollapsingHeader::new(folder_name(cwd))
                         .id_salt(cwd.clone())
                         .default_open(true)
-                        .show(ui, |ui| tree(ui, workspace, &root, 1));
+                        .show(ui, |ui| tree(ui, workspace, &root, 1, &status));
                 });
             }
         }
@@ -727,10 +744,10 @@ fn pick_folder() -> Option<String> {
 }
 
 /// Paint one directory level, descending through the headers the user has opened.
-fn tree(ui: &mut Ui, workspace: &mut Workspace, dir: &Path, depth: usize) {
+fn tree(ui: &mut Ui, workspace: &mut Workspace, dir: &Path, depth: usize, status: &FileStatus) {
     let listing = workspace.tree_at(dir);
     for path in &listing.files {
-        file_row(ui, path);
+        file_row(ui, path, status.get(path));
     }
     // Said by the level that was cut, so the claim and the rows it describes are one unit: a folder
     // that fits never inherits another folder's warning.
@@ -745,7 +762,7 @@ fn tree(ui: &mut Ui, workspace: &mut Workspace, dir: &Path, depth: usize) {
                 if depth >= MAX_DEPTH {
                     ui.label(dim("…"));
                 } else {
-                    tree(ui, workspace, path, depth + 1);
+                    tree(ui, workspace, path, depth + 1, status);
                 }
             },
         );
@@ -755,14 +772,15 @@ fn tree(ui: &mut Ui, workspace: &mut Workspace, dir: &Path, depth: usize) {
     }
 }
 
-/// One file in the tree. Selecting it is not a thing this panel does yet, so it shows its full path
-/// on hover rather than pretending a click will open it.
-fn file_row(ui: &mut Ui, path: &Path) {
+/// One file in the tree. A path git named wears git's colour -- the same three values as the changed
+/// list on the right, so a modified, added or new file reads identically on both sides -- while a
+/// path git left alone stays the panel's own dim. Dirs are never coloured here, as in the original:
+/// git reports states for files, and a coloured folder would claim a change it cannot name.
+fn file_row(ui: &mut Ui, path: &Path, change: Option<ChangeKind>) {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    ui.add(
-        egui::Label::new(egui::RichText::new(truncate_head(&name, KEEP_TAIL)).color(palette::DIM)).selectable(false),
-    )
-    .on_hover_text(path.display().to_string());
+    let colour = change.map_or(palette::DIM, ink_for);
+    ui.add(egui::Label::new(egui::RichText::new(truncate_head(&name, KEEP_TAIL)).color(colour)).selectable(false))
+        .on_hover_text(path.display().to_string());
 }
 
 /// The right panel: the paths git reports as different from the commit.
@@ -861,14 +879,123 @@ fn branch_line(ui: &mut Ui, meta: &GitMeta) {
     }
 }
 
-/// Git's state as ink. Additions read as work, removals as subtraction, work in progress as the
-/// accent: the three things a person scanning this list has to tell apart.
+/// Git's state as ink, over the Kotlin table (`FileTreePanel.colorFor`): added/modified/renamed
+/// share the added green, a deletion reads red, an untracked path reads blue. It colours the changed
+/// list on the right and the file rows in the tree on the left with the same three values, so a path
+/// reads one colour wherever it is shown.
+///
+/// The states git names beyond those three (`Copied`, `Removed`, `Unmerged`) follow the same reading
+/// as their nearest kin; `Other` stays dim, because an unnamed porcelain state is not something this
+/// panel may colour as if it knew what it is.
 fn ink_for(change: ChangeKind) -> Color32 {
     match change {
-        ChangeKind::Added | ChangeKind::Untracked => palette::DIFF_ADDED,
-        ChangeKind::Modified | ChangeKind::Renamed | ChangeKind::Copied => palette::ACCENT,
-        ChangeKind::Deleted | ChangeKind::Removed | ChangeKind::Unmerged => palette::DIFF_REMOVED,
-        ChangeKind::Other => palette::DIM,
+        ChangeKind::Added | ChangeKind::Modified | ChangeKind::Renamed | ChangeKind::Copied => palette::GIT_ADDED,
+        ChangeKind::Deleted | ChangeKind::Removed => palette::GIT_DELETED,
+        ChangeKind::Untracked => palette::GIT_UNTRACKED,
+        ChangeKind::Unmerged | ChangeKind::Other => palette::DIM,
+    }
+}
+
+/// The name a `ChangedFile` reaches from an absolute path in the tree, or `None` for a path outside
+/// the folder git was asked about. Git reports repository-relative paths, so matching the left
+/// panel's absolute rows to its statuses means cutting the repository root off the front -- the
+/// same string both sides share; a path that is not below it is not one git named.
+fn relative_to(root: &str, path: &Path) -> Option<String> {
+    path.strip_prefix(root).ok().map(|rel| rel.to_string_lossy().into_owned())
+}
+
+/// The status of a path in the tree, looked up by the repository-relative name git uses. The tree
+/// walks a directory at a time and asks per file; a map built once per paint keeps that a lookup
+/// rather than a scan of every changed path.
+struct FileStatus {
+    root: Option<String>,
+    statuses: HashMap<String, ChangeKind>,
+}
+
+impl FileStatus {
+    /// Index the changed paths by the name git gave them, remembering the folder they are relative
+    /// to. Without a folder (nothing open) the index stays empty and every lookup reads untracked-
+    /// free: the tree then colours nothing, which is honest when git was never asked.
+    fn build(cwd: Option<&str>, files: &[ChangedFile]) -> Self {
+        let mut statuses = HashMap::with_capacity(files.len());
+        for file in files {
+            statuses.insert(file.path.clone(), file.change);
+        }
+        Self { root: cwd.filter(|_| !statuses.is_empty()).map(str::to_owned), statuses }
+    }
+
+    /// The kind for one absolute path in the tree, or `None` when git named no change there.
+    fn get(&self, path: &Path) -> Option<ChangeKind> {
+        let rel = relative_to(self.root.as_deref()?, path)?;
+        self.statuses.get(&rel).copied()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// De twee pane-toggles in de kop.
+// ---------------------------------------------------------------------------------------------
+
+/// Het zout van de twee pane-toggles, zodat een test ze op adres terugvindt (idem `SIDEBAR_ADD`,
+/// `TABSTRIP`, `FOLDER_OPEN`): een expliciet id registreert zijn klik op exact dát adres.
+pub const PANEL_TOGGLES: &str = "panel-toggles";
+
+/// De afmeting van een toggle-knop. De kopstrook is één rij hoog en deze knop vult die; de breedte
+/// staat los van de inhoud, want de knop wordt met `Ui::put` op een vaste plek gezet en mag de
+/// breedte van de strook niet mee naar zich toe trekken.
+pub const TOGGLE_SIZE: f32 = 26.0;
+
+/// Het vierkant waarin een toggle thuishoort, gegeven de strook van de kop en of hij aan de west-
+/// of de oost-rand hoort. Puur rekenwerk op de strook die de kop aanlevert, dus apart te testen:
+/// west ankert op `band.min.x`, oost op `band.max.x - TOGGLE_SIZE`, beide op de bovenrand. Ze raken
+/// elkaar alleen als de strook smaller is dan twee knoppen -- op een normale breedte niet.
+pub fn toggle_rect(band: egui::Rect, right_side: bool) -> egui::Rect {
+    let height = band.height().min(TOGGLE_SIZE);
+    let x = if right_side { band.max.x - TOGGLE_SIZE } else { band.min.x };
+    let min = egui::pos2(x, band.min.y);
+    egui::Rect::from_min_size(min, egui::vec2(TOGGLE_SIZE, height))
+}
+
+/// Het teken van een paneel-toggle: de zijde die hij verbergt en weer tevoorschijn haalt, als een
+/// dik blok aan die rand. Een geopend paneel wijst naar buiten (klik om te verbergen), een gesloten
+/// paneel naar binnen (klik om terug te halen), exact de betekenis van `sidebarToggle` in
+/// `Main.kt:247-269`.
+fn toggle_glyph(right_side: bool, shown: bool) -> &'static str {
+    match (right_side, shown) {
+        (false, true) => "\u{25E7}",  // ◧ blok links: sidebar open
+        (false, false) => "\u{25E5}", // ◥ blok rechts: sidebar weg
+        (true, true) => "\u{25E5}",   // ◥ blok rechts: bestandboom open
+        (true, false) => "\u{25E7}",  // ◧ blok links: bestandboom weg
+    }
+}
+
+/// Een paneel-toggle. Het is een eigen `Widget` en geen `Button`, en hij krijgt zijn `Id` van de
+/// aanroeper: zo registreert hij zijn klik op het adres dat de aanroeper construeert, en pas een test
+/// hem vinden en klikken zonder de kop-lay-out na te bouwen.
+pub struct Toggle {
+    id: egui::Id,
+    right_side: bool,
+    shown: bool,
+}
+
+impl Toggle {
+    /// `id` is het root-adres waarop deze klik geland moet worden; de aanroeper zet er de `Id` neer
+    /// die hij zelf weer kan reconstrueren (via `root_ui_id(..).with((PANEL_TOGGLES, ...))`).
+    pub fn new(id: egui::Id, right_side: bool, shown: bool) -> Self {
+        Self { id, right_side, shown }
+    }
+}
+
+impl egui::Widget for Toggle {
+    fn ui(self, ui: &mut Ui) -> egui::Response {
+        let rect = ui.max_rect();
+        let response = ui.interact(rect, self.id, egui::Sense::click());
+        let colour = if response.hovered() { palette::TEXT } else { palette::DIM };
+        let glyph = toggle_glyph(self.right_side, self.shown);
+        let layout = egui::Layout::centered_and_justified(egui::Direction::TopDown);
+        ui.with_layout(layout, |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(glyph).color(colour).size(16.0)).selectable(false));
+        });
+        response
     }
 }
 
@@ -905,6 +1032,63 @@ mod tests {
     /// dead code in every build that ships.
     fn name_of(path: &Path) -> String {
         path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    }
+
+    /// De drie git-kleuren van de origineler (`BaudetPalette.kt:65-67`) moeten ook hier de drie
+    /// rgb-waarden dragen, niet de diff-inkten. Een kleurentabel die stil meeverandert naar de
+    /// diff-palet, zou de boom en de lijst in één klap ander kleuren laten lezen dan de app die ze
+    /// nabouwen; deze assert houdt de rgb-waarden vast zoals de origineler ze noemt.
+    #[test]
+    fn git_kleuren_zijn_de_waarden_van_de_origineler() {
+        assert_eq!(palette::GIT_ADDED, Color32::from_rgb(46, 160, 67));
+        assert_eq!(palette::GIT_DELETED, Color32::from_rgb(210, 70, 70));
+        assert_eq!(palette::GIT_UNTRACKED, Color32::from_rgb(130, 170, 220));
+    }
+
+    /// De tabel van `FileTreePanel.colorFor`: added/modified/renamed delen het groen, deleted is
+    /// rood, untracked is blauw. Beyond the original's three states the panel still has to say
+    /// something: a copy reads as work (green), a removal as subtraction (red), and a state git
+    /// would not name stays dim rather than inventing a colour.
+    #[test]
+    fn git_staten_lezen_als_de_kleurentabel() {
+        assert_eq!(ink_for(ChangeKind::Added), palette::GIT_ADDED);
+        assert_eq!(ink_for(ChangeKind::Modified), palette::GIT_ADDED);
+        assert_eq!(ink_for(ChangeKind::Renamed), palette::GIT_ADDED);
+        assert_eq!(ink_for(ChangeKind::Copied), palette::GIT_ADDED);
+        assert_eq!(ink_for(ChangeKind::Deleted), palette::GIT_DELETED);
+        assert_eq!(ink_for(ChangeKind::Removed), palette::GIT_DELETED);
+        assert_eq!(ink_for(ChangeKind::Untracked), palette::GIT_UNTRACKED);
+        assert_eq!(ink_for(ChangeKind::Unmerged), palette::DIM);
+        assert_eq!(ink_for(ChangeKind::Other), palette::DIM);
+    }
+
+    /// Git spellt een gewijzigd pad repository-relatief; de boom loopt absolute paftjes af. De
+    /// verbinding tussen beide is precies de voorvoegsel-correctie, en een pad buiten de map mag er
+    /// geen zijn: die zou een status lenen van een ongerelateerd pad met dezelfde laatste naam.
+    #[test]
+    fn een_pad_krijgt_zijn_relatieve_naam_of_geen() {
+        assert_eq!(relative_to("/repo", Path::new("/repo/src/app.rs")).as_deref(), Some("src/app.rs"));
+        assert_eq!(relative_to("/repo", Path::new("/repo")).as_deref(), Some(""));
+        // Buiten de repository: geen relatieve naam, dus geen kleur, geen geleende status.
+        assert_eq!(relative_to("/repo", Path::new("/other/src/app.rs")), None);
+    }
+
+    /// De index zoekt op de naam die git gaf, en één map-raak buiten de root lost niets op. Dit is
+    /// wat `file_row` vraagt per rij van de boom.
+    #[test]
+    fn de_status_index_zoekt_op_git_naam() {
+        let files = vec![ChangedFile {
+            path: "src/app.rs".to_string(),
+            additions: None,
+            deletions: None,
+            change: ChangeKind::Modified,
+            old_path: None,
+        }];
+        let status = FileStatus::build(Some("/repo"), &files);
+        assert_eq!(status.get(Path::new("/repo/src/app.rs")), Some(ChangeKind::Modified));
+        // Een pad dat git niet noemde, en een pad buiten de root, zijn allebei "geen kleur".
+        assert_eq!(status.get(Path::new("/repo/src/other.rs")), None);
+        assert_eq!(status.get(Path::new("/elsewhere/src/app.rs")), None);
     }
 
     #[test]

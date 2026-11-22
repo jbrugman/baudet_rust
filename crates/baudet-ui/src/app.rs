@@ -142,6 +142,13 @@ pub struct TranscriptApp {
     current_project: Option<String>,
     /// Het sessie-id dat de sidebar het laatst koos. Item D zet hier de lading op.
     current_session: Option<String>,
+    /// Of het linkervenster (projecten) staat getekend. De toggle in de kop zet dit om; een
+    /// verborgen venster tekent zich gewoon niet, en `PanelState` onthoudt zijn breedte, dus hij
+    /// keert op dezelfde breedte terug -- de herinnerde-breedte-bewaarnis van `sidebarToggle` in
+    /// `Main.kt:247-269`, zonder diens divider-getreik.
+    show_sidebar: bool,
+    /// Of het rechtervenster (bestandboom/wijzigingen) staat getekend. Zelfde regel als hierboven.
+    show_filetree: bool,
 }
 
 impl TranscriptApp {
@@ -188,6 +195,8 @@ impl TranscriptApp {
             sidebar: SidebarModel::open_default(),
             current_project: None,
             current_session: None,
+            show_sidebar: true,
+            show_filetree: true,
         }
     }
 
@@ -315,17 +324,19 @@ impl TranscriptApp {
         // a switch commits rather than from a paint.
         // De linkersidebar vóór de rest: egui verdeelt de breedte in de volgorde van de aanroep,
         // dus de kolom die het eerst wordt gevraagd, krijgt zijn breedte uit de volle breedte.
-        let intents = panels::project_sidebar(ui, &mut self.sidebar);
+        let intents = if self.show_sidebar { panels::project_sidebar(ui, &mut self.sidebar) } else { Vec::new() };
         // De intenties eerst verwerken en dan pas tekenen wat ernaast staat: de bestandsboom hoort
         // het project van de zojuist gemaakte keuze, niet dat van de vorige pass.
         self.apply_sidebar_intents(intents);
         // De bestandsboom staat rechts, naast het middenvlak — `[ ProjectSidebar | Chat/Settings ]
         // [ FileTree ]` zoals `Main.kt:161-170` het opzet. Vóór deze wissel stond hij links, wat de
         // klacht "sinds wanneer staat de folderstructuur links" opleverde.
-        if panels::left(ui, &mut self.workspace, &mut self.folder_draft, self.changes.meta()) {
+        if panels::left(ui, &mut self.workspace, &mut self.folder_draft, self.changes.meta(), self.changes.paths()) {
             self.changes.refresh(self.workspace.cwd());
         }
-        panels::right(ui, &self.changes, self.workspace.cwd());
+        if self.show_filetree {
+            panels::right(ui, &self.changes, self.workspace.cwd());
+        }
         // Drain every worker report the settings panel asked for. Unlike transcript snapshots these
         // are not dropped: a fetch or save result is a single fact the person is waiting on, and
         // there is at most one in flight.
@@ -360,6 +371,27 @@ impl TranscriptApp {
 
         Panel::top("header").show(ui, |ui| {
             ui.horizontal(|ui| {
+                // Beide toggles ankeren op hun eigen rand van de kopstrook, WEST en EAST, precies
+                // zoals de toolbar in `Main.kt:176-184` ze neerzet. Met `Ui::put` op een eigen rect
+                // en niet als knop in deze rij: een wikkel hier zou de volle root-breedte erven,
+                // dus zou zijn klikadres ná de kop vallen en onbereikbaar worden (gemeten). `put`
+                // geeft hem een eigen vierkant op de rand, en dát adres bereikt een test.
+                let band = ui.available_rect_before_wrap();
+                let root = root_ui_id(ui.ctx());
+                let west = root.with((panels::PANEL_TOGGLES, "sidebar"));
+                if ui
+                    .put(panels::toggle_rect(band, false), panels::Toggle::new(west, false, self.show_sidebar))
+                    .clicked()
+                {
+                    self.show_sidebar = !self.show_sidebar;
+                }
+                let east = root.with((panels::PANEL_TOGGLES, "filetree"));
+                if ui
+                    .put(panels::toggle_rect(band, true), panels::Toggle::new(east, true, self.show_filetree))
+                    .clicked()
+                {
+                    self.show_filetree = !self.show_filetree;
+                }
                 ui.heading("Baudet");
                 ui.separator();
                 ui.label(self.status.clone());
@@ -495,6 +527,17 @@ impl TranscriptApp {
     /// Het gekozen sessie-id. Een lezer voor tests en voor item D; er hangt nog geen gedrag aan.
     pub fn selected_session(&self) -> Option<&str> {
         self.current_session.as_deref()
+    }
+
+    /// Of het linkervenster staat getekend. Dezelfde vlag die de kop-toggle omzet en de paint-pass
+    /// leest, dus dit kan nooit van het scherm afwijken -- idem `tab()`.
+    pub fn sidebar_visible(&self) -> bool {
+        self.show_sidebar
+    }
+
+    /// Of het rechtervenster staat getekend. Idem `sidebar_visible`.
+    pub fn filetree_visible(&self) -> bool {
+        self.show_filetree
     }
 
     /// De linkersidebar zelf, voor tests die de catalogus of de rechtenstatus willen lezen zonder

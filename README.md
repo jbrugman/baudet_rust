@@ -114,8 +114,8 @@ tekent expliciet
 ```
 
 dus deze port draait de siden terug: `panels::project_sidebar` als `Panel::left("projects")`
-(280 px, min 190 px), de bestandsboom naar rechts. De toolbar-toggles die in `Main.kt` naast het
-tabblad verzetten staan nog niet; dat is hetzelfde item C en volgt.
+(280 px, min 190 px), de bestandsboom naar rechts. De twee toolbar-toggles uit `Main.kt:176-184` staan
+er nu ook, in de kop op de west- en oost-rand — hieronder onder "twee pane-toggles".
 
 Het domein onder die sidebar staat in `sidebar.rs` en is bewust vrij van egui: het is een model met
 publieke methoden (`add_project`, `set_permissions`, `answer_confirm`, …) dat de catalogus uit
@@ -123,6 +123,27 @@ publieke methoden (`add_project`, `set_permissions`, `answer_confirm`, …) dat 
 [`TODO.md`](TODO.md): een widget bestaat pas als het domein eronder bestaat. De testen in
 `tests/project_tree.rs` draaien tegen een echte egui-pass in een tijdelijke `BAUDET_HOME`, dus de
 knop is vindbaar via zijn adres in plaats van via een aanname over het scherm.
+
+## Besluit: twee pane-toggles, en git-kleuren in beide bomen
+
+**Twee toggles.** `Main.kt` zet in zijn NORTH-toolbar één knop op `BorderLayout.WEST` (de sidebar) en
+één op `BorderLayout.EAST` (de bestandsboom), elk met de herinnerde-breedte van `sidebarToggle`
+(`Main.kt:247-269`). In Rust is dat een eigen `Widget` in `panels.rs` met het `Id` van de aanroeper,
+geplaatst met `Ui::put` op een eigen vierkant op de rand van de kopstrook. Waarom niet als knop in de
+koprij: een wikkel daar erft de volle root-breedte mee, dus valt zijn klikadres ná de kop en wordt hij
+onbereikbaar — gemeten, met een proef-knop die in elke pass `hovered=false` hield. `Ui::put` geeft hem
+een eigen rect op de rand, en dát adres (`root_ui_id(..).with((PANEL_TOGGLES, ..))`) vindt een test.
+Verbergen tekent het paneel gewoon niet; `PanelState` is persistent en onthoudt de breedte, dus de
+terugkeer is precies dezelfde breedte. Vier testen in `tests/panel_toggles.rs` bewijzen dit met een
+klik, niet met een aanname.
+
+**Git-kleuren.** De boom links en de lijst rechts lezen dezelfde drie rgb-waarden van de origineler
+(`BaudetPalette.kt:65-67`): added/modified/renamed groen (46,160,67), deleted rood (210,70,70),
+untracked blauw (130,170,220). De boom zoekt een status per repository-relatief pad (`probe_changes`);
+mappen blijven kleurloos, want git geeft een toestand voor bestanden, niet voor een map — precies
+`FileTreePanel.colorFor`. Bewust géén hergebruik van de diff-inkten (`DIFF_ADDED`/`DIFF_REMOVED`): die
+zijn uit een diff-venster gemeten en horen bij een diff, niet bij deze statuslijst. De tabel staat
+vastgelegd in `panels::tests`, zodat een stil meeveranderende kleur hier struikelt.
 
 ## Werkwijze bij een vastloper of een onzekere keuze
 
@@ -148,7 +169,8 @@ Zes crates, de UI kent alleen het `Backend`-contract:
 Bewezen gedrag van de frontend: chat over een script, plan/details, toolrijen met wachttijd en
 details, interrupt/resume met toetsenbord en met Esc, Shift+Enter, scroll-vastzetten bijknepen,
 transcript opschonen, rijselectie, workspace-tree met lazy vouwen en verversen, changed-files met
-kopieerbare pakketcodes, settings-venster incl. model-ophalen.
+kopieerbare pakketcodes, settings-venster incl. model-ophalen, twee pane-toggles met herinnerde
+breedte, en git-kleuren in zowel de linker boom als de rechter changed-files-lijst.
 
 ## Wat er sinds de transport is bijgekomen, en wat er toen twee keer misging
 

@@ -99,6 +99,15 @@ pub const DIFF_REMOVED: Color32 = rgb(255, 123, 114);
 /// Using it for every box line in this app is OURS -- the pictures show it in one window only.
 pub const FRAME_LINE: Color32 = rgb(106, 139, 177);
 
+/// De git-statuskleuren van de origineler, overgenomen uit `BaudetPalette.kt:65-67`. Dit zijn níét
+/// de diff-inkten hierboven (`DIFF_ADDED`/`DIFF_REMOVED`, gemeten uit een diff-venster), maar de
+/// drie kleuren die de Kotlin-bestandsboom zelf op een rij zet (`FileTreePanel.colorFor`). De boom
+/// links en de wijzigingenlijst rechts moeten hetzelfde rood, groen en blauw tonen als de app die
+/// ze nabouwen, dus staan de drie rgb-waarden hier letterlijk zoals de origineler ze noemt.
+pub const GIT_ADDED: Color32 = rgb(46, 160, 67);
+pub const GIT_DELETED: Color32 = rgb(210, 70, 70);
+pub const GIT_UNTRACKED: Color32 = rgb(130, 170, 220);
+
 /// Extra room egui wants around a draggable panel edge before it shows the grab arrow. OURS.
 pub const EDGE_GRAB: f32 = 14.0;
 
