@@ -9,6 +9,8 @@ license.workspace = true
 # (`tool/Tool.kt`). Die grens is hier dezelfde: deze crate compileert zonder egui.
 [dependencies]
 baudet-core = { workspace = true }
+# Alleen voor `cost_chars`: de plafond-schatting mag niet op een eigen kopie van de som staan.
+baudet-store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -22,8 +22,20 @@ use baudet_core::Msg;
 /// used to cut a request agrees with the number a status line shows. A request must never be
 /// allowed or refused by two figures that disagree.
 pub fn cost_chars(msg: &Msg) -> usize {
-    msg.content.chars().count() + msg.role.chars().count() + 8
+    // Karakters, geen bytes. `Msg.content` is UTF-8, dus `len()` telt een accent driedubbel en
+    // maakt een verzoek met een be accentueerde woorden duurder dan het is — terwijl dezelfde
+    // regel in de origineler `String.length` meet. Eén Unicode-teken per hand getest, want dit
+    // was de plek waar de drie tellingen van deze tree uit elkaar bleken te lopen.
+    msg.content.chars().count() + msg.role.chars().count() + PER_TURN_OVERHEAD
 }
+
+/// What a turn costs beyond its own text: the role name and the chat-template wrapper.
+///
+/// This constant is exported because there must be exactly one of it. The status line, the
+/// pre-send guard, the trimmer and the tool loop's ceiling all compare against the same figure;
+/// two definitions would drift, and then a request gets stopped by a number nobody showed the
+/// person. The origineler shares it the same way, through `SessionState.estimateTokensOf`.
+pub const PER_TURN_OVERHEAD: usize = 8;
 
 /// Rough token count for a whole window, at ~3 characters per token.
 ///

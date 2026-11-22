@@ -12,26 +12,34 @@
 //!
 //! That is a real narrowing, and deliberately so. What is kept: a session's identity with its
 //! `cwd` and checkout, the rendered trail, and the turns that went over the wire. What is not,
-//! because nothing consumes it yet: projects, a compaction summary, and offset paging through
-//! [`crate::rollout::Rollout::items`] — a sidebar is the caller that would need them, and writing
-//! an index for a reader that does not exist yet is exactly the speculative abstraction this
-//! rewrite is meant to avoid.
+//! because nothing consumes it yet: projects (those live in `baudet-projects`, whose catalog is the
+//! session index) and a real index behind the paged read. [`repository`] now does carry a
+//! conversation's compaction summary and pages a trail by sequence, because the moment a second
+//! conversation could exist, both stopped being speculation.
 //!
 //! Layers, and why they are separate:
 //!
 //!  * [`records`] — what one line can be, and the conversation's identity;
 //!  * [`rollout`] — the file: create, append, tolerate a torn tail, list;
+//!  * [`session`] — one conversation held in memory, with its write boundary;
+//!  * [`paging`] — one page of a trail, and the cursor that walks it backwards;
+//!  * [`repository`] — the operations that move a conversation between the two above;
 //!  * [`history`] — the turns as the model gets them, and their cost;
 //!  * [`window`] — how far back one request may reach, by strategy;
 //!  * [`data_dir`] — where any of it lives.
 
 pub mod history;
+pub mod paging;
 pub mod records;
+pub mod repository;
 pub mod rollout;
+pub mod session;
 pub mod window;
 
 pub use history::{clamp_chars, cost_chars, estimate_tokens, history_of};
-pub use records::{Record, Session, SessionMeta};
+pub use paging::ItemWindow;
+pub use records::{Record, Session, SessionDetail, SessionMeta};
+pub use repository::{page, Repository};
 pub use rollout::Rollout;
 pub use window::{bound, trim, ContextStrategy};
 

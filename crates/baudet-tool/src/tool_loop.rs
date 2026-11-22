@@ -96,8 +96,15 @@ pub fn cap_model_text(text: &str, max_chars: usize) -> String {
 /// De tokenschatting van de origineler: tekens door drie, met acht per boodschap voor de rol eromheen
 /// (`SessionState.estimateTokensOf`). Het is een schatting en geen boekhouding, en hij wordt alleen als
 /// grens gebruikt — de echte cijfers staan in [`baudet_core::usage::Usage`].
+/// De ene schatting van deze tree, uit `baudet-store`, niet een tweede exemplaar.
+///
+/// De herkomst is geen stijlkeuze: `SessionState.estimateTokensOf` is in de origineler één
+/// companion-functie die door de statusregel, de pre-send-guard, de trimmer en deze plafond-controle
+/// gedeeld wordt. Hier stonden drie kopieen — `baudet-store::history::cost_chars`, dezelfde som in
+/// `baudet-store::session` en deze — en ze verschilden al van elkaar (karakters tegen `len()`).
+/// Eén definitie bovenaan de Boom is wat het verschil tussen "gestopt" en "toegestaan" eerlijk maakt.
 fn estimate_tokens_of(messages: &[Msg]) -> u64 {
-    messages.iter().map(|msg| (msg.content.chars().count() + msg.role.chars().count() + 8) as u64).sum::<u64>() / 3
+    messages.iter().map(|msg| baudet_store::cost_chars(msg) as u64).sum::<u64>() / 3
 }
 
 /// Het argument dat op een kaart genoemd mag worden die geen eigen kaart heeft.

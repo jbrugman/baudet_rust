@@ -19,18 +19,25 @@
 //!    splitting them buys one decoder per file and makes the append-and-restart boundary exact.
 //!    A mixed rollout, if we ever want it, is a merger of these three in write order.
 
-use crate::records::{Record, Session, SessionMeta};
+use crate::records::{Record, Session, SessionDetail, SessionMeta};
 use baudet_core::{Item, Msg};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Which file a record goes to.
+///
+/// `Meta` and `Detail` are named but never constructed: the identity line is written by
+/// [`Rollout::create`] and the head line by [`Rollout::write_detail`], each straight to its own
+/// file, because neither is an append. They stay in this enum so [`Rollout::file`] remains the
+/// only place that maps a kind to a handle, which is the whole reason the routing is a function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum Kind {
     Meta,
     Item,
     Msg,
+    Detail,
 }
 
 /// The name of the file holding one kind. Kept as constants so a session directory written by one
@@ -38,6 +45,8 @@ enum Kind {
 const META_FILE: &str = "session.jsonl";
 const ITEMS_FILE: &str = "items.jsonl";
 const HISTORY_FILE: &str = "history.jsonl";
+/// The mutable head of a conversation: one rewritten line, deliberately not in `session.jsonl`.
+const DETAIL_FILE: &str = "detail.jsonl";
 
 /// A session transcript on disk, open for appending.
 ///
@@ -52,6 +61,7 @@ pub struct Rollout {
     meta_file: fs::File,
     items_file: fs::File,
     history_file: fs::File,
+    detail_file: fs::File,
 }
 
 impl Rollout {
@@ -114,6 +124,7 @@ impl Rollout {
             Kind::Meta => &mut self.meta_file,
             Kind::Item => &mut self.items_file,
             Kind::Msg => &mut self.history_file,
+            Kind::Detail => &mut self.detail_file,
         }
     }
 
@@ -146,6 +157,34 @@ impl Rollout {
 
     fn append(&mut self, kind: Kind, record: &Record) -> std::io::Result<()> {
         write_line(self.file(kind), record)
+    }
+
+    /// Replace the conversation's mutable head with [`SessionDetail`].
+    ///
+    /// This is the one write in this crate that is not an append, and the only place allowed to be
+    /// one. The reason it may be: `detail.jsonl` holds a single derived line — every value on it is
+    /// recomputable from the turns that are already durable — so a crash between truncate and write
+    /// loses a boundary marker and a summary, never a turn. A non-empty trailer is therefore torn,
+    /// not authoritative, and [`Rollout::detail`] says `None` for it rather than trusting a partial
+    /// record: the alternative is a resumed session appending its tail at the wrong sequence.
+    pub fn write_detail(&mut self, detail: &SessionDetail) -> std::io::Result<()> {
+        self.detail_file.set_len(0)?;
+        self.detail_file.seek(SeekFrom::Start(0))?;
+        write_line(&mut self.detail_file, &Record::SessionDetail(detail.clone()))
+    }
+
+    /// The conversation's mutable head, or `None` when it has never been persisted.
+    ///
+    /// The *last* decodable `session_detail` line wins, so a store written by a build that appended
+    /// instead of replacing still reads correctly rather than freezing on its first value.
+    pub fn detail(&self) -> std::io::Result<Option<SessionDetail>> {
+        Ok(read_records(&self.dir, DETAIL_FILE)?
+            .into_iter()
+            .filter_map(|record| match record {
+                Record::SessionDetail(detail) => Some(detail),
+                _ => None,
+            })
+            .next_back())
     }
 
     /// Every row in the trail, oldest first, undecodable lines skipped.
@@ -211,7 +250,7 @@ impl Rollout {
                 }
             }
         }
-        found.sort_by(|a, b| b.0.cmp(&a.0));
+        found.sort_by_key(|entry| std::cmp::Reverse(entry.0));
         Ok(found.into_iter().map(|(_, session)| session).collect())
     }
 }
@@ -256,6 +295,7 @@ fn open_in(dir: &Path, meta: Session) -> Result<Rollout, std::io::Error> {
         meta_file: append_to(&dir.join(META_FILE))?,
         items_file: append_to(&dir.join(ITEMS_FILE))?,
         history_file: append_to(&dir.join(HISTORY_FILE))?,
+        detail_file: append_to(&dir.join(DETAIL_FILE))?,
     })
 }
 

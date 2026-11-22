@@ -97,10 +97,79 @@ pub enum Record {
     Item(Item),
     /// A turn in the model's own vocabulary: what actually went over the wire.
     Msg(Msg),
+    /// The mutable head of a conversation: model, server-side session wire, compaction summary.
+    /// A separate kind rather than more fields on [`SessionMeta`], because identity is written
+    /// once and this line is rewritten on every persist; a whole-file rewrite would put a
+    /// turn's outcome in the same line as the provenance that must never change.
+    SessionDetail(SessionDetail),
+}
+
+/// The mutable facts about a conversation, one rewritten line per persist.
+///
+/// Kotlin keeps these as columns of its `sessions` row and updates them with a `MERGE`
+/// (`H2Store.kt:67`). Here it is the last `session_detail` line of the session directory, so the
+/// append-only rule of the other files is not broken and a crash leaves the previous head
+/// readable rather than a half-written replacement.
+///
+/// `seq` is a count, not an offset into a file: it is the number of turns the conversation had
+/// when this line was written, which is the boundary a later [`crate::session::Session`] needs
+/// to know in order to append only its own tail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDetail {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The wire to the server-side session (`previous_response_id`). `None` means this app sends
+    /// the history itself, which is the honest default rather than a missing value.
+    #[serde(default, rename = "prevResponseId", skip_serializing_if = "Option::is_none")]
+    pub prev_response_id: Option<String>,
+    #[serde(default)]
+    pub seq: u64,
+    /// The compaction digest. Written on every persist and not only after a compaction, because
+    /// the older turns it replaces are already gone: losing only the summary would drop that
+    /// context for good.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_detail_line_omits_what_was_never_said() {
+        let detail =
+            SessionDetail { session_id: "s-x".into(), model: None, prev_response_id: None, seq: 0, summary: None };
+        let json = serde_json::to_string(&Record::SessionDetail(detail)).unwrap();
+        // `seq` is a count and so always present; the three optional fields are absent rather
+        // than null, which is the file-shape rule of this crate.
+        assert_eq!(json, r#"{"type":"session_detail","payload":{"session_id":"s-x","seq":0}}"#);
+    }
+
+    #[test]
+    fn a_detail_line_survives_a_field_from_next_week() {
+        let detail = SessionDetail {
+            session_id: "s-x".into(),
+            model: Some("gemma".into()),
+            prev_response_id: Some("resp-9".into()),
+            seq: 12,
+            summary: Some("samenvatting".into()),
+        };
+        let mut value = serde_json::to_value(Record::SessionDetail(detail.clone())).unwrap();
+        value["payload"]["a_field_from_next_week"] = serde_json::json!(true);
+        assert_eq!(serde_json::from_value::<Record>(value).unwrap(), Record::SessionDetail(detail));
+    }
+
+    #[test]
+    fn an_older_detail_line_reads_with_missing_fields_absent() {
+        // A line written before the summary existed must read as "no summary", not fail: the
+        // tolerance that lets a new build open an old conversation.
+        let record: Record =
+            serde_json::from_str(r#"{"type":"session_detail","payload":{"session_id":"s-x","seq":3}}"#).unwrap();
+        let Record::SessionDetail(detail) = record else { panic!("verwacht een detail-regel") };
+        assert_eq!(detail.seq, 3);
+        assert_eq!(detail.summary, None);
+        assert_eq!(detail.prev_response_id, None);
+    }
+
     use super::*;
     use baudet_core::{ItemStatus, UserMessageItem};
 
