@@ -198,6 +198,50 @@ impl Rollout {
         Ok(out)
     }
 
+    /// Een venster regels, van achteren gelezen, als `(reeks, regel)` van nieuw naar oud.
+    ///
+    /// De origineler (`H2Store.itemsWindow`) vraagt `ORDER BY seq DESC LIMIT limit + 1` en stopt
+    /// bij die plus-ene: de limiet is de kom, die ene regel erachter is het bewijs dat er nog ouder
+    /// voorafgaat. Deze lezer doet hetzelfde op een JSONL-bestand, en dat is de reden dat hij er is:
+    /// `items()` leest en decodeert het hele bestand, dus een gesprek van honderd beurten kost een
+    /// venster van tien regels honderd decoderingen. `read_lines_backwards` zoekt de staart op via
+    /// de index uit `tail_index` en leest alleen wat erbij hoort.
+    ///
+    /// `limit` is geen `Option<usize>` voor de lol: `None` is de volledige lezing die `items()`
+    /// altijd gaf, en `Some(limit)` is het venster, waarbij de +1 hier binnen de lezer zit zodat
+    /// de aanroeper zijn kom krijgt en het bewijs in `has_more_older` terugziet.
+    ///
+    /// **Een reeks is een regelnummer, geen byte.** Meten legde de vinger op de
+    /// aanname die hier eerder stond ("de positie in het bestand is de reeks"): die twee zijn
+    /// alleen aan elkaar gelijk als elke regel even lang is, en dat is zo niet. De cursor die deze
+    /// laag teruggeeft (`older_seq`) is bovendien de knip die de aanroeper teruggeeft
+    /// (`Session::load_older`), dus hij moet geldig blijven nadat een verdichting de kop van het
+    /// gesprek verving — een byte-offset wordt dan lukraak een ander regelnummer. Tellend lopen
+    /// houdt in dat de teller van de opslag en van `Session::oldest_loaded_seq` dezelfde taal
+    /// spreken, wat de tests eisen: vijfentwintig regels, tiende pagina, `older_seq` 15.
+    ///
+    /// Het tellen gebeurt op **gelezen** regels, niet op ontlede. Een regel die hier niet decodeert,
+    /// valt weg zoals in `read_records`, maar telt wél mee voor de knip — anders zou één kapotte
+    /// regel het venster laten overlezen en de cursor laten tekort schieten, precies waar de
+    /// opmerking bij `ItemWindow::from_newest_first` voor waarschuwt.
+    pub fn item_rows(
+        &self,
+        limit: Option<usize>,
+        before_seq: Option<u64>,
+    ) -> std::io::Result<Vec<(u64, Item)>> {
+        let path = self.dir.join(ITEMS_FILE);
+        // De +1 van de origineler, hier binnen de lezer: de aanroeper vraagt zijn kom, hij hoeft
+        // het bewijs-rijtje niet te kennen.
+        let want = limit.map(|limit| limit + 1);
+        let mut out: Vec<(u64, Item)> = Vec::new();
+        for (row, line) in read_lines_backwards(&path, want, before_seq)? {
+            if let Ok(Record::Item(item)) = serde_json::from_str::<Record>(&line) {
+                out.push((row, item));
+            }
+        }
+        Ok(out)
+    }
+
     /// Every turn, oldest first, undecodable lines skipped.
     pub fn messages(&self) -> std::io::Result<Vec<Msg>> {
         let mut out = Vec::new();
@@ -374,6 +418,131 @@ fn read_lines(path: &Path) -> std::io::Result<Vec<String>> {
     Ok(lines)
 }
 
+/// De byte-posities van de regeleindes van een bestand, plus wat er ná het laatste staat.
+///
+/// Eén lezing van achteren in blokken, want een JSONL-bestand heeft geen index en de enige manier
+/// om aan de staart te beginnen, is zoeken. De posities staan van laag naar hoog, dus index `i` is
+/// de `i`-de regeleinde en regel `i` loopt van `newlines[i - 1] + 1` (of van 0) tot `newlines[i]`.
+///
+/// Een afgebroken laatste regel heeft geen regeleinde en staat daarom niet in de lijst: het aantal
+/// posities is het aantal hele regels, dezelfde uitspraak die `read_lines` doet wanneer het een
+/// halve record van een doodgeprikte processor weglaat. Er is dus geen vlag nodig om dat verschil
+/// te onthouden, en die vlag zou er twee moeten laten overeenkomen.
+///
+/// Meten leerde hier twee dingen. Een positielijst is **geen dichte reeks**: een regel van elf
+/// bytes levert één positie op en slaat er tien over, dus een lus die van `aantal` naar nul telt
+/// en in de lijst zoekt, mist elke regel. En `tail_is_whole` hieronder laat zijn descriptor op
+/// byte nul achter, dus elke bloklezing zonder eigen zoekopdracht leest nul bytes.
+struct TailIndex {
+    /// De posities van de regeleindes, van laag naar hoog.
+    newlines: Vec<u64>,
+}
+
+impl TailIndex {
+    /// Het aantal hele regels in het bestand: zoveel regeleindes als er zijn. Een afgebroken staart
+    /// heeft er geen, dus die telt niet mee — precies zoals `read_lines` hem weglaat. Alles wat
+    /// hieronder aan posities overloopt, is daarom een bestaand regelnummer.
+    fn rows(&self) -> u64 {
+        self.newlines.len() as u64
+    }
+}
+
+fn tail_index(path: &Path) -> std::io::Result<TailIndex> {
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    let mut newlines: Vec<u64> = Vec::new();
+    if size > 0 {
+        let mut buffer = vec![0u8; BLOCK];
+        let mut end = size;
+        while end > 0 {
+            let start = end.saturating_sub(BLOCK as u64) as usize;
+            // De zoekopdracht mag niet weg: `tail_is_whole` laat deze descriptor op byte nul
+            // achter, dus zonder zoekopdracht leest elke blok na de eerste nul bytes en houdt de
+            // index op met tellen zodra een bestand groter is dan `BLOCK`.
+            file.seek(SeekFrom::Start(start as u64))?;
+            let span = (end as usize) - start;
+            let mut filled = 0usize;
+            while filled < span {
+                let read = file.read(&mut buffer[filled..span])?;
+                if read == 0 {
+                    break;
+                }
+                filled += read;
+            }
+            for offset in (0..filled).rev() {
+                if buffer[offset] == b'\n' {
+                    newlines.push(start as u64 + offset as u64);
+                }
+            }
+            end -= span as u64;
+        }
+        newlines.reverse();
+    }
+    // De staart hoeft hier niet onderzocht: zonder regeleinde komt hij niet in de lijst, en die
+    // lijst is het enige wat `rows` telt.
+    Ok(TailIndex { newlines })
+}
+
+/// Elke hele regel van een bestand, van laat naar vroeg, als `(regelnummer, tekst)`.
+///
+/// Dit is `ORDER BY seq DESC LIMIT ? ORDER` voor een append-only JSONL-bestand. De lus loopt over
+/// de index zelf en niet over de getallen ernaarbinnen: `row` is de plaats in het bestand, en de
+/// bijbehorende byte-range is `newlines[row]` met links de vorige regeleinde. Een regel van twaalf
+/// bytes kost daardoor één stap in plaats van twaalf, en dat is wat deze lezer betaalbaar maakt.
+///
+/// `limit` is het aantal regels die mee mogen, `before_seq` de knip: de knip op `n` laat de regels
+/// met nummer lager dan `n` over, dus de lezing begint bij `n` en niet bij het einde van het
+/// bestand. Zonder knip begint hij bij de laatste regel. Het aantal dat hieruit komt, is wat
+/// `ItemWindow::from_newest_first` telt voor zijn bewijs dat er nog ouder voorafgaat.
+///
+/// Twee randen uit `read_lines` blijven dezelfde: een niet-afgesloten staart is geen regel, en de
+/// bytes worden met de hand gezocht — geen `lines()`, want die wil de hele tekst in het geheugen.
+fn read_lines_backwards(
+    path: &Path,
+    limit: Option<usize>,
+    before_seq: Option<u64>,
+) -> std::io::Result<Vec<(u64, String)>> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let index = tail_index(path)?;
+    // De bovengrens is een regelnummer. De knip kan hoger zijn dan het bestand — een gesprek dat
+    // verdicht is, heeft minder regels dan zijn vorige cursor — dus knippen is hier ook inkorten.
+    let bound = before_seq.unwrap_or_else(|| index.rows()).min(index.rows());
+    let mut out: Vec<(u64, String)> = Vec::new();
+    let mut row = bound;
+    while row > 0 {
+        if let Some(limit) = limit {
+            if out.len() >= limit {
+                break;
+            }
+        }
+        row -= 1;
+        // De byte-range van regel `row`: van het vorige regeleinde (of het begin) tot en met het
+        // byte vóór dit regeleinde, want de newline zelf is geen deel van de tekst.
+        let stop = index.newlines[row as usize] as usize;
+        let start = if row == 0 { 0usize } else { index.newlines[row as usize - 1] as usize + 1 };
+        if stop == start {
+            // Een ledige regel. Niets hier schrijft die, maar een losse newline mag een venster
+            // niet laten mislopen: de regel telt als gelezen, zonder tekst.
+            out.push((row, String::new()));
+            continue;
+        }
+        let mut buffer = vec![0u8; stop - start];
+        file.seek(SeekFrom::Start(start as u64))?;
+        file.read_exact(&mut buffer)?;
+        out.push((row, String::from_utf8_lossy(&buffer).into_owned()));
+    }
+    Ok(out)
+}
+
+/// Hoeveel bytes per stap de achterwaartse index leest. Groot genoeg om een rolout in één of twee
+/// beurten te doorzoeken, klein genoeg om een gesprek van duizend regels niet in één keer op te
+/// eten; de index is het enige wat deze route ongevraagd in het geheugen zet.
+const BLOCK: usize = 64 * 1024;
+
 /// Whether everything after the last newline is a complete record. A file that ends in a newline,
 /// or is empty, ends whole; a non-empty tail without one means the writer died mid-record.
 fn tail_is_whole(file: &mut fs::File) -> std::io::Result<bool> {
@@ -390,6 +559,7 @@ fn tail_is_whole(file: &mut fs::File) -> std::io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use baudet_core::{AgentMessageItem, ItemStatus, Msg, ReasoningItem, ToolCallItem, UserMessageItem};
 

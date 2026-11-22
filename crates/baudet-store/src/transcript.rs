@@ -122,15 +122,7 @@ impl Transcript {
 
     /// Eén ouder venster, op hetzelfde open gesprek, zonder een tweede descriptor te openen.
     pub fn items_window(&self, limit: usize, before_seq: Option<u64>) -> std::io::Result<ItemWindow> {
-        let items = self.rollout.items()?;
-        let cut = before_seq.unwrap_or(items.len() as u64).min(items.len() as u64) as usize;
-        let rows: Vec<(u64, Item)> = items
-            .into_iter()
-            .take(cut)
-            .enumerate()
-            .rev()
-            .map(|(index, item)| (index as u64, item))
-            .collect();
+        let rows = self.rollout.item_rows(Some(limit), before_seq)?;
         Ok(ItemWindow::from_newest_first(rows, limit, |_slot, row| Some(row.1.clone())))
     }
 

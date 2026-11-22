@@ -137,21 +137,7 @@ impl Repository {
         before_seq: Option<u64>,
     ) -> std::io::Result<ItemWindow> {
         let rollout = Rollout::open(root, session_id)?;
-        let items = rollout.items()?;
-        // Newest first, as the origineler's `ORDER BY seq DESC` hands them over, cut at the cursor.
-        // Position in the file is the sequence, so a `before_seq` of n keeps the first n rows.
-        let cut = before_seq.unwrap_or(items.len() as u64).min(items.len() as u64) as usize;
-        let rows: Vec<(u64, Item)> = items
-            .into_iter()
-            .take(cut)
-            .enumerate()
-            .rev()
-            .map(|(index, item)| (index as u64, item))
-            .collect();
-        // The rows are already decoded, which is the tolerance the whole-file read applied. One
-        // deliberate difference: an *encoded* row that cannot be decoded is dropped there, so the
-        // cursor names a line that may hold such a row. Paging below it still cannot skip or repeat
-        // a readable row, which is the only promise the cursor makes.
+        let rows = rollout.item_rows(Some(limit), before_seq)?;
         Ok(ItemWindow::from_newest_first(rows, limit, |_slot, row| Some(row.1.clone())))
     }
 
@@ -435,4 +421,5 @@ mod tests {
         assert_eq!(rollout.messages().unwrap(), expected, "wat verdwenen is, blijft verdwenen; wat daarna kwam, staat er wél bij");
         assert_eq!(rollout.detail().unwrap().unwrap().summary.as_deref(), Some("samenvatting"));
     }
+
 }

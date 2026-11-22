@@ -385,11 +385,12 @@ impl AppState {
     /// hanteert. De aanroeper kiest de cursor en krijgt het aantal terug, zodat "kan ik nog verder"
     /// en "zijn er regels bij" dezelfde bron hebben.
     ///
-    /// De cursor is een **file-positie**, geen teller van wat het scherm draagt: de opslag knipt op
-    /// positie (`items_window`/`Repository::items_window`: "position in the file is the sequence").
-    /// Wat `prepend_older` als `older_seq` terugkrijgt, is het laagste positie-nummer dat deze
-    /// voorzet bevat, en dat zet het beeld als nieuwe knip - niet de lengte van `active.items`, die
-    /// ook live-rijen van een lopende beurt zou tellen en daarmee de volgende knip zou miszetten.
+    /// De cursor is een **regelnummer in de opslag**, geen teller van wat het scherm draagt: de
+    /// opslag knipt op regel (`item_rows`: de reeks is de plaats in het bestand, want bytes zijn
+    /// geen regelnummers). Wat `prepend_older` als `older_seq` terugkrijgt, is het laagste
+    /// regelnummer dat deze voorzet bevat, en dat zet het beeld als nieuwe knip - niet de lengte
+    /// van `active.items`, die ook live-rijen van een lopende beurt zou tellen en daarmee de
+    /// volgende knip zou miszetten.
     pub fn load_older(&self, before_seq: u64) -> Result<usize, String> {
         let window = {
             let transcript = self.transcript.lock().unwrap();
