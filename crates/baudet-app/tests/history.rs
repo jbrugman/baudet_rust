@@ -124,18 +124,33 @@ fn een_beurt_ertoe_doet_het_gesprek_erbij() {
 
 #[test]
 fn een_half_antwoord_blijft_erbuiten() {
-    // Een beurt die nooit voltooid raakt (afgebroken, mislukt, of simpelweg een script dat earlier
+    // Een beurt die nooit voltooid raakt (afgebroken, mislukt, of simpelweg een script dat eerder
     // stopt) laat een rij na die niet `Completed` is. Zoiets terugsenturen is een leugen tegen het
     // model: het is nog niet waar terwijl de persoon het op scherm ziet veranderen.
-    let half = vec![ThreadEvent::ItemStarted {
-        thread_id: "th_1".into(),
-        turn_id: "tu_1".into(),
-        item: Item::AgentMessage(AgentMessageItem {
+    //
+    // De fixture opent en streamt, en sluit niet - de vorm die een afgebroken beurt werkelijk
+    // achterlaat (`close_open_rows` doet dat alleen als de stream netjes eindigt). Het halve werk
+    // staat dus in de deltas, niet in een openings-exemplaar: op het scherm is het te zien, in het
+    // audit-spoor en op de draad hoort het niet. Dat is precies de emitter-regel uit
+    // `AppState.kt:805` - pas een voltooiing gaat het spoor in.
+    let half = vec![
+        ThreadEvent::ItemStarted {
+            thread_id: "th_1".into(),
+            turn_id: "tu_1".into(),
+            item: Item::AgentMessage(AgentMessageItem {
+                item_id: "tu_1/msg".into(),
+                text: String::new(),
+                status: ItemStatus::InProgress,
+            }),
+        },
+        ThreadEvent::ItemDelta {
+            thread_id: "th_1".into(),
+            turn_id: "tu_1".into(),
             item_id: "tu_1/msg".into(),
-            text: "een hal".into(),
-            status: ItemStatus::InProgress,
-        }),
-    }];
+            kind: ItemKind::AgentMessage,
+            delta: "een hal".into(),
+        },
+    ];
     // Het halve antwoord speelt in de eerste beurt, want `half` opent `tu_1/msg`.
     let backend = Arc::new(ScriptedBackend::new(vec![script(half), Script::default()]));
     let state = Arc::new(AppState::new(backend.clone(), "systeem"));

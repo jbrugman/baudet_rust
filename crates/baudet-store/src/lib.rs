@@ -35,6 +35,7 @@ pub mod records;
 pub mod repository;
 pub mod rollout;
 pub mod session;
+pub mod transcript;
 pub mod window;
 
 pub use budget::{
@@ -47,6 +48,7 @@ pub use paging::ItemWindow;
 pub use records::{Record, Session, SessionDetail, SessionMeta};
 pub use repository::{page, Repository};
 pub use rollout::Rollout;
+pub use transcript::Transcript;
 pub use window::{bound, trim, ContextStrategy};
 
 /// Where Baudet keeps its data.

@@ -163,6 +163,7 @@ version = "0.1.0"
 dependencies = [
  "baudet-backend",
  "baudet-core",
+ "baudet-projects",
  "baudet-store",
  "futures-util",
  "serde",

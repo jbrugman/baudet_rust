@@ -3,7 +3,7 @@
 //! Pure on purpose: no backend, no clock, no widget. Given the same events, the same rows come
 //! out, which is what lets a UI be verified against a script instead of against a GPU.
 
-use baudet_core::{Item, ItemStatus, ThreadEvent};
+use baudet_core::{Item, ItemKind, ItemStatus, ThreadEvent};
 use std::collections::HashMap;
 
 /// The rows of one conversation, in the order they appeared, plus the live index by id.
@@ -43,6 +43,38 @@ impl Rows {
         self.items.insert(id, item);
     }
 
+    /// Zet een regel vooraan, of hou haar op haar plaats als ze er al staat.
+    ///
+    /// Nodig voor lazy paging: een pagina die ouder is dan alles wat er staat, bestaat uit id's die
+    /// `Rows` nog niet kent, en die horen vóór de KnownId's, niet achter ze. Een id die wél al
+    /// staat, mag van positie blijven staan zoals hij stond - een scherm dat twee keer dezelfde
+    /// rij tekent of haar verplaatst nadat de persoon haar al las, is erger dan een rij die niet
+    /// is verdubbeld.
+    /// Vervang een regel in tekst, op de plaats waar hij al stond.
+    ///
+    /// Voor een lading uit de opslag: die regels zijn af, en een scherm dat ze opnieuw tekent,
+    /// mag ze niet verplaatsen en niet twee keer tonen.
+    pub fn replace_for_screen(&mut self, item: Item) {
+        let id = item.item_id().to_string();
+        self.items.insert(id, item);
+    }
+
+    /// Alle rijen weggoooien, voor een gesprekwissel.
+    pub fn clear(&mut self) {
+        self.order.clear();
+        self.items.clear();
+    }
+
+    pub fn prepend_for_screen(&mut self, item: Item) {
+        let id = item.item_id().to_string();
+        if self.items.contains_key(&id) {
+            self.items.insert(id, item);
+            return;
+        }
+        self.order.insert(0, id.clone());
+        self.items.insert(id, item);
+    }
+
     fn text_of(&self, item_id: &str) -> String {
         self.items
             .get(item_id)
@@ -55,7 +87,125 @@ impl Rows {
             })
             .unwrap_or_default()
     }
+
 }
+
+/// De emitter van één beurt, vernoemd naar het gesprek: `ThreadEmitter` in `AppState.kt:800`.
+///
+/// Deux bestemmingen, één gebeurtenis per keer, en daarom deze plek:
+///
+///  * [`Rows`] — wat er nu op het scherm staat, incl. de redening van het moment;
+///  * [`baudet_store::Session::items`] — het audit-spoor dat de opslag in gaat.
+///
+/// Die scheiding is de dragende regel van het sessiedomein en staat niet voor niets in de
+/// doc van `baudet-store::session`: `items` is wat de persoon echt heeft gezien. De volgorde
+/// hieronder is dus geen stylistische keuze: eerst de regel die de rode draad tekent, dan pas
+/// de `items.push`, want de origineler doet precies dat (`AppState.kt:805` slaat een
+/// voltooide regel op nadat hij hem heeft uitgezonden). En de redening blijft buiten het spoor
+/// (`AppState.kt:775`: "Reasoning is display-only and deliberately never stored in a Msg") —
+/// die is voor de dock, niet voor de transcript op schijf.
+///
+/// Zonder deze wrapper hadden de vlag ("is dit af") en de opslag ("gaat dit naar disk") twee
+/// aparte plekken gekregen die elkaars resultaat konden verloochenen. Zij hebben er nu één.
+#[derive(Debug)]
+pub struct Emitter<'a> {
+    rows: &'a mut Rows,
+    items: Option<&'a mut Vec<Item>>,
+    thread_id: String,
+    turn_id: String,
+}
+
+impl<'a> Emitter<'a> {
+    /// Emitter op de rijen van een beurt, zonder opslagdoel: voor een gesprek dat (nog) niet
+    /// op disk hoeft — de scripted demo en elke test die alleen het scherm meet.
+    pub fn display(rows: &'a mut Rows, thread_id: impl Into<String>, turn_id: impl Into<String>) -> Emitter<'a> {
+        Emitter { rows, items: None, thread_id: thread_id.into(), turn_id: turn_id.into() }
+    }
+
+    /// Emitter die vóór alles een opslagdoel krijgt: dezelfde regels gaan naar het scherm én
+    /// naar het audit-spoor.
+    pub fn storing(
+        rows: &'a mut Rows,
+        items: &'a mut Vec<Item>,
+        thread_id: impl Into<String>,
+        turn_id: impl Into<String>,
+    ) -> Emitter<'a> {
+        Emitter { rows, items: Some(items), thread_id: thread_id.into(), turn_id: turn_id.into() }
+    }
+
+    /// De id waaronder deze beurt zijn regels uitzendt. De transport- en tests kant heeft hem
+    /// nodig om dezelfde id te noemen als de emitter, anders vertoont een dedup-test iets wat
+    /// op het scherm niet bestaat.
+    pub fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
+
+    /// The id of the turn this emitter speaks for. Same reason as [`Emitter::thread_id`].
+    pub fn turn_id(&self) -> &str {
+        &self.turn_id
+    }
+
+    /// Open a row: the row exists on screen, not yet in the store. De return is die van
+    /// [`reduce`], zodat een ontvanger kan tellen of de gebeurtenis iets heeft geraakt - dezelfde
+    /// informantie die `apply` doorgeeft en die een drainer nodig heeft om een stream te kunnen
+    /// beoordelen zonder de rijen zelf te lezen.
+    pub fn started(&mut self, item: Item) -> bool {
+        reduce(
+            self.rows,
+            &ThreadEvent::ItemStarted {
+                thread_id: self.thread_id.clone(),
+                turn_id: self.turn_id.clone(),
+                item,
+            },
+        )
+    }
+
+    /// Stream a delta into an open row. Noise by design: een tussenstand is geen feit, dus deze
+    /// regel roept `items` nooit aan. `kind` draagt de aanroeper mee, precies zoals de transport
+    /// dat doet — de emitter kent het soort van een id niet en moet het niet raden.
+    pub fn delta(&mut self, item_id: &str, kind: ItemKind, delta: &str) -> bool {
+        reduce(
+            self.rows,
+            &ThreadEvent::ItemDelta {
+                thread_id: self.thread_id.clone(),
+                turn_id: self.turn_id.clone(),
+                item_id: item_id.to_string(),
+                kind,
+                delta: delta.to_string(),
+            },
+        )
+    }
+
+    /// Sluit een regel: die is pas een feit als ze voltooid is, en pas dán gaat ze het spoor in.
+    pub fn completed(&mut self, item: Item) -> bool {
+        let item_id = item.item_id().to_string();
+        let store = item.kind() != ItemKind::Reasoning;
+        let kept = reduce(
+            self.rows,
+            &ThreadEvent::ItemCompleted {
+                thread_id: self.thread_id.clone(),
+                turn_id: self.turn_id.clone(),
+                item,
+            },
+        );
+        if !store {
+            return kept;
+        }
+        let Some(items) = self.items.as_deref_mut() else { return kept };
+        // De voltooide regel zoals de reductor hem nu houdt: inclusief de tekst die een delta
+        // heeft binnengekregen en die het sluitende exemplaar misschien niet draagt.
+        let Some(closed) = self.rows.get(&item_id).cloned() else { return kept };
+        // Eén keer per id, omdat het spoor een audit is en geen versiehistorie. `reduce` mag een
+        // id upserten (de reducer vervangt hem op dezelfde plaats), het spoor niet.
+        debug_assert!(
+            items.iter().all(|stored| stored.item_id() != item_id),
+            "{item_id} state twee keer opgeslaan"
+        );
+        items.push(closed);
+        kept
+    }
+}
+
 
 /// Apply one event. Returns `false` when the event named an item that was never opened, which a
 /// caller may want to count: a delta for an unknown row means the stream was replayed from the
@@ -100,7 +250,13 @@ pub fn reduce(rows: &mut Rows, event: &ThreadEvent) -> bool {
     }
 }
 
-pub(crate) fn streamed_text(item: &Item) -> String {
+/// De tekst van een regel, ongeacht welk soort het is.
+///
+/// Publiek omdat "wat staat er op dit scherm" een vraag is die buiten deze crate ook gesteld
+/// wordt: een test die telt of een vraag na een herstart éénn keer terugkwam, en een statusregel
+/// die het gesprek nummert. Binnen deze crate was het een hulp; naar buiten is het de enige
+/// manier om een regel te lezen zonder elk item-soort te hoeven herkennen.
+pub fn streamed_text(item: &Item) -> String {
     match item {
         Item::AgentMessage(i) => i.text.clone(),
         Item::Reasoning(i) => i.text.clone(),

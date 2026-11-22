@@ -8,6 +8,11 @@ license.workspace = true
 baudet-core = { workspace = true }
 baudet-backend = { workspace = true }
 baudet-store = { workspace = true }
+# Alleen voor `new_session_id`: één gesprek moet één id hebben over de catalogus-index én de
+# rollout, dus de fabrikant van de id staat niet twee keer. De id-fabrikant trekt niets van de
+# catalogus mee: `ids` kent alleen `std` (geen catalogus-typen), dus deze rand is een functie,
+# geen koppeling aan het projectmodel.
+baudet-projects = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
