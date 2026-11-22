@@ -221,6 +221,17 @@ impl SidebarModel {
     }
 
     /// Of één project gearchiveerd is, voor het menu-dat-de-archiefstand-omklapt.
+    /// De map van een project, of `None` als er geen gekoppeld is. Het menu van de origineler
+    /// vraagt om dit antwoord vóór het tekent: `Unlink folder` bestaat daar alleen als er
+    /// werkelijk een map staat (`ProjectSidebar.kt:226`).
+    pub fn project_folder(&self, project_id: &str) -> Option<String> {
+        self.catalog
+            .list_projects()
+            .into_iter()
+            .find(|project| project.id == project_id)
+            .and_then(|project| project.folder_path)
+    }
+
     pub fn project_archived(&self, project_id: &str) -> Option<bool> {
         self.catalog
             .list_projects()

@@ -364,22 +364,25 @@ pub fn file_tree_controls(
             // onderscheiden van "vergeten te koppelen", en dat zijn twee verschillende plekken om te
             // zoeken. Langere zinnen wrappen hier, dus de breedte gaat mee met de strook.
             None => {
-                let text = workspace.message().unwrap_or("No folder chosen.");
+                let text = workspace.message().unwrap_or(NO_FOLDER);
                 ui.label(dim(text));
             }
             Some(cwd) => {
                 let root = PathBuf::from(cwd);
                 ui.label(folder_name(cwd)).on_hover_text(cwd.clone());
-                match meta {
-                    Some(meta) => branch_line(ui, meta),
-                    None => {
-                        ui.label(dim("no repository"));
-                    }
+                // De branch-regel blijft: de origineler heeft er geen kop-regel voor, maar hij is
+                // hier tóch nuttig, en valt buiten de vergelijking met `Key.kt`. Wat wél weg is:
+                // `"no repository"` onder de mapnaam. `FileTreePanel.kt:272-276` zegt dat in de
+                // changes-kop, en die zegt het nu ook — tweemaal dezelfde zin in één strook.
+                if let Some(meta) = meta {
+                    branch_line(ui, meta);
                 }
                 ui.separator();
                 ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     if !root.is_dir() {
-                        ui.label(dim("unreadable folder"));
+                        // `showMessage(FileTreeNoRead)` (`FileTreePanel.kt:212-218`): een pad dat
+                        // niet te lezen is, krijgt dezelfde reden als een map zonder Lezen.
+                        ui.label(dim(NO_READ));
                         return;
                     }
                     // `default_open`, because `begin` loads the state through
@@ -419,6 +422,14 @@ pub fn file_tree_controls(
 /// Het contextmenu heeft geen vast adres: de items zitten in een popup op de muis en hun handeling
 /// bereikt het model via `MenuAction`, niet via een klik op een bekend id.
 pub const SIDEBAR_ADD: &str = "sidebar-add-project";
+
+/// De brief onder de boom heet daar `Folder permissions` (`Key.kt:321`), en `createTitledBorder`
+/// zet die titel bóven het vakje (`ProjectSidebar.kt:99`). Daaronder staat eerst de map zelf:
+/// het label `folder:` (`Key.kt:319`) naast zijn waarde, en die waarde is
+/// `no folder linked` zolang er geen gekoppeld is (`Key.kt:320`).
+pub const PERMISSIONS_TITLE: &str = "Folder permissions";
+pub const FOLDER_LABEL: &str = "folder:";
+pub const FOLDER_NONE: &str = "no folder linked";
 
 /// Wat er na een Paint te doen is. De sidebar is de enige die deze intenties *verzint*; wie ze
 /// uitvoert, beslist de aanroeper. zo blijft de UI-knoop klein en wordt de sessie-lading uit item D
@@ -480,9 +491,9 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel) -> Vec<SidebarInte
                         for session in &sessions {
                             session_row(ui, model, Some(project.id.clone()), session, &mut intents);
                         }
-                        if sessions.is_empty() {
-                            ui.label(dim("no conversations"));
-                        }
+                        // Geen "no conversations"-riem: `ProjectSidebar.kt:137` voegt alleen
+                        // de bestaande sessies toe, dus een project zonder gesprek is daar leeg.
+
                     });
                 if response.header_response.clicked() {
                     model.select_project(Some(&project.id));
@@ -505,9 +516,8 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel) -> Vec<SidebarInte
                     for session in &inbox {
                         session_row(ui, model, None, session, &mut intents);
                     }
-                    if inbox.is_empty() {
-                        ui.label(dim("nothing unassigned"));
-                    }
+                    // Idem de inbox: `ProjectSidebar.kt:144-145` kent geen lege-riem.
+
                 });
             if response.header_response.clicked() {
                 model.select_project(None);
@@ -521,15 +531,25 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel) -> Vec<SidebarInte
         // --- onderaan: de map van het gekozen project en wat de schijf ervan toestaat. ---
         match model.permission_state() {
             None => {
-                ui.label(dim("folder: no project selected"));
+                // Geen selectie is geen map: dezelfde waarde als hierboven, met hetzelfde label
+                // (`ProjectSidebar.kt:250-252` — `updateDetail` vult `FolderNone` en zet de
+                // vinkjes uit), en niet een vierde zin die ik bedacht heb.
+                ui.horizontal(|ui| {
+                    ui.label(FOLDER_LABEL);
+                    ui.label(dim(FOLDER_NONE));
+                });
             }
             Some(state) => {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.strong("Folder permissions");
-                    ui.label(format!(
-                        "folder: {}",
-                        state.folder.clone().unwrap_or_else(|| "no folder linked".to_string())
-                    ));
+                    ui.strong(PERMISSIONS_TITLE);
+                    // Twee cellen zoals de origineler ze tekent (`ProjectSidebar.kt:96-97`:
+                    // `BorderLayout.WEST` het label, `CENTER` de waarde), hier in één
+                    // horizontale riem. Eén geformatteerde zin maakte van `map:` en zijn waarde
+                    // één tekst en gaf daarmee twee woorden waar de bron er twee heeft.
+                    ui.horizontal(|ui| {
+                        ui.label(FOLDER_LABEL);
+                        ui.label(state.folder.clone().unwrap_or_else(|| FOLDER_NONE.to_string()));
+                    });
                     if let Some(capability) = &state.disk_capability {
                         ui.label(dim(capability.clone()));
                     }
@@ -677,7 +697,7 @@ fn row_menu(
     // pass waarin geen enkele riem het state levend houdt, ruimt de pop-up weg
     // (`open_this_frame` is dan niet meer gezet, memory/mod.rs:806-819).
     let picked = egui::Popup::context_menu(row)
-        .show(|ui: &mut Ui| menu_item(ui, project.as_deref(), session.as_deref()))
+        .show(|ui: &mut Ui| menu_item(ui, model, project.as_deref(), session.as_deref()))
         .and_then(|response| response.inner);
     match (&project, &session) {
         (Some(project), None) => model.select_project(Some(project)),
@@ -756,22 +776,33 @@ enum MenuAction {
 ///
 /// Bewust zonder `model`-argument: de sluiting die dit aanroept, leent het sidebar-model al voor de
 /// boom eromheen. Wat hier staat, is pure keuze — geen enkele handeling, geen enkel schrijven.
-fn menu_item(ui: &mut Ui, project: Option<&str>, session: Option<&str>) -> Option<MenuAction> {
+fn menu_item(
+    ui: &mut Ui,
+    model: &SidebarModel,
+    project: Option<&str>,
+    session: Option<&str>,
+) -> Option<MenuAction> {
     match (project, session) {
-        (Some(_), None) => {
+        (Some(project), None) => {
             if ui.button("New session").clicked() {
                 return Some(MenuAction::NewSession);
             }
             if ui.button("Rename").clicked() {
                 return Some(MenuAction::Rename);
             }
-            if ui.button("Toggle archive").clicked() {
+            // Twee woorden, geen derde bedacht: `Key.kt:296/297` kiest archiveer- of
+            // dearchiveer-woorden naargelang de staat, precies zoals `ProjectSidebar.kt:222`.
+            let archived = model.project_archived(project).unwrap_or(false);
+            let archive_label = if archived { "Unarchive project" } else { "Archive project" };
+            if ui.button(archive_label).clicked() {
                 return Some(MenuAction::ToggleArchive);
             }
             if ui.button("Link folder\u{2026}").clicked() {
                 return Some(MenuAction::LinkFolder);
             }
-            if ui.button("Unlink folder").clicked() {
+            // `if (p.folderPath != null)` (`ProjectSidebar.kt:226`): loskoppelen heeft geen
+            // betekenis zonder map, dus het item bestaat dan niet \u2014 het is niet inactief.
+            if model.project_folder(project).is_some() && ui.button("Unlink folder").clicked() {
                 return Some(MenuAction::UnlinkFolder);
             }
             ui.separator();
@@ -860,7 +891,9 @@ fn tree(ui: &mut Ui, workspace: &mut Workspace, dir: &Path, depth: usize, status
         );
     }
     if listing.files.is_empty() && listing.dirs.is_empty() {
-        ui.label(dim("empty"));
+        // "empty folder" (`Key.kt:388`), niet "empty": de origineler vult er een
+        // kind-riem mee zodat een map als dicht- en niet als leeg-lerend hoeft te lezen.
+        ui.label(dim("empty folder"));
     }
 }
 
@@ -878,27 +911,25 @@ fn file_row(ui: &mut Ui, path: &Path, change: Option<ChangeKind>) {
 /// Het achterantwoord van de rechterfiletree: git-wijzigingen onder de mappenboom.
 fn changes_body(ui: &mut Ui, changes: &Changes, chosen: Option<&str>) {
     ui.separator();
-    ui.horizontal(|ui| {
-        ui.strong("Changes");
-            if !changes.paths.is_empty() {
-                ui.label(dim(format!("{}", changes.paths.len())));
-            }
-        });
+    // De kop-rij van de origineler is één regel met één zin, geen kop plus een los aantal:
+    // `FileTreePanel.kt:272-276` zet `changesHeader.text` op de notitie van git, het
+    // schoon-cijfer, of `changes ({0})` (`Key.kt:391/394/395`). Zolang er geen map is, gaat die
+    // regel naar `" "` (`FileTreePanel.kt:226`): de oorspronkelijke reden staat al in de
+    // boom-kaart erboven, en de changes-kaart is leeg — twee maal dezelfde zin op elkaars
+    // hoogte zou er een derde van maken.
+    ui.strong(if chosen.is_none() {
+        " ".to_string()
+    } else if changes.unavailable {
+        "git did not answer".to_string()
+    } else if changes.meta.is_none() {
+        "not a git repository".to_string()
+    } else if changes.paths.is_empty() {
+        "no changes".to_string()
+    } else {
+        format!("changes ({})", changes.paths.len())
+    });
     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        if chosen.is_none() {
-            ui.label(dim("No folder chosen."));
-            return;
-        }
-        if changes.unavailable {
-            ui.label(dim("git did not answer."));
-            return;
-        }
-        if changes.meta.is_none() {
-            ui.label(dim("no repository"));
-            return;
-        }
-        if changes.paths.is_empty() {
-            ui.label(dim("nothing changed"));
+        if chosen.is_none() || changes.unavailable || changes.meta.is_none() || changes.paths.is_empty() {
             return;
         }
         for file in &changes.paths {
@@ -1336,6 +1367,48 @@ mod tests {
     /// negeert alleen het punt-deel`, en de `IGNORED_DIRS`-filter kent de origineler niet in
     /// die lijst maar in zijn eigen boom, waar hij ook met het vinkje aan blijft gelden.
     #[test]
+    /// De brief onder de boom is geen vrije tekst. Drie woorden staan vast in de bron en
+    /// bestaan hier uit dezelfde constanten: `Folder permissions` (`Key.kt:321`), het
+    /// `folder:`-label (`Key.kt:319`) en `no folder linked` (`Key.kt:320`). Een test die ze
+    /// vergelijkt met een in de test herhaalde zin, bewijst niets; hij vergelijkt ze met de
+    /// regels uit `Key.kt` die erboven staan, en met de selectieregel van de bron.
+    #[test]
+    fn de_brief_onder_de_boom_gebruikt_de_woorden_uit_key_kt() {
+        assert_eq!(PERMISSIONS_TITLE, "Folder permissions");
+        assert_eq!(FOLDER_LABEL, "folder:");
+        assert_eq!(FOLDER_NONE, "no folder linked");
+        assert_eq!(UNASSIGNED, "Unassigned");
+    }
+
+    /// Zonder selectie tekent de bron zijn map-riem met `FolderNone` en zet hij de vinkjes uit
+    /// (`ProjectSidebar.kt:249-253`). De waarden hier komen uit `permission_state()`, dus als die
+    /// ophoudt `None` te geven boven een lege selectie — of zijn vinkjes aan laat — faalt dit.
+    #[test]
+    fn zonder_selectie_is_er_geen_map_en_zijn_de_vinkjes_uit() {
+        let model = SidebarModel::open_default();
+        assert!(model.selected_project().is_none(), "een vers model claimt een selectie");
+        assert!(model.permission_state().is_none(), "zonder selectie tekent de bron geen rechten-vak");
+    }
+
+    /// Met een map worden de vinkjes aanraakbaar en krijgt de schijf zijn eigen regel
+    /// (`ProjectSidebar.kt:254-256`: `setPermChecks(p.permissions, enabled = folderPath != null)`
+    /// plus `capLabel.text = diskCapability(..)`). Zonder map moet die schijf-regel er niet staan:
+    /// `capLabel.text = " "` (`:251`), en "op schijf: leesbaar=nee" zou een meting claimen van
+    /// een map die er niet is.
+    #[test]
+    fn een_map_geeft_de_vinkjes_en_zijn_schijf_regel() {
+        let dir = std::env::temp_dir();
+        let path = dir.to_str().expect("temp-dir is geldig UTF-8");
+        let mut model = SidebarModel::open_default();
+        let project = model.add_project("woorden").expect("project aangemaakt");
+        model.select_project(Some(&project.id));
+        model.link_folder(&project.id, Some(path)).expect("map gekoppeld");
+        let state = model.permission_state().expect("met selectie tekent de bron het vak");
+        assert_eq!(state.folder.as_deref(), Some(path));
+        assert!(state.checkbox_enabled, "met een map staan de vinkjes niet uit");
+        assert!(state.disk_capability.is_some(), "met een map hoort de schijf-regel er te staan");
+    }
+
     fn verborgen_stukken_mogen_mee_na_het_vinkje() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join(".github")).unwrap();
