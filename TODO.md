@@ -80,6 +80,15 @@ writes/gepinde calls blijven serieel.
 - [ ] Sessie-opslag + herstel (loadSession/startProjectChat), lazy paginering — `store/TranscriptStore.kt`, `store/SessionSummary.kt`.
 
 ## E. Tool-laag read/write/execute (na B; de kern van "de werking is anders")
+- [x] Veiligheidsbasis van de laag, crate `baudet-tool`: `safe_commands` (read-only-belofte + gezins-teken,
+      volle tabel inclusief blocklist, git-subcommando's, cluster-vlagherkenning en de
+      end-of-options-telling), `command_signature` (wat één "altijd" pinnt), `folder_boundary` (symlink-
+      opgeloste grens, zeven tests waarvan drie echte symlinks naar buiten) en `folder_listing` (de hint:
+      diepte 3, cap 50, geen dot-mappen). 35 tests in `crates/baudet-tool`. **Gemeten fout tijdens het
+      porteren:** `is_safe("cargo test")` is `false` — `cargo`/`mvn` staan in de origineler op geen van
+      beide lijsten, ze krijgen alléén een gezins-teken via `trusted_key`; de test eiste het verkeerde
+      gedrag, niet de code. Zelfde les bij de diepte-cap: die is relatief aan de root, een `tempdir` woont
+      zelf al op niveau vier, dus de eerste test bewees niets. commit `ZIE_VOLGENDE`.
 - [ ] `Tool`/`ToolRegistry`/`ToolRunner`/`ToolLoop` (max iteraties, reads parallel ≤2, writes serieel) — `tool/Tool*.kt`, `tool/ToolLoop.kt` (ziet tool-loop.puml).
 - [ ] Call-extractie: native + fenced JSON — `tool/CallExtractor.kt`, `tool/PromptedCallExtractor.kt`.
 - [ ] `ToolContext` (rechten, approvals, allow-lijsten) — `tool/ToolContext.kt`.
