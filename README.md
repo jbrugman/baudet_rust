@@ -4,7 +4,11 @@ Groen opgezette Rust-versie van de Baudet-app, met de Kotlin-app als voorbeeld. 
 één; de backend komt later. Crastructuur: `baudet-ui` (egui/eframe), `baudet-settings`,
 `baudet-store`, `baudet-backend`. Geen enkele crate kent de UI.
 
-## Stand van zaken
+
+De **specificatie** van deze port is de origineler, niet een nieuw ontwerp: zijn `README.md`
+("Working:"-lijst) en de vijf architectuurdiagrammen in `../baudet/Docs/*.puml` (components,
+sse-transport, turn-decision, tool-loop, compaction-fold). Elke feature wordt daar gelezen vóórdat er
+iets in Rust wordt uitgevonden; `TODO.md` koppelt elk item aan de gevonden `.kt`-deur via embed-match.
 
 De volledige werklijst staat in [`TODO.md`](TODO.md): elk domein van de origineler met `[x]`/`[ ]`,
 de beslisregel bij twijfel, en hoe de embed-match Kotlin en Rust aan elkaar koppelt. Die lijst is

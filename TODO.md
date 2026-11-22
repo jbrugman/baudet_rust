@@ -1,96 +1,124 @@
 # TODO — de volledige Kotlin-app naar Rust
 
-Dit is de werklijst die elke beurt opnieuw wordt gelezen en bijgewerkt. Eén bron van de waarheid:
-wat hier `[x]` staat, is gebouwd en getest; wat `[ ]` staat, bestaat niet of niet volledig. Als de
-lijst en de code twisten, is de lijst fout en wordt híj gecorrigeerd, niet de code.
+Werklijst die elke beurt opnieuw wordt gelezen en bijgewerkt. Eén bron van de waarheid: `[x]` =
+gebouwd én getest; `[ ]` = bestaat niet of niet volledig. Twistt de lijst met de code, dan wordt de
+**lijst** gecorrigeerd, niet de code. De specificatie is de origineler: zijn `README.md`, `Docs/*.puml`
+(en de `.kt`-bron zelf).
 
-## De beslisregel (geldt bij elk item hieronder)
+## Beslisregel (bij elk item hieronder)
 
 1. **Zeker?** Gewoon bouwen op `main`.
-2. **Niet zeker, of een keuze die de richting koest?** Snapshot: commit + `git tag`. Dan een aparte
-   `codex/*`-branch waarin de keuze staat, `main` onaangeroerd. In die branch: pas de README aan met
-   het besluit en de reden, en bouw door. Zo is er altijd een punt om naar terug te keren en hoeft een
-   omgegooide poging niets op te ruimen.
-3. **Hoofdregel die deze hele port draagt:** een widget bestaat pas als het domein eronder bestaat.
-   De UI is geen schil; hij is het venster op een domein. Eerst het domein (crate + tests), dan de
-   UI die het toont. Dit is de reden waarom de eerste ronde widgets bouwde (folder-kiezer, tabbladen)
-   die niets bedienden: het domein ontbrak. Die fout wordt niet herhaald.
+2. **Niet zeker of richtingbepalend?** Snapshot (commit + `git tag`), nieuwe `codex/*`-branch,
+   README-aanpassing met besluit + reden erbij, `main` onaangeroerd, doorbouwen. Altijd een punt om
+   naar terug te keren; een omgegooide poging ruimt niets op.
+3. **Dragende regel van deze port:** een widget bestaat pas als het domein eronder bestaat. Eerst het
+   domein (crate + tests), dan de UI die het toont. De eerste ronde bouwde widgets die niets bedienden
+   omdat het domein ontbrak — niet herhalen.
 
-## Hulpmiddel: embed-matchen van Kotlin naar Rust
+## Hoe een item wordt aangepakt
 
-Voor elk item hieronder geldt: **vind eerst de Kotlin-bron** vóórdat er iets in Rust wordt
-uitgevonden. De Kotlin-app is de specificatie; geen Rust-domein wordt opnieuw ontworpen als de
-origineler het al heeft. Voor het zoeken over de 32 Kotlin-domeinen heen is er een embedding:
+1. **Lees de source-first specificatie**: de relevante `Docs/*.puml` (architectuur) en de origineler
+   `README.md` ("Working:"-lijst is de definitieve scope). Geen domein opnieuw ontwerpen.
+2. **Embed-match** om de Kotlin-deuren te vinden (bge-m3-mlx-fp16, dim 1024, via `emb.py`). Dit is de
+   werpvorm die ik eerder alleen noemde en niet gebruikte — hier staat hij daadwerkelijk:
+   ```
+   cd ../baudet
+   # embedding per batch van main-.kt + de NL-werkvraag, cosine-ranking:
+   python3 ~/.codex_local/scripts/emb.py "<NL-omschrijving>" -   # + per-feature-teksten
+   ```
+   Gemeten cos: mcp→McpJsonRpc 0.72, diff→UnifiedDiff 0.70, read→ReadFileTool 0.64,
+   execute→SafeCommands 0.62, context→ContextStrategy 0.62, i18n→Language 0.61. Match **wijst** de
+   deur; de `.kt`-bron is het antwoord. Embeddings zijn géén chat-beurten; geen sweep over meerdere
+   embed-modellen.
+3. Bouw crate/domein + tests → pas UI aan → vink hier af met commit-hash.
 
-```
-python3 ~/.codex_local/scripts/emb.py "zoekterm"   # bge-m3, cross-lingual NL<->EN
-```
+## Architectuur van de origineler (uit Docs/components.puml)
 
-Zoekvragen in het Nederlands vinden de Engelse Kotlin-symbolen (cos NL↔EN gemeten 0,976); een
-ongerelateerde tekst blijft op ~0,54 vallen. Dus: een NL-omschrijving van een feature hieronder is
-voldoende ingang om te vragen "waar staat dit in Kotlin". Na een match **altijd** de gevonden
-`.kt`-bron lezen — de embedding wijst alleen de deur, de bron is het antwoord. Regels: embeddings
-zijn geen chat-beurten en belasten het residentiemodel niet; wel nooit een sweep over meerdere
-embed-modellen.
+Lagen en wie wie aanroept — de port moet deze grenzen respecteren:
 
-## Wat er al is (eerlijk, niet optisch)
+- **UI-laag**: Main, ChatPanel, ProjectSidebar, FileTreePanel, ModelsPanel, SettingsPanel, DiffViewDialog.
+- **Orchestrator** (worker-thread):AppState — send/compact/cancelTurn, poorten + ceilings, gatewayFactory.
+- **API-laag**: ResponsesClient → Http (POST /responses, SSE) → SseFramer → TurnAccumulator→Turn;
+  CancellationToken (socket-registry); ModelWindows; ModelGateway/ResponsesGateway (seam).
+- **Tool-laag**: ToolLoop, ResponsesTurnSource (+trim), ToolRegistry, CallExtractor/PromptedCallExtractor,
+  ToolContext (rechten/approvals/allow-lijsten), FolderBoundary, SafeCommands/CommandSignature,
+  ExecuteWorkspace, tools: ReadFile/EditFile/Execute/Git.
+- **Context-laag**: SessionState, ContextTrimmer, Transcript (scrub/split/fit), Compactor/CompactionPlan.
+- **Domain**: AppConfig, Project+FolderPermission, ContextStrategy/ToolMode.
+- **Persistence**: H2Store → ProjectStore/SettingsStore/TranscriptStore.
 
-- [x] `baudet-core` — events/reductie/rollout. Geen IO, geen UI.
-- [x] `baudet-backend` — `Backend`-contract + `ScriptedBackend` + SSE + HTTP/SSE-transport (beide
-      OpenAI-dialecten, streaming) + protocol + server-scan (detectie, no-stream, v1/models).
-- [x] `baudet-settings` — settings-pad, schrijven, `GET /v1/models`. Leest geen UI.
-- [x] `baudet-store` — rollouts op schijf + indexering.
-- [x] `baudet-app` — proxy bovenop een backend: events, checkpoints, interrupts.
-- [x] `baudet-ui` — transcript, streaming-rijen, composer, instelpaneel (endpoint/modellenlijst/
-      redenereniveau/uitvoerplafond), server-detectie, folder-kiezer.
-- [x] Toolrijen getoond als *regels* (wachttijd/details) — maar alleen als weergave van events; er
-      draait géén tool achter (zie "tool-laag" hieronder).
+Besluiten die meekomen: `previous_response_id` alleen bij Stop-at-limit + optie; store=responses;
+tolerante eventnaam-census (onbekende event nooit fataal); redeneer-tokens apart; client-side
+compaction (geen /compact-endpoint); toolloop runt onafhankelijke **reads parallel (pool ≤2)**,
+writes/gepinde calls blijven serieel.
 
-## WAT ONTBREEKT — de daadwerkelijke rest (deze port is hier ~15-20%, niet de helft)
+## A. Persistentielaag — crate `baudet-store` is er, maar H2→Rust-mapping (NU, voor alles)
+- [ ] Keuze persistentie-rust: rusqlite vs sled vs JSON (H2 is JVM-only). **Onzeker → beslisregel: tag + branch + README-besluit.**
+- [ ] ProjectStore / SettingsStore / TranscriptStore-tabellen, gespiegeld uit `store/{ProjectStore,SettingsStore,TranscriptStore,H2Store}.kt`.
+- [ ] Data-dir per gebruiker (macOS `~/Library/Application Support/Baudet`, override `--home`). Kotlin README "Build and run".
 
-Deze lijst is gemeten tegen de origineler (~14.370 regels in 32 domeinen). Volgorde is de bedoelde
-bouwvolgorde: domein eerst, UI daarna.
+## B. Project- en permissiedomein — crate `baudet-projects` (na A)
+- [ ] `Project { id, name, folderPath?, permissions-bitmask, archived, createdAt }` — `project/Project.kt`.
+- [ ] `FolderPermission { Read=1, Write=2, Execute=4 }` — `project/FolderPermission.kt`.
+- [ ] `Permissions`-bitmask (encode/decode/has/with) — `project/Permissions.kt`.
+- [ ] `ToolMode { Off, Ask, Auto }` — `config/ToolMode.kt`; `ContextStrategy { KeepLast, Rolling, StopAtLimit }` — `config/ContextStrategy.kt`.
+- [ ] `ProjectIds`/`SessionIds` — `project/ProjectIds.kt`, `session/SessionIds.kt`.
+- Embed-match: "rechten lezen schrijven uitvoeren" → Permissions.kt 0.57, FolderPermission 0.53.
 
-### A. Project- en permissiedomein  — crate `baudet-projects` (NU)
-- [ ] `Project` (id, name, folderPath?, permissions-bitmask, archived, createdAt) — Kotlin `project/Project.kt`.
-- [ ] `FolderPermission { Read=1, Write=2, Execute=4 }` — Kotlin `project/FolderPermission.kt`.
-- [ ] `Permissions`-bitmaskhelpers (encode/decode/has/with) — Kotlin `project/Permissions.kt`.
-- [ ] `ToolMode { Off, Ask, Auto }` — Kotlin `config/ToolMode.kt`.
-- [ ] `ProjectIds`/`SessionIds`-generatie — Kotlin `project/ProjectIds.kt`, `session/SessionIds.kt`.
-- [ ] ProjectStore (persist) — Kotlin `store/ProjectStore.kt`, `store/H2Store.kt`.
+## C. Correcte vensterlay-out (na B)
+- [ ] Doel uit `Main.kt:161-170`: `[ ProjectSidebar | Chat/Settings ]  [ FileTree ]`; twee onafhankelijke toolbar-toggles.
+- [ ] Bestandsboom van `panels::left` naar **rechter** `FileTreePanel` + git-kleuren (groen gewijzigd, blauw untracked, rood deleted), dubbelklik = patch. `ui/FileTreePanel.kt`.
+- [ ] Linker `ProjectSidebar`: projecten-boom + sessies eronder + `Unassigned` + Add-project + read/write/execute-vakjes + contextmenu. `ui/ProjectSidebar.kt` (embed-match 0.53).
 
-### B. Correcte vensterlay-out (na A)
-- [ ] Doel, gemeten uit `Main.kt:161-170`: `[ ProjectSidebar | Chat/Settings ]  [ FileTree ]`.
-      Linker split = sidebar + tabs; rechter pane = `FileTreePanel`.
-- [ ] Bestandsboom van `panels::left` naar het **rechter** `FileTreePanel`; folder-kiezer mee naar rechts.
-- [ ] Linker `ProjectSidebar`: projecten-boom met sessies eronder + `Unassigned`-knooppunt +
-      Add-projectknop + read/write/execute-vakjes. Nu afwezig.
-- [ ] Twee onafhankelijke toolbar-toggles (sidebar inklappen, bestandsboom inklappen) — Kotlin `Main.kt` + `SidebarToggleIcon.kt`.
+## D. Sessies (na C)
+- [ ] Meerdere sessies, niet één globe transcript — `session/SessionState.kt`.
+- [ ] Sessie-opslag + herstel (loadSession/startProjectChat), lazy paginering — `store/TranscriptStore.kt`, `store/SessionSummary.kt`.
 
-### C. Sessies (na B)
-- [ ] Meerdere sessies; sessie is niet één globe transcript. Kotlin `session/SessionState.kt`.
-- [ ] Sessie-opslag + herstel (loadSession/startProjectChat). Kotlin `store/TranscriptStore.kt`, `store/SessionSummary.kt`.
-- [ ] Sessies-nesting onder een project in de sidebar.
+## E. Tool-laag read/write/execute (na B; de kern van "de werking is anders")
+- [ ] `Tool`/`ToolRegistry`/`ToolRunner`/`ToolLoop` (max iteraties, reads parallel ≤2, writes serieel) — `tool/Tool*.kt`, `tool/ToolLoop.kt` (ziet tool-loop.puml).
+- [ ] Call-extractie: native + fenced JSON — `tool/CallExtractor.kt`, `tool/PromptedCallExtractor.kt`.
+- [ ] `ToolContext` (rechten, approvals, allow-lijsten) — `tool/ToolContext.kt`.
+- [ ] `FolderBoundary` (buiten de map verboden) — `tool/FolderBoundary.kt`.
+- [ ] `ReadFileTool` — `tool/ReadFileTool.kt` (embed 0.64).
+- [ ] `EditFileTool` + `PatchApplier` + `Edit` — `tool/{EditFileTool,PatchApplier,Edit}.kt`; Ask toont diff-preview (turn-decision.puml).
+- [ ] `ExecuteTool` + `SafeCommands` + `CommandSignature` + `ExecuteWorkspace` + `ProcessRunner` — shell in map, TMPDIR, read-only auto / altijd-vraag, family-pin. `tool/{ExecuteTool,SafeCommands,CommandSignature,ExecuteWorkspace,ProcessRunner}.kt` (embed 0.62).
+- [ ] `GitTool` — lezen standaard; schrijft verbs (add/commit/checkout/stash/push) opt-in + Write-recht + goedkeuring; force-push/rewrite geblokkeerd. `tool/GitTool.kt` + `git/`.
+- [ ] `ToolGate` (Active/Disabled/NoProject/NoFolder/NoWrite) + ToolMode-afdwinging — `app/ToolGate.kt`, turn-decision.puml.
 
-### D. Tool-laag: read / write / execute (na A, de kern van "de werking is anders")
-- [ ] `Tool`/`ToolRegistry`/`ToolRunner`/`ToolLoop` — Kotlin `tool/Tool*.kt`, `tool/ToolLoop.kt`.
-- [ ] `ReadFileTool` / `EditFileTool` / `ExecuteTool` + `PatchApplier` — Kotlin `tool/{ReadFileTool,EditFileTool,ExecuteTool,PatchApplier}.kt`.
-- [ ] `FolderBoundary` (mag alleen binnen de map) + `ExecuteWorkspace` — Kotlin `tool/FolderBoundary.kt`, `tool/ExecuteWorkspace.kt`.
-- [ ] `ToolGate` + ToolMode- afdwinging (Ask = preview vóór write) — Kotlin `app/ToolGate.kt`, `config/ToolMode.kt`.
-- [ ] Rechten afgedwongen per tool: Read vandaag, Write/Execute conform de vlaggen — zie `Project.kt`-commentaar.
-- [ ] Call-extractie uit de assistantstroom — Kotlin `tool/CallExtractor.kt`, `tool/PromptedCallExtractor.kt`.
+## F. Context- en verdichtingslaag (na D)
+- [ ] `ContextStrategy` + `ContextTrimmer` (systeemprompt leidt, bound vóór vertrek) — `config/ContextStrategy.kt`, `session/ContextTrimmer.kt` (embed 0.62).
+- [ ] `Transcript` scrub/split/fit — `tool/Transcript.kt`.
+- [ ] `Compactor`/`CompactionPlan`/`CompactionOutcome` (vouwen over meerdere calls, eerlijk bij niets) — `session/Compactor*.kt` + compaction-fold.puml.
 
-### E. Overige Kotlin-domeinen die nog niet in Rust bestaan
-- [ ] `git` — GitCommand/GitInspector/GitStatus/FileChange. Kotlin `git/`.
-- [ ] `diff` — UnifiedDiff/LineDiff/DiffHighlight/NewFileDiff. Kotlin `diff/`.
-- [ ] `fs` — FileLister/FileWatcher/FileEntry. Kotlin `fs/`.
-- [ ] `mcp` — McpClient/JsonRpc/ToolAdapter/Servers. Kotlin `mcp/`.
-- [ ] `session`-verdichting — Compactor/ContextTrimmer. Kotlin `session/`.
-- [ ] `i18n` — Key/Language/Texts (NL/EN). Kotlin `i18n/`.
-- [ ] `io` — ImageClipboard. Kotlin `io/ImageClipboard.kt`.
-- [ ] `ui`-rest — Markdown/MarkdownHtml, About/Help, DiffViewDialog, ThinkingLayout. Kotlin `ui/`.
+## G. Git- en diff-laag (nodig voor C + E)
+- [ ] `GitCommand`/`GitInspector`/`GitStatus`/`FileChange` — `git/`.
+- [ ] `UnifiedDiff`/`LineDiff`/`DiffHighlight`/`DiffLineKind` + `NewFileDiff` — `diff/` (embed 0.70) + `ui/NewFileDiff.kt`.
+- [ ] `DiffViewDialog` (gekleurde git patch) — `ui/DiffViewDialog.kt`.
+
+## H. i18n (na C)
+- [ ] `Key`/`Language`/`Texts` NL/EN/FR/DE, runtime wissel, EN default — `i18n/` (embed 0.61). Lokaal-honesty-note reger.
+
+## I. MCP client (later)
+- [ ] stdio-only McpClient/JsonRpc/ToolAdapter/Servers/Config; per-server always-allow + timeout — `mcp/` (embed 0.72). (HTTP/SSE + Baudet-MCP-server bestaan in de origineler NIET — niet overbouwen.)
+
+## J. UI-rest (loopt parallel met domeinen)
+- [ ] Markdown/MarkdownHtml ( fenced, koppen, bold/italic, inline code, wrap-optsie) — `ui/Markdown*.kt`.
+- [ ] ThinkingLayout (reasoning-dock boven de input, display-only) — `ui/ThinkingLayout.kt`.
+- [ ] About/Help-vensters + helpMenu — `ui/{About,Help}.kt`.
+- [ ] ImageClipboard: ctrl+V = beeld als OpenAI image-part; tool-beeld inline met Save-strip — `io/ImageClipboard.kt`.
+
+## Bronnen die niet meegaan (uit origineler README "Not there yet")
+- Geen in-app text editor.
+- Geen echte **concurrente** gesprekken (twee live-sessies tegelijk); de turn-claim is al een teller.
+- Geen native GraalVM-build (Rust is hier juist native — dit punt verdwijnt).
+
+## Wat er al is in Rust
+- [x] `baudet-core` (events/reductie/rollout), `baudet-backend` (Backend + Scripted + SSE + HTTP/SSE
+      beide dialecten + streaming + protocol + server-scan), `baudet-settings` (pad + schrijven +
+      `GET /v1/models`), `baudet-store` (rollouts + index), `baudet-app` (proxy), `baudet-ui`
+      (transcript/streaming/composer/instellingen/detectie/folder-kiezer).
+- [x] Toolrijen als **regels** (weergave), maar géén tool draait erachter → item E.
 
 ## Werkwijze per item
-Voor elk `[ ]`-item: (1) Embed-zoek de Kotlin-deur, (2) lees die `.kt`-bron, (3) bouw crate/domein +
-tests, (4) pas de UI aan, (5) vink hier af met de commit-hash, (6) commit. Twijfel over richting →
-beslisregel hierboven (tag + `codex/*`-branch + README-besluit).
+(1) Lees `.puml`/README-spec, (2) embed-match de Kotlin-deur, (3) lees die `.kt`, (4) domein+tests,
+(5) UI, (6) vink af met commit-hash, (7) commit. Twijfel over richting → beslisregel hierboven.
