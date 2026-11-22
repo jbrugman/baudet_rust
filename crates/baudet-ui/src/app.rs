@@ -107,6 +107,11 @@ pub struct TranscriptApp {
     /// is asynchronous and the picture must be able to wait for it to settle. `None` keeps the demo.
     shot_send: Option<String>,
     /// The left panel: the folder under inspection and its tree.
+    /// De map-invoer van de linkerpaneel. Leeft buiten de paint-pass: het mappadveld
+    /// haalt zijn tekst uit de meegegeven string, dus een lokaal `String::new()` per frame
+    /// wist elke toetsaanslag vóór de klik in de volgende frame. (Zie `panels::left`.)
+    folder_draft: String,
+
     workspace: Workspace,
     /// The right panel: the paths git reports for that folder.
     changes: Changes,
@@ -159,6 +164,7 @@ impl TranscriptApp {
             shot_done: false,
             fetch_models_on_start: false,
             shot_send: None,
+            folder_draft: String::new(),
             workspace: Workspace::default(),
             changes: Changes::default(),
             active_tab: None,
@@ -292,7 +298,7 @@ impl TranscriptApp {
         // width and leave the flanks to overlap it.
         // Asking git is bounded by the probe's own timeout, so it happens on the turn an opening or
         // a switch commits rather than from a paint.
-        if panels::left(ui, &mut self.workspace, self.changes.meta()) {
+        if panels::left(ui, &mut self.workspace, &mut self.folder_draft, self.changes.meta()) {
             self.changes.refresh(self.workspace.cwd());
         }
         panels::right(ui, &self.changes, self.workspace.cwd());
@@ -406,6 +412,16 @@ impl TranscriptApp {
 impl TranscriptApp {
     /// Which body the window shows. Public so a test can say which tab it painted; the paint pass
     /// reads the same field the strip writes, so this can never disagree with the screen.
+    /// De map die de linkerpaneel nu als onderwerp heeft, of `None` wanneer er niets gekozen is.
+
+    /// Leest rechtstreeks uit `Workspace::cwd`; er is geen tweede kopie van dat antwoord.
+
+    pub fn workspace_folder(&self) -> Option<&str> {
+
+        self.workspace.cwd()
+
+    }
+
     pub fn tab(&self) -> Tab {
         self.active_tab.unwrap_or(Tab::Chat)
     }

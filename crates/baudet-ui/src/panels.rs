@@ -160,9 +160,14 @@ impl Changes {
 /// been probed yet and for every switch, false while the same folder stays the subject. A folder
 /// that cannot be read asks once as well, because "no repository" is git's honest answer there and
 /// not one the panel may invent.
-pub fn left(ui: &mut Ui, workspace: &mut Workspace, meta: Option<&GitMeta>) -> bool {
-    // A local cell rather than a binding: the field is a request to open a folder, not a second
-    // owner of `Workspace::cwd`, so the moment it commits is the only moment the two must agree.
+pub fn left(ui: &mut Ui, workspace: &mut Workspace, draft: &mut String, meta: Option<&GitMeta>) -> bool {
+    // De draft komt van de aanroeper (`TranscriptApp::folder_draft`) en niet uit een lokaal
+    // `String::new()`. Dat laatste was de bug: `singleline(&mut draft)` haalt zijn tekst uit de
+    // meegegeven string (`TextEditState` bewaart alleen cursor/offset), dus een verse lokale lege
+    // string wist elke toetsaanslag vóór de klik in de volgende frame — de rij stond dan leeg en
+    // `requested` werd nooit gezet. Hier blijft `draft` leeg zolang er niets getypt of gekozen is,
+    // maar overleeft hij wél wat er wél getypt is. Het is nog steeds geen tweede display van `cwd`
+    // (daarvoor is de folder-regel hieronder); het is alleen de invoer, en die leeft buiten de paint.
     let mut requested: Option<String> = None;
     let frame = Panel::left("workspace")
         .resizable(true)
@@ -177,10 +182,6 @@ pub fn left(ui: &mut Ui, workspace: &mut Workspace, meta: Option<&GitMeta>) -> b
         .frame(egui::Frame::side_top_panel(ui.style()));
     frame.show(ui, |ui| {
         ui.strong("Workspace");
-        // The draft is empty whenever the panel is painted, so it is a place to type the next
-        // folder and never a second display of the current one -- that is what the folder line
-        // below is for.
-        let mut draft = String::new();
         // Eén rij: het veld zo breed als overblijft, de knoppen ernaast. Het veld blijft de plek om
         // te typen — een dialoog die een pad kiest, is een toevoeging en geen vervanging, want een
         // pad dat iemand uit het hoofd typt, is sneller dan drie klikken door een boom.
@@ -200,12 +201,23 @@ pub fn left(ui: &mut Ui, workspace: &mut Workspace, meta: Option<&GitMeta>) -> b
         let mut field: Option<egui::Response> = None;
         let mut browse = false;
         let mut open_clicked = false;
+        // Het veld krijgt een expliciet root-adres (`UiBuilder::id`-wikkel) en niet alleen een
+        // `.id_salt`, omdat `.id_salt` relatief adresseert aan de ouder-`Ui` — en die schuift mee met
+        // de paneel-kolom, dus is het adres van buiten niet te reconstrueren (idem `TABSTRIP`). De
+        // wikkel draagt click-sense, maar de tekst-invoer leeft op het veld erin (Sense::focus), niet
+        // op de wikkel; de wikkel bestaat zodat een test dit veld kan *vinden* om erin te typen.
+        let root = crate::app::root_ui_id(ui.ctx());
         ui.horizontal(|ui| {
             // `with_main_wrap(false)`: zonder die regel wrapt de tweede knop naar een eigen rij zodra
             // het veld op 0 staat, en dan valt de rij alsnog buiten de rand (gemeten bij 130 pt).
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(false), |ui| {
                 field = Some(
-                    ui.add_sized([field_width, 20.0], egui::TextEdit::singleline(&mut draft).hint_text("folder path")),
+                    ui.add_sized(
+                        [field_width, 20.0],
+                        egui::TextEdit::singleline(draft)
+                            .id_salt(FOLDER_FIELD)
+                            .hint_text("folder path"),
+                    ),
                 );
                 // De native kiezer van het besturingsselt, niet een eigen boom in een venster: mappen
                 // tonen, snelkoppelingen herkennen en de voorkeur van iemand vinden, is het werk van
@@ -213,24 +225,40 @@ pub fn left(ui: &mut Ui, workspace: &mut Workspace, meta: Option<&GitMeta>) -> b
                 if ui.small_button(BROWSE_LABEL).clicked() {
                     browse = true;
                 }
-                open_clicked = ui.small_button("Open").clicked();
+                // `Open` in een expliciet-id wikkel, niet als kale `small_button`: diens auto-adres
+                // is van buiten niet te reconstrueren en de knop verdween daar eerder. De klik leeft
+                // op de wikkel (click-sense), de tekst is alleen het label — exact het patroon van
+                // de tabstrip en de modelknop.
+                open_clicked = ui
+                    .scope_builder(
+                        egui::UiBuilder::new().id(root.with((FOLDER_OPEN, "open"))).sense(egui::Sense::click()),
+                        |ui| {
+                            ui.add(egui::Label::new("Open").selectable(false));
+                        },
+                    )
+                    .response
+                    .clicked();
             });
         });
         if browse {
-            // De kiezer vult het veld, hij opent niet. Daardoor blijft `requested` hieronder de enige
+            // De kiezer vult de draft, hij opent niet. Daardoor blijft `requested` hieronder de enige
             // deur naar `Workspace::cwd`, en een gekozen pad doorloopt hetzelfde commit-pad als een
             // getypt pad — inclusief het verversen van de boom en de git-vraag.
             if let Some(chosen) = pick_folder() {
-                draft = chosen;
+                *draft = chosen;
             }
         }
-        // Enter of de knop schrijft een getypt pad weg; een leeg veld betekent "houd wat open is", dus
-        // een dwaal-Enter wist de paneel nooit. Een gekozen pad staat in hetzelfde veld en volgt dus
-        // dezelfde weg.
-        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-        let commit = field.is_some_and(|field| field.lost_focus()) && enter;
-        if (commit || open_clicked) && !draft.trim().is_empty() {
+        // Commit via de knop óf via Enter in het veld. De oude eis `field.lost_focus() && enter` was
+        // de tweede doodsteek: Enter drukt men in *terwijl* het veld focus heeft, en dan is
+        // `lost_focus()` per definitie onwaar — de commitslag kon dus ook via het toetsenbord nooit
+        // vallen. De juiste vraag is "stond er iets in het veld toen de Enter of de knop kwam". Een
+        // leeg veld betekent nog steeds "houd wat open is", dus een dwaal-Enter wist de paneel niet.
+        let enter_in_field = field.is_some_and(|field| field.has_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if (open_clicked || enter_in_field) && !draft.trim().is_empty() {
             requested = Some(draft.trim().to_string());
+            // Een geopend pad hoeft niet in het veld te blijven staan: de folder-regel hieronder toont
+            // wat er open is, en een lege draft na het openen is geen tweede display van cwd.
+            draft.clear();
         }
         ui.separator();
         let chosen = workspace.cwd().map(|s| s.to_string());
@@ -282,6 +310,17 @@ pub fn left(ui: &mut Ui, workspace: &mut Workspace, meta: Option<&GitMeta>) -> b
 /// paneel: de breedtes in die rij zijn erop gemeten, en een label dat ergens stillen verandert,
 /// verandert die maten.
 pub const BROWSE_LABEL: &str = "Browse\u{2026}";
+
+/// Het zout van het mappadveld. Een `.id_salt` met een vaste waarde houdt het veldadres stabiel
+/// binnen de kolom; het is géén van buiten reconstrueerbaar root-adres (het veld zit in de
+/// paneel-kolom). Een test vindt het veld via `root_ui_id` plus deze keten niet — typen gebeurt door
+/// het veld te focusen bij de klik op `Open` of via `InteractRequest`; dit zout bestaat voor de
+/// stabiliteit zélf (geen toevallige auto-id die meeschuift als er bovenin iets bij komt).
+pub const FOLDER_FIELD: &str = "folder-path-field";
+
+/// Het root-adres van de `Open`-knop, als wikkel met click-sense (zie de call site). `root_ui_id`
+/// plus dit zout is wél van buiten te vinden en te klikken, zoals `TABSTRIP`.
+pub const FOLDER_OPEN: &str = "folder-open";
 
 /// Vraag het besturingsselt om een map en geef het gekozen pad terug.
 ///
