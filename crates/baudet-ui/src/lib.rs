@@ -15,11 +15,13 @@
 //!    channels is both simpler and free of lock ordering.
 
 mod app;
-mod models;
 // Publiek zodat tests/tabs.rs dat palet tekent en niet een standaard-`Visuals`: de vormen waarmee
 // die test maten vergelijkt, zijn de vormen van dit venster.
 pub mod palette;
-mod panels;
+// Publiek zodat tests/folder_open.rs het commit-pad (Workspace::open) buiten de lay-out
+// kan meten: het mappadveld zit in een SidePanel-kolom en is niet root-adresseerbaar om in te
+// typen, dus het commit-pad wordt hier rechtstreeks aangesproken.
+pub mod panels;
 mod rows;
 mod settings;
 
@@ -31,7 +33,7 @@ pub use app::{run, run_from, Startup, TranscriptApp};
 // `.id_salt`-veld adresseert relatief aan zijn ouder-`Ui` en is die keten hier bewust níét: geen
 // enkele root-keten gaf dat adres (gemeten), dus de velden worden niet op adres getest.
 pub use app::{root_ui_id, TABSTRIP};
-pub use models::SELECTED_ROW;
+pub use panels::FOLDER_OPEN;
 pub use palette::DiffLine;
 pub use rows::Row;
 
@@ -39,5 +41,4 @@ pub use rows::Row;
 // knoppen die een persoon indrukt, en heeft daar zowel de startkeus (`with_tab`) als de lezing van
 // het antwoord (`tab()`) voor nodig.
 pub use app::Tab;
-pub use models::body as models_body;
 pub use settings::{body as settings_body, SettingsCommand, SettingsEvent, SettingsView};

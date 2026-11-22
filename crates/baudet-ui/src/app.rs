@@ -16,7 +16,6 @@
 //! already protect -- one reader, folded while draining, stops when the stream closes -- and a
 //! frame clock that stops draining would otherwise be a second, subtly different turn loop.
 
-use crate::models::{self};
 use crate::palette;
 use crate::panels::{self, Changes, Workspace};
 use crate::rows::Row;
@@ -53,28 +52,28 @@ enum Intent {
 
 /// Which body the middle panel shows.
 ///
-/// A three-way choice rather than a boolean for "settings open", because the reference app's middle
-/// is a tabbed pane — `Main.kt:130-134` adds Chat, Modellen and Ingestellingen to one `JTabbedPane` —
-/// and a boolean plus an overlay produced exactly the complaint this replaces: the form floated over
-/// the transcript, and its status line and Save button fell outside the window. One state cannot be
-/// in two tabs, so "is settings showing" and "is chat showing" are one question with three answers
-/// instead of two flags that can both claim the same rectangle.
+/// A choice rather than a boolean for "settings open", because the reference app's middle is a
+/// tabbed pane — `Main.kt:130-134` adds Chat and Ingestellingen to one `JTabbedPane` — and a boolean
+/// plus an overlay produced exactly the complaint this replaces: the form floated over the
+/// transcript, and its status line and Save button fell outside the window. One state cannot be in
+/// two tabs, so "is settings showing" and "is chat showing" are one question with two answers instead
+/// of two flags that can both claim the same rectangle. Het models-tabblad van het voorbeeld is hier
+/// bewust weggelaten: de Settings-plukknop toont ná een scan élk model al, dus een aparte
+/// modellenlijst was tweede weergave van dezelfde lijst voor niets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Chat,
-    Models,
     Settings,
 }
 
 impl Tab {
     /// The order and the words of the strip. `const` so the tabstrip and a test enumerate the same
-    /// three without either owning a copy of the list.
-    pub const ALL: [Tab; 3] = [Tab::Chat, Tab::Models, Tab::Settings];
+    /// two without either owning a copy of the list.
+    pub const ALL: [Tab; 2] = [Tab::Chat, Tab::Settings];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Chat => "Chat",
-            Tab::Models => "Models",
             Tab::Settings => "Settings",
         }
     }
@@ -107,12 +106,14 @@ pub struct TranscriptApp {
     /// is asynchronous and the picture must be able to wait for it to settle. `None` keeps the demo.
     shot_send: Option<String>,
     /// The left panel: the folder under inspection and its tree.
-    /// De map-invoer van de linkerpaneel. Leeft buiten de paint-pass: het mappadveld
-    /// haalt zijn tekst uit de meegegeven string, dus een lokaal `String::new()` per frame
-    /// wist elke toetsaanslag vóór de klik in de volgende frame. (Zie `panels::left`.)
-    folder_draft: String,
-
     workspace: Workspace,
+    /// Het draft-veld van de map-rij. Het lééft hier en niet lokaal in `panels::left`, omdat een
+    /// `TextEdit::singleline(&mut draft)` zijn tekst uit de meegegeven string haalt en erin schrijft:
+    /// `TextEditState` bewaart alleen cursor en offset, geen tekst (text_edit/builder.rs:551). Een
+    /// lokaal `let mut draft = String::new();` bij elke paint wist dus elke toetsaanslag vóórdat de
+    /// klik op `Open` of de Enter in een volgende frame arrives — dan is de rij leeg en opent er
+    /// niets. Eén eigenaar van "wat staat er in het veld", en die overleeft de repaint.
+    folder_draft: String,
     /// The right panel: the paths git reports for that folder.
     changes: Changes,
     /// Which body the middle panel shows. `Some` is a tab a person chose; `None` is the chat, which
@@ -164,8 +165,8 @@ impl TranscriptApp {
             shot_done: false,
             fetch_models_on_start: false,
             shot_send: None,
-            folder_draft: String::new(),
             workspace: Workspace::default(),
+            folder_draft: String::new(),
             changes: Changes::default(),
             active_tab: None,
             fell_back: None,
@@ -399,7 +400,6 @@ impl TranscriptApp {
                 .stick_to_bottom(transcript)
                 .show(ui, |ui| match tab {
                     Tab::Chat => self.transcript(ui),
-                    Tab::Models => models::body(ui, &mut self.settings, &self.settings_tx),
                     Tab::Settings => settings::body(ui, &mut self.settings, &self.settings_tx),
                 });
             ui.output_mut(|o| {
@@ -412,16 +412,6 @@ impl TranscriptApp {
 impl TranscriptApp {
     /// Which body the window shows. Public so a test can say which tab it painted; the paint pass
     /// reads the same field the strip writes, so this can never disagree with the screen.
-    /// De map die de linkerpaneel nu als onderwerp heeft, of `None` wanneer er niets gekozen is.
-
-    /// Leest rechtstreeks uit `Workspace::cwd`; er is geen tweede kopie van dat antwoord.
-
-    pub fn workspace_folder(&self) -> Option<&str> {
-
-        self.workspace.cwd()
-
-    }
-
     pub fn tab(&self) -> Tab {
         self.active_tab.unwrap_or(Tab::Chat)
     }
@@ -431,6 +421,16 @@ impl TranscriptApp {
     /// own repaint request has not made yet.
     pub fn frames(&self) -> u32 {
         self.frames
+    }
+
+    /// De map die het workspace-pane op dat moment toont, of `None` als er nog geen gekozen is.
+    ///
+    /// Een lezer, geen schrijver: `Workspace::cwd` houdt één eigenaar en `panels::left` blijft de
+    /// enige die er via `open` naar schrijft. Public zodat een test kan vragen "heeft de rij deze map
+    /// geopend" zonder het pane-self te hoeven aanroepen — precies de vraag waarmee de draft-fix zich
+    /// bewijst (een klik op `Open` na een getypt pad móet hier uitkomen).
+    pub fn workspace_folder(&self) -> Option<&str> {
+        self.workspace.cwd()
     }
 
     /// The window's layout, as a plain paint pass.

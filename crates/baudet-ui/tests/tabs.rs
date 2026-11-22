@@ -16,7 +16,7 @@
 //!    uitglijden, precies zoals `App::ui` hem voor een persoon doet. `app.tab()` is de lezing van het
 //!    antwoord: hetzelfde veld dat de strip schrijft en de paint-pass leest.
 
-use baudet_ui::{root_ui_id, TranscriptApp, Tab, SELECTED_ROW, TABSTRIP};
+use baudet_ui::{root_ui_id, TranscriptApp, Tab, TABSTRIP};
 use eframe::egui;
 
 const SCREEN: [f32; 2] = [1200.0, 800.0];
@@ -114,22 +114,3 @@ fn een_klik_op_een_tabknop_wisselt_het_tabblad() {
     }
 }
 
-#[test]
-fn het_models_tabblad_toont_zijn_plukknop_andere_niet() {
-    // `SELECTED_ROW` is het adres van "Use this model", en dat tekent alleen de models-body. Het is
-    // de enige body-discriminator die van buiten reproduceerbaar is (de velden zijn `.id_salt`, dus
-    // niet root-adresseerbaar — zie het kopregel-commentaar). "Alleen op models" is de bewering:
-    // op chat en settings mag het adres leeg blijven, op models moet het antwoorden.
-    let ctx = addressable_context();
-    let selected = root_ui_id(&ctx).with(SELECTED_ROW);
-
-    for tab in [Tab::Chat, Tab::Settings] {
-        let mut app = TranscriptApp::new(TranscriptApp::demo_backend()).with_tab(tab);
-        paint_once(&ctx, &mut app);
-        assert!(ctx.read_response(selected).is_none(), "modelknop stond getekend op tab {}", tab.label());
-    }
-
-    let mut models = TranscriptApp::new(TranscriptApp::demo_backend()).with_tab(Tab::Models);
-    paint_once(&ctx, &mut models);
-    assert!(ctx.read_response(selected).is_some(), "modelknop ontbrak op het models-tabblad");
-}
