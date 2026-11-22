@@ -140,6 +140,10 @@ pub struct SettingsView {
     git_allow_writes: bool,
     transcript_wrap: bool,
     honesty_footer: bool,
+    /// De eigen systeemprompt als tekst, zoals de `JTextArea(5, 34)` van de origineler
+    /// (`SettingsPanel.kt:52`). Tekst en niet `Option<String>`: blanco is hier de toestand "geen
+    /// eigen prompt" (`AppConfig.kt:210` `ifBlank`), en die toestand bestaat al in de snaar.
+    system_prompt: String,
     /// The credential as typed. A separate field from the password widget's buffer is not needed:
     /// this is that buffer, and empty means "not typed" (so the environment still answers).
     api_key: String,
@@ -301,6 +305,7 @@ impl SettingsView {
         self.git_allow_writes = settings.git_allow_writes;
         self.transcript_wrap = settings.transcript_wrap;
         self.honesty_footer = settings.honesty_footer;
+        self.system_prompt = settings.system_prompt.clone();
         self.stored_context.use_server_session = settings.use_server_session;
         self.stored_context.learned_context_window = settings.learned_context_window;
         self.stored_context.learned_context_key = settings.learned_context_key.clone();
@@ -369,6 +374,9 @@ impl SettingsView {
             git_allow_writes: self.git_allow_writes,
             transcript_wrap: self.transcript_wrap,
             honesty_footer: self.honesty_footer,
+            // De tekst gaat zoals hij is: `resolved_system_prompt` kent de ledig-regel en `draft`
+            // mag een spa vooraan niet wegpoetsten, want die kan bedoeld zijn.
+            system_prompt: self.system_prompt.clone(),
             learned_context_window: self.stored_context.learned_context_window,
             learned_context_key: self.stored_context.learned_context_key.clone(),
             left_divider: self.stored_context.left_divider,
@@ -753,6 +761,9 @@ pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<S
     // De zeven vinkjes, als eigen groep direct na de parallelstand — dezelfde plek als in de
     // volgorde van `SettingsPanel.kt:121-128`.
     toggle_rows(ui, view);
+    // De systeemprompt sluit de band af, als laatste rij vóór de contextgroepen — de plek die
+    // `SettingsPanel.kt:129-130` hem geeft (na de vinkjes, vóór de knoppen).
+    system_prompt_row(ui, view);
     ui.separator();
     context_rows(ui, view);
     ui.separator();
@@ -1014,6 +1025,31 @@ fn toggle_rows(ui: &mut Ui, view: &mut SettingsView) {
             _ => view.honesty_footer = value,
         }
     }
+}
+
+/// De systeemprompt als meerregelig vak, de `JTextArea(5, 34)` van `SettingsPanel.kt:52`.
+///
+/// `multiline` en niet `singleline`, want dit is de enige plek in dit formulier waar iemand
+/// regels schrijft: de ingebouwde prompt is er eentje van twee zinnen, en een eenregelig vak
+/// zou hem horizontaal moeten laten schuiven — precies wat `SettingsPanel.kt:129` met zijn
+/// `scrollingField` wilde vermijden. De hoogte is vijf regels, de hoogte van die text area, en
+/// niet zo hoog dat het formulier eronder wegloopt: de tab eromheen is al een `ScrollArea`.
+///
+/// Blanco is hier een geldig antwoord en geen fout — het is "geen eigen prompt" — dus er staat
+/// geen controle op `draft`. Het label zegt het met zijn eigen woorden ("leeg = ingebouwd"), en
+/// de hint herhaalt de ingebouwde tekst niet: die is lang, en een hint die de hele prompt toont,
+/// is een vak dat nooit leeg lijkt.
+fn system_prompt_row(ui: &mut Ui, view: &mut SettingsView) {
+    form_row(ui, Texts::get(Key::SystemPromptLabel), |ui| {
+        ui.add_sized(
+            [ui.available_width(), 0.0],
+            egui::TextEdit::multiline(&mut view.system_prompt)
+                .hint_text("blank = built-in prompt")
+                .desired_rows(5)
+                .desired_width(f32::INFINITY),
+        )
+        .on_hover_text(Texts::get(Key::TipSystemPrompt));
+    });
 }
 
 /// De drie sampling-rijen: temperatuur en `top_p`, in de volgorde van `SettingsPanel.kt:117-118`
@@ -1356,6 +1392,20 @@ mod tests {
         assert!(drafted.honesty_footer);
     }
 
+    /// De systeemprompt reist als tekst, ongecontroleerd, en blanco blijft blanco. De eigenschap die
+    /// hier telt, is dat `draft` de ledige snaar niet vult met de ingebouwde prompt: het bestand
+    /// bewaart de **afwijking**, en `resolved_system_prompt` levert de rest ('t is de enige manier
+    /// waarop een latere verandering van die ingebouwde tekst nog ergens doorwerkt).
+    #[test]
+    fn een_ledige_systeemprompt_blijft_ledig_wat_de_ingebouwde_prompt_ook_wil() {
+        let mut view = view();
+        assert!(view.system_prompt.trim().is_empty(), "de fixture start zonder eigen prompt");
+        assert!(view.draft().expect("blanco mag geen fout zijn").system_prompt.is_empty());
+
+        view.system_prompt = "Focus on Swift.\nTweede regel.".into();
+        assert_eq!(view.draft().unwrap().system_prompt, "Focus on Swift.\nTweede regel.");
+    }
+
     /// A view-model holding a whole endpoint, so a test starts from something a person could have
     /// typed rather than from a `Default` that no panel ever shows.
     fn view() -> SettingsView {
@@ -1387,6 +1437,9 @@ mod tests {
             git_allow_writes: false,
             transcript_wrap: true,
             honesty_footer: true,
+            // `system_prompt` hoeft hier niet: ledig is de toestand die een paneel uit het bestand
+            // ook heeft wanneer iemand nooit iets typte, en de vinkjes hierboven moesten wél omdat
+            // hun domein-default niet allemaal `false` is.
             ..SettingsView::default()
         }
     }

@@ -242,6 +242,9 @@ mod tests {
             git_allow_writes: true,
             transcript_wrap: false,
             honesty_footer: false,
+            // De eigen systeemprompt is een meerregelige tekst (`AppConfig.kt:140`), dus dit
+            // rondreisje bewijst ook dat regeleinden het JSON-bestand doorkomen.
+            system_prompt: "Regel een.\nRegel twee.".into(),
             learned_context_window: 32_768,
             learned_context_key: "http://studio:8000/v1|Qwen3.8-Flash".into(),
             // De verdeelstanden reizen mee door hetzelfde bestand (`AppConfig.kt:152-158`) en hun

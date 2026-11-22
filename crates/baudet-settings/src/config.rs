@@ -291,6 +291,16 @@ pub struct Settings {
     ///
     /// Poort van `AppConfig.kt:38` (`var honestyFooter: Boolean = true`), default aan.
     pub honesty_footer: bool,
+    /// De eigen instructie die boven elke beurt meegeht.
+    ///
+    /// Poort van `AppConfig.kt:140` (`var systemPrompt: String = ""`), default ledig. Het veld is
+    /// de **afwijking** en niet de instructie: blank betekent "geen eigen tekst", en
+    /// [`Settings::resolved_system_prompt`] geeft dan de ingebouwde. Een lege snaar is daarmee een
+    /// toestand en geen vergeten waarde, precies zoals bij `api_key`.
+    ///
+    /// Hij gaat mee in het Engels, wat de UI-taal ook is (`AppConfig.kt:212-214`): een prompt is
+    /// geen interface-onderdeel, en hem stilletjes vertalen verandert hoe het model zich gedraagt.
+    pub system_prompt: String,
     /// Het contextvenster dat een weigering ons leerde, of 0 wanneer nooit geleerd.
     ///
     /// Dit is géén instelling: de persoon typt het nooit. Het bestaat omdat de app een beurt anders
@@ -394,6 +404,9 @@ impl Default for Settings {
             git_allow_writes: false,
             transcript_wrap: true,
             honesty_footer: true,
+            // Ledig en niet de ingebouwde tekst: het bestand bewaart wat de persoon afweek, zodat de
+            // ingebouwde prompt one place in de code blijft (`AppConfig.kt:140,217`).
+            system_prompt: String::new(),
             learned_context_window: 0,
             learned_context_key: String::new(),
             // Drie nullen, geen maten: "er is nog nooit een venster gesloten". De maten zelf leven
@@ -429,6 +442,14 @@ pub const DEFAULT_TEMPERATURE: f64 = 0.7;
 /// Het standaard-aantal tegelijk gedraaide beurten, uit `AppConfig.kt:97`.
 pub const DEFAULT_MAX_PARALLEL_TURNS: u32 = 1;
 
+/// De ingebouwde systeeminstructie, woord voor woord uit `AppConfig.kt:217-219`.
+///
+/// Een eigen naam omdat de default hier ledig is en de prompt pas bij het lezen ontstaat: een
+/// tweede letterlijke tekst in de code is hoe de twee uit elkaar gaan lopen. Engels, ook in een
+/// Nederlandse interface — de opmerking van de origineler (`AppConfig.kt:212-214`) is geen
+/// stijlkeuze maar een gedragregel.
+pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Baudet, an accurate, critical coding assistant. Tests protect intended behavior. Change tests only when requirements changed or the test is objectively incorrect. Answer briefly and factually.";
+
 impl Settings {
     /// The credential to actually send: what was typed, otherwise what the named variable holds.
     ///
@@ -450,6 +471,20 @@ impl Settings {
     /// Whether anything at all answers for a credential, without saying what it is.
     pub fn has_key(&self) -> bool {
         self.resolved_key().is_some()
+    }
+
+    /// De instructie die daadwerkelijk meegaat: wat de persoon schreef, anders de ingebouwde.
+    ///
+    /// `AppConfig.kt:210` — `systemPrompt.ifBlank { DEFAULT_SYSTEM_PROMPT }`. Het woord
+    /// `ifBlank` is de helft van de betekenis en niet `isEmpty`: een snaar met alleen spaties is
+    /// iemand die het vakje leeg maakte en niet iemand die iets wou sturen. Wie wél iets schreef,
+    /// krijgt zijn tekst zoals hij is, spaties en regeleinden incluida.
+    pub fn resolved_system_prompt(&self) -> &str {
+        if self.system_prompt.trim().is_empty() {
+            DEFAULT_SYSTEM_PROMPT
+        } else {
+            &self.system_prompt
+        }
     }
 
     /// The wire dialect the file names, in the words the transport uses, or `None` when the file
@@ -777,6 +812,49 @@ mod tests {
         let json = serde_json::to_string(&flipped).unwrap();
         assert!(json.contains("\"git_allow_writes\":true"), "het bestand noemt de git-vlag: {json}");
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), flipped);
+    }
+
+    #[test]
+    fn een_ledige_systeemprompt_is_afwezigheid_en_geen_vergeten_tekst() {
+        // `AppConfig.kt:210` is `ifBlank` en niet `isEmpty`, dus de drie betekenissen zijn: ledig,
+        // alleen spaties, en "iets". De eerste twee moeten op de ingebouwde prompt uitkomen; de
+        // derde moet de tekst van de persoon teruggeven zonder hem te herkoken.
+        let default = Settings::default();
+        assert!(default.system_prompt.is_empty(), "de default wijst niet af");
+        assert_eq!(default.resolved_system_prompt(), DEFAULT_SYSTEM_PROMPT);
+
+        let only_blanks = Settings { system_prompt: "   \n  ".into(), ..Default::default() };
+        assert_eq!(only_blanks.resolved_system_prompt(), DEFAULT_SYSTEM_PROMPT, "spaties zijn geen prompt");
+
+        let own = "Focus on Swift, ignore the tests.";
+        let typed = Settings { system_prompt: own.into(), ..Default::default() };
+        assert_eq!(typed.resolved_system_prompt(), own, "wat iemand schreef, wint");
+    }
+
+    #[test]
+    fn de_ingebouwde_prompt_is_de_prompt_van_de_origineler() {
+        // Woord voor woord uit `AppConfig.kt:217-219`. Dit is geen lettertje dat mag meeliften met
+        // een stijlronde: het model gedraagt zich ernaar, en een stil aangepaste zin verandert dat
+        // gedrag voor iedereen die de prompt nooit aanraakte.
+        assert_eq!(
+            DEFAULT_SYSTEM_PROMPT,
+            "You are Baudet, an accurate, critical coding assistant. Tests protect intended behavior. Change tests only when requirements changed or the test is objectively incorrect. Answer briefly and factually."
+        );
+    }
+
+    #[test]
+    fn de_eigen_systeemprompt_reist_door_het_bestand() {
+        // Een meerregelige tekst met regeleinden: het vakje is een tekstzone, dus een regeleinde mag
+        // niet verdwijnen of ontleesbaar worden. Ledig én vol moeten allebei hun toestand houden.
+        let dir = tempfile::tempdir().unwrap();
+        use crate::store::SettingsFile;
+        let store = SettingsFile::at(dir.path().join("settings.json"));
+        let own = "Regel een.\nRegel twee met  spaties.\n\nEn een ledige erna.";
+        store.write(&Settings { system_prompt: own.into(), ..Default::default() }).unwrap();
+        let outcome = store.read();
+        let read = outcome.settings();
+        assert_eq!(read.system_prompt, own, "regeleinden reizen mee");
+        assert_eq!(read.resolved_system_prompt(), own);
     }
 
     #[test]
