@@ -6,9 +6,17 @@ Groen opgezette Rust-versie van de Baudet-app, met de Kotlin-app als voorbeeld. 
 
 ## Stand van zaken
 
-De front-end is representatief: transcript met streaming-regels, linker pane (project, tree),
-rechter pane (changed files), composer, en het ingestpaneel met endpoint, modellenlijst,
-redenereniveau en uitvoerplafond. `--screenshot` bewijst de staat van een sessie zonder muis.
+De volledige werklijst staat in [`TODO.md`](TODO.md): elk domein van de origineler met `[x]`/`[ ]`,
+de beslisregel bij twijfel, en hoe de embed-match Kotlin en Rust aan elkaar koppelt. Die lijst is
+de bron van de waarheid over wat er is en wat er nog moet; deze README gaat over *hoe*.
+
+De front-end toont wat er onder zit, en dat is minder dan het doel: transcript met streaming-regels,
+composer, en het ingestpaneel met endpoint, modellenlijst, redenereniveau en uitvoerplafond. **Nog
+niet** het project-/sessiedomein, de read/write/execute-rechten, de linker `ProjectSidebar`, of de
+bestandsboom in het **rechter** `FileTreePanel` zoals `Main.kt:161-170` die legt. Zie `TODO.md`
+voor de volledige stand en de bouwvolgorde. De lay-out is hier eerder onjuist begonnen (boom links
+in plaats van rechts, sidebar helemaal afwezig); dat wordt in item A/B van `TODO.md` rechtgezet.
+`--screenshot` bewijst de staat van een sessie zonder muis.
 `ScriptedBackend` voert beurtstromen uit voor een venster zonder server; `--live` stuurt de beurt
 naar het opgeslagen endpoint via `ResponsesBackend`, die beide OpenAI-dialecten spreekt en wiens
 dialect uit een server-scan komt. Het transport bestaat dus; wat er nu bovenop gebeurt, is hier
@@ -69,11 +77,13 @@ Waarom dit een besluit is en geen bijklus: het raakt het credentialsmodel (niets
 schijf gezet wat de omgeving kan geven) en de definitie van "actueel" in de picker. Beide zijn
 gedrag dat de gebruiker ziet, niet inwendige netheid.
 
-## Werkwijze bij een vastloper
+## Werkwijze bij een vastloper of een onzekere keuze
 
-Werkstaat vastleggen (commit + tag), dan een `codex/*`-branch voor het vervolg en `main`
-onaangeroerd, met het besluit hierboven. Zo is er altijd een punt om naar terug te keren en
-hoeft een omgegooide poging niets op te ruimen.
+**Zeker?** Bouw door op `main`. **Niet zeker, of een keuze die de richting koest?** Maak van de
+huidige staat een snapshot (commit + `git tag`), dan een nieuwe `codex/*`-branch waarin je doorwerkt,
+`main` onaangeroerd, met een README-aanpassing die het besluit en de reden noemt. Dan hoef je niet te
+worden afgeremd: er is altijd een punt om naar terug te keren en een omgegooide poging ruimt niets op.
+De volledige lijst en deze regel staan in [`TODO.md`](TODO.md).
 
 ## Wat er nu is, en wat er als next komt
 
