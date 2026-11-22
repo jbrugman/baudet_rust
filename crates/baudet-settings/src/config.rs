@@ -102,6 +102,11 @@ pub enum ContextStrategy {
 }
 
 impl ContextStrategy {
+    /// De kiezer-items in de claimvolgorde van de origineler (RecentMessages|RollingWindow|StopAtLimit),
+    /// zodat de combopositie dezelfde is als in de Kotlin-panel.
+    pub const ALL: [ContextStrategy; 3] =
+        [ContextStrategy::RecentMessages, ContextStrategy::RollingWindow, ContextStrategy::StopAtLimit];
+
     /// De index in de keuzelijst, volgens de claimvolgorde van de origineler.
     pub fn index(self) -> usize {
         match self {
@@ -398,8 +403,7 @@ impl Settings {
             max_output_tokens: self.max_output_tokens.unwrap_or(0),
             learned_context_window: self.learned_context_window,
             learned_context_key: self.learned_context_key.clone(),
-            keep_recent_messages: usize::try_from(self.context_keep_recent_messages.max(1))
-                .unwrap_or(usize::MAX),
+            keep_recent_messages: usize::try_from(self.context_keep_recent_messages.max(1)).unwrap_or(usize::MAX),
             model: self.model_name().to_string(),
             base_url: self.base_url.clone(),
         }
@@ -497,8 +501,7 @@ mod tests {
         // het venster niet breken; wel mag het wél leesbaar blijven, dus de rest van het bestand
         // blijft staan.
         let json = r#"{"base_url":"http://studio:8000/v1","model":"gemma","language":"pools"}"#;
-        let read: Settings =
-            serde_json::from_str(json).expect("een onbekend taalwoord mag geen kapot bestand maken");
+        let read: Settings = serde_json::from_str(json).expect("een onbekend taalwoord mag geen kapot bestand maken");
         assert_eq!(read.language, Language::En);
         assert_eq!(read.model.as_deref(), Some("gemma"), "de rest van het profiel blijft staan");
         // Ruimte en hoofdletter maken geen verschil, want de origineler trimt en kleint vóór de
@@ -642,12 +645,7 @@ mod tests {
             "een null in het bestand is geen breedte"
         );
 
-        let measured = Settings {
-            left_divider: 311,
-            right_divider: 940,
-            files_divider: 168,
-            ..Default::default()
-        };
+        let measured = Settings { left_divider: 311, right_divider: 940, files_divider: 168, ..Default::default() };
         let json = serde_json::to_string(&measured).unwrap();
         assert!(json.contains("\"left_divider\":311"), "het bestand noemt de stands: {json}");
         let back: Settings = serde_json::from_str(&json).unwrap();
@@ -682,7 +680,8 @@ mod tests {
 
     #[test]
     fn context_strategy_words_and_positions_match_the_reference_list() {
-        let strategies = [ContextStrategy::RecentMessages, ContextStrategy::RollingWindow, ContextStrategy::StopAtLimit];
+        let strategies =
+            [ContextStrategy::RecentMessages, ContextStrategy::RollingWindow, ContextStrategy::StopAtLimit];
         for (expected, strategy) in strategies.iter().copied().enumerate() {
             assert_eq!(strategy.index(), expected);
             assert_eq!(ContextStrategy::from_word(strategy.word()), Some(strategy));
@@ -738,7 +737,8 @@ mod tests {
         assert_eq!(limits.hard_ceiling(), window - baudet_store::WINDOW_MARGIN_TOKENS);
         assert_eq!(
             limits.context_ceiling(),
-            u64::from(window) - u64::from(baudet_store::WINDOW_MARGIN_TOKENS)
+            u64::from(window)
+                - u64::from(baudet_store::WINDOW_MARGIN_TOKENS)
                 - u64::from(baudet_store::INPUT_OVERHEAD_TOKENS)
         );
 
@@ -760,11 +760,8 @@ mod tests {
 
     #[test]
     fn a_learned_window_lands_under_the_identity_and_never_rises_again() {
-        let mut settings = Settings {
-            base_url: "http://a:8000/v1".into(),
-            model: Some("gemma-3-4b-it".into()),
-            ..Default::default()
-        };
+        let mut settings =
+            Settings { base_url: "http://a:8000/v1".into(), model: Some("gemma-3-4b-it".into()), ..Default::default() };
         // Geen getal is niets te leren: een weigering zonder cijfer laat het beleid heel.
         settings.learn_context_window(None, "http://a:8000/v1");
         assert_eq!(settings.learned_context_window, 0);
@@ -785,8 +782,11 @@ mod tests {
         // het beleid terug op de tabel. Daarvoor zijn de twee apart gezet.
         settings.learn_context_window(Some(4_096), "http://b:8000/v1");
         assert_eq!(settings.learned_context_key, "http://b:8000/v1|gemma-3-4b-it");
-        assert_eq!(settings.context_limits().context_window(), Some(32_768),
-            "een getal dat op een andere server leerde, geld hier niet");
+        assert_eq!(
+            settings.context_limits().context_window(),
+            Some(32_768),
+            "een getal dat op een andere server leerde, geld hier niet"
+        );
         // Op die andere server gaat het getal wél terug wonnen.
         settings.base_url = "http://b:8000/v1".into();
         assert_eq!(settings.context_limits().context_window(), Some(4_096));

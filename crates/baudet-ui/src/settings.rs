@@ -22,7 +22,7 @@
 use crate::palette;
 use baudet_backend::protocol::Protocol;
 use baudet_i18n::{Key, Language, Texts};
-use baudet_settings::config::ToolMode;
+use baudet_settings::config::{ContextStrategy, ToolMode};
 use baudet_settings::{ListingError, Model, ReadOutcome, Settings, SettingsFile, WriteError};
 use egui::Ui;
 
@@ -105,14 +105,22 @@ pub struct SettingsView {
     /// "lus uit" het limiet van de persoon stilletjes op 8 terugzetten — een wijziging die hij niet
     /// maakte en die pas terugkomt zodra hij de lus weer aanzet.
     stored_max_tool_iterations: u32,
-    /// Het contextbeleid zoals het bestand het draagt, en alvast de drie verdeelstanden.
+    /// Het contextbeleid zoals het bestand het draagt, plus de drie verdeelstanden.
     ///
-    /// De panel heeft er nog geen widgets voor, dus `draft` draagt deze woordelik terug. De reden is
-    /// de `max_tool_iterations`-regel hierboven: een panel zonder veld voor een getal mag het bij een
-    /// opslag niet op de standaard terugzetten, want dan verliest een persoon zijn ingestelde budget
-    /// door iets volslagen anders te wijzigen — en het geleerde venster is precies het getal dat bij
-    /// een geweigerde beurt werd betaald. Zodra er widgets voor komen, wordt dit de bron die ze tonen.
+    /// Dit is de voorraad van alles waar deze panel géén widget voor heeft. Het beleid, het budget en
+    /// de beurtteller hebben die wél (de drie velden hieronder), dus `draft` leest hen en niet deze
+    /// kopie; wat hier blijft, is het geleerde venster en de verdeelstanden. De dragende regel is de
+    /// `max_tool_iterations`-regel hierboven: een veld zonder widget mag bij een opslag niet op de
+    /// standaard terugvallen — en het geleerde venster is precies het getal dat bij een geweigerde
+    /// beurt werd betaald.
     stored_context: Settings,
+    /// Het contextbeleid, bewerkbaar via de kiezer hieronder. `stored_context` bewaart de rest van
+    /// het beleid (het geleerde venster, de verdeelstanden) die géén widget heeft; deze drie velden
+    /// wél, dus `draft` leest hen en niet de kopie. Type volgt de origineler: de kiezer draagt het
+    /// beleid zelf, de twee getallen zijn tekstvakken zoals `max_output_tokens`.
+    context_strategy: ContextStrategy,
+    context_budget: String,
+    context_keep_recent: String,
     /// The credential as typed. A separate field from the password widget's buffer is not needed:
     /// this is that buffer, and empty means "not typed" (so the environment still answers).
     api_key: String,
@@ -256,9 +264,9 @@ impl SettingsView {
         self.tool_mode = settings.tool_mode;
         // Alleen het contextbeleid wordt overgenomen, en dan als hele kopie: de velden die de panel
         // zélf draagt, horen bij die widgets en niet bij deze voorraad.
-        self.stored_context.context_budget_tokens = settings.context_budget_tokens;
-        self.stored_context.context_strategy = settings.context_strategy;
-        self.stored_context.context_keep_recent_messages = settings.context_keep_recent_messages;
+        self.context_strategy = settings.context_strategy;
+        self.context_budget = settings.context_budget_tokens.to_string();
+        self.context_keep_recent = settings.context_keep_recent_messages.to_string();
         self.stored_context.use_server_session = settings.use_server_session;
         self.stored_context.learned_context_window = settings.learned_context_window;
         self.stored_context.learned_context_key = settings.learned_context_key.clone();
@@ -314,9 +322,9 @@ impl SettingsView {
             api_key_env_var: self.api_key_env_var.trim().to_string(),
             protocol: self.protocol.clone().map(|word| word.trim().to_string()).filter(|w| !w.is_empty()),
             tool_mode: self.tool_mode,
-            context_budget_tokens: self.stored_context.context_budget_tokens,
-            context_strategy: self.stored_context.context_strategy,
-            context_keep_recent_messages: self.stored_context.context_keep_recent_messages,
+            context_budget_tokens: parse_context_budget(&self.context_budget)?,
+            context_strategy: self.context_strategy,
+            context_keep_recent_messages: parse_keep_recent(&self.context_keep_recent)?,
             use_server_session: self.stored_context.use_server_session,
             learned_context_window: self.stored_context.learned_context_window,
             learned_context_key: self.stored_context.learned_context_key.clone(),
@@ -659,6 +667,8 @@ pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<S
     tokens_row(ui, view);
     iterations_row(ui, view);
     ui.separator();
+    context_rows(ui, view);
+    ui.separator();
     key_row(ui, view);
     if view.blocked {
         ui.separator();
@@ -901,6 +911,74 @@ fn iterations_row(ui: &mut Ui, view: &mut SettingsView) {
     });
 }
 
+/// Het contextbeleid: wat er gebeurt als een gesprek het model ontgroeit.
+///
+/// Drie rijen uit de volgorde van `SettingsPanel.kt:113-116`: eerst de kiezer (`ContextStrategyLabel`,
+/// strategy-combo), dan het budget (`ContextBudgetLabel`), en tenslotte de beurtteller
+/// (`KeepRecentLabel`). De twee getallen delen de `max_output_tokens`-vorm: een blanco vak is "auto"
+/// voor het budget en de vloer-waarde voor de teller, zoals de origineler die vloer in het panel
+/// afdwingt (`ContextLimits`-lezing: 1) en niet in het bestand.
+fn context_rows(ui: &mut Ui, view: &mut SettingsView) {
+    form_row(ui, Texts::get(Key::ContextStrategyLabel), |ui| {
+        let mut chosen = view.context_strategy;
+        egui::ComboBox::from_id_salt("settings-context-strategy")
+            .selected_text(strategy_label(view.context_strategy))
+            .show_ui(ui, |ui| {
+                for option in ContextStrategy::ALL {
+                    ui.selectable_value(&mut chosen, option, strategy_label(option));
+                }
+            })
+            .response
+            .on_hover_text(Texts::get(Key::TipContextStrategy));
+        view.context_strategy = chosen;
+    });
+    form_row(ui, Texts::get(Key::ContextBudgetLabel), |ui| {
+        ui.add_sized(
+            [ui.available_width(), 20.0],
+            egui::TextEdit::singleline(&mut view.context_budget).hint_text("0 = auto").desired_width(f32::INFINITY),
+        )
+        .on_hover_text(Texts::get(Key::TipContextBudget));
+    });
+    form_row(ui, Texts::get(Key::KeepRecentLabel), |ui| {
+        ui.add_enabled(
+            view.context_strategy.trims_by_turn_count(),
+            egui::TextEdit::singleline(&mut view.context_keep_recent)
+                .hint_text("e.g. 6")
+                .desired_width(ui.available_width()),
+        )
+        .on_hover_text(Texts::get(Key::TipKeepRecent));
+    });
+}
+
+/// De kiezer-woorden voor het beleid, zoals `SettingsPanel.kt:33-35` ze toont.
+fn strategy_label(strategy: ContextStrategy) -> &'static str {
+    match strategy {
+        ContextStrategy::RecentMessages => Texts::get(Key::StrategyRecent),
+        ContextStrategy::RollingWindow => Texts::get(Key::StrategyRolling),
+        ContextStrategy::StopAtLimit => Texts::get(Key::StrategyStop),
+    }
+}
+
+/// Het budget: blanco of "0" is auto (0), een getal is het plafond, alles anders is een fout.
+fn parse_context_budget(text: &str) -> Result<u32, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    trimmed.parse::<u32>().map_err(|_| format!("context budget is not a token count: {trimmed}"))
+}
+
+/// De beurtteller: blanco behoudt het opgeslagen getal niet — de panel toont altijd een getal, dus
+/// blanco of nul valt op de vloer van 1, zoals de origineler (`context_keep_recent_messages`-lezing).
+/// Een niet-getal is een fout en mag niet stil terugvallen.
+fn parse_keep_recent(text: &str) -> Result<u32, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(1);
+    }
+    trimmed.parse::<u32>().map(|n| n.max(1)).map_err(|_| format!("keep last turns is not a whole number: {trimmed}"))
+}
+
 fn key_row(ui: &mut Ui, view: &mut SettingsView) {
     form_row(ui, Texts::get(Key::ApiKeyLabel), |ui| {
         ui.horizontal(|ui| {
@@ -970,6 +1048,34 @@ mod tests {
 
     fn model(id: &str) -> Model {
         Model { id: id.to_string(), label: None, context_window: None }
+    }
+
+    /// Het contextbeleid overleeft het rondje view → bestand → view, en de twee getallen doen hun
+    /// vloerwerk: een blanco budget is auto (0), blanco of 0 voor de teller is de vloer 1 (de
+    /// origineler dwingt die in het panel af), en een ander woord voor het beleid is een item uit de
+    /// kiezer en niet een woord uit het bestand.
+    #[test]
+    fn contextbeleid_rondje_en_vloeren() {
+        use baudet_settings::config::ContextStrategy;
+        let mut view = view();
+        view.context_strategy = ContextStrategy::RollingWindow;
+        view.context_budget = "48000".to_string();
+        view.context_keep_recent = String::new();
+        let drafted = view.draft().expect("een geldig contextbeleid mag niet worden geweigerd");
+        assert_eq!(drafted.context_strategy, ContextStrategy::RollingWindow);
+        assert_eq!(drafted.context_budget_tokens, 48000);
+        assert_eq!(drafted.context_keep_recent_messages, 1, "blanco valt op de vloer van 1");
+
+        // Een 0 in de teller blijft de vloer, en het budget mag expliciet 0 zijn.
+        view.context_budget = "0".to_string();
+        view.context_keep_recent = "0".to_string();
+        let drafted = view.draft().expect("nul mag geen fout zijn");
+        assert_eq!(drafted.context_budget_tokens, 0);
+        assert_eq!(drafted.context_keep_recent_messages, 1);
+
+        // Een niet-getal is een fout en valt niet stil terug.
+        view.context_budget = "veel".to_string();
+        assert!(view.draft().is_err(), "een woord als budget moet geweigerd worden");
     }
 
     /// A view-model holding a whole endpoint, so a test starts from something a person could have
