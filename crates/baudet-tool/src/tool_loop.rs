@@ -780,7 +780,7 @@ mod tests {
     use std::sync::Mutex;
 
     /// Het aantal tekens van het observatie-plafond, opgevraagd op één plek zodat geen enkele test een
-    /// drempelselfd raadt — de eigenschap die getest wordt, is het plafond zélf.
+    /// drempel zelf raadt — de eigenschap die getest wordt, is het plafond zélf.
     const CAP: usize = MAX_OBSERVATION_CHARS;
 
     /// Een afgebakende call, zoals de ingebouwde lezer hem produceert (die zet ook een call-id neer).
@@ -1045,6 +1045,10 @@ mod tests {
         script: Mutex<Vec<(String, Vec<(String, Value)>)>>,
         calls: AtomicUsize,
         seen: Mutex<Vec<(Option<String>, Option<String>, usize)>>,
+        /// De schatting van élk verzoek dat de bron echt zag, in beurtenvolgorde. De lus meet zijn plafond op
+        /// deze schatting, dus dit — en niet een narekening met de hand — is het getal dat een plafondbewijs
+        /// moet tonen.
+        estimates: Mutex<Vec<u64>>,
         last_id: Mutex<Option<String>>,
     }
 
@@ -1069,6 +1073,7 @@ mod tests {
                     request.image.map(str::to_string),
                     request.history.len(),
                 ));
+                self.estimates.lock().unwrap().push(estimate_tokens_of(request.history));
                 if let Some(delta) = request.history.last() {
                     (request.on_delta)(&delta.content);
                 }
@@ -1150,7 +1155,37 @@ mod tests {
             on_message: Box::new(|_| {}),
             sink,
         };
+        // Via `configure`, zodat een test die zelf al een keten zet (`without_a_chain_…`) die niet
+        // overschreven krijgt: een onvoorwaardelijke `chain_response_id(true)` hier zou het uit-pad
+        // stil aanzetten en die test op de verkeerde plek laten falen.
         let loop_ = configure(ToolLoop::new(source, registry, max_iterations));
+        loop_.run(&mut run).await
+    }
+
+    /// Hetzelfde, maar met een keten-start: `chain_response_id` aan plus dit response-id van de vorige
+    /// beurt. Het context-plafond geldt alleen bij een server-sessie, en zo'n sessie begint ergens —
+    /// zonder start-id zou elke keten-test toevallig op `None` draaien.
+    async fn drive_chained(
+        registry: &ToolRegistry,
+        source: &StubSource,
+        history: &[Msg],
+        ctx: &ToolContext,
+        max_iterations: u32,
+        configure: impl FnOnce(ToolLoop<'_>) -> ToolLoop<'_>,
+        sink: &RecordingSink,
+        previous: Option<&str>,
+    ) -> LoopOutcome {
+        let mut run = LoopRun {
+            history,
+            ctx,
+            previous_response_id: previous,
+            image: None,
+            on_delta: Box::new(|_| {}),
+            on_reasoning: Box::new(|_| {}),
+            on_message: Box::new(|_| {}),
+            sink,
+        };
+        let loop_ = configure(ToolLoop::new(source, registry, max_iterations).chain_response_id(true));
         loop_.run(&mut run).await
     }
 
@@ -1160,6 +1195,7 @@ mod tests {
             script: Mutex::new(script),
             calls: AtomicUsize::new(0),
             seen: Mutex::new(Vec::new()),
+            estimates: Mutex::new(Vec::new()),
             last_id: Mutex::new(None),
         }
     }
@@ -1434,30 +1470,74 @@ mod tests {
 
     #[tokio::test]
     async fn a_chained_run_stops_before_a_request_it_cannot_afford() {
+        // Poort-getrouw aan de origineler: bij een server-sessie speelt de backend zijn eigen historie voor
+        // en laat hij die groeien, dus de client kan een veroordeeld verzoek niet wegtrimmen — de lus moet
+        // zélf stoppen vóórdat hij het verstuurt. De transcriptie is hier al te lang (1 004 tekenschatting
+        // tegen plafond 10), dus er mag geen enkele beurt uitgaan.
         let reg = two_readers();
-        let asking = StubSource::calls_for("werk", &[("read_file", json!({"file": "a"}))]);
-        let src = source(vec![asking.clone(), asking.clone(), asking, StubSource::prose("had kunnen antwoorden")]);
-        // De schatting van deze module meet en raadt niet. De bron van deze test echoot de laatste boodschap
-        // als delta, dus elke beurttekst is zo lang als de observatie ervoor: de kop groeit sneller dan een
-        // kalme chat. Dit plafond staat tussen de eerste en de tweede beoordeling van de schatting zelf —
-        // dus de lus mag beginnen en zijn eerste call draaien, en moet het volgende verzoek weigeren. Een
-        // te laag plafond zou hem meteen afkappen, en dan test je niets dan de vlag.
-        let history = [Msg::user("vraag")];
-        let eerste_beurt = estimate_tokens_of(&history);
-        let met_observatie = estimate_tokens_of(&[
-            Msg::user("vraag"),
-            Msg::assistant("werk"),
-            Msg::user("Tool observation for call call-0-0: `read_file` succeeded (ok=true): (read_file a)"),
-        ]);
-        assert!(eerste_beurt <= 60 && 60 < met_observatie, "plafond 60 moet tussen {eerste_beurt} en {met_observatie} vallen");
-        let (outcome, _sink) =
-            drive(&reg, &src, &history, &ctx(), 5, |l| l.context_ceiling(60)).await;
+        let src = source(vec![StubSource::calls_for("had nooit mogen starten", &[("read_file", json!({"file": "a"}))])]);
+        let sink = RecordingSink::default();
+        let history = [Msg::user("x".repeat(3_000))];
+        // Met de formule van de origineler (~3 tekens per token, plus 8 per boodschap) ruim boven het
+        // plafond, dus de eerste beoordeling van de schatting kapte de draai al af.
+        assert!(estimate_tokens_of(&history) > 10, "de kop moet het plafond overschrijden");
+        let outcome = drive_chained(
+            &reg,
+            &src,
+            &history,
+            &ctx(),
+            4,
+            |l| l.context_ceiling(10),
+            &sink,
+            Some("resp-vorige-beurt"),
+        )
+        .await;
         let LoopOutcome::CapReached { incomplete_reason, steps, .. } = &outcome else {
             panic!("verwacht een kap, got {outcome:?}");
         };
         assert_eq!(incomplete_reason, CONTEXT_LIMIT_REASON);
-        assert_eq!(steps.len(), 1, "de lus stopte vóórdat het veroordeelde verzoek uitging");
-        assert_eq!(turns(&src), 1, "het tweede verzoek is nooit verstuurd");
+        assert!(steps.is_empty(), "geen enkele stap: het verzoek is nooit verstuurd");
+        assert_eq!(turns(&src), 0, "de bron heeft geen enkele beurt gezien");
+        assert!(sink.lines().is_empty(), "er is niets op het scherm gezet: {:?}", sink.lines());
+    }
+
+    #[tokio::test]
+    async fn a_chained_run_keeps_going_while_the_ceiling_leaves_room() {
+        // De keerzijde van dat plafond binnen dezelfde schepping: een keten met ruimte moet doorspelen en
+        // pas uitstappen op het juiste moment. De schatting groeit per beurt (gemeten in de afdruk hieronder,
+        // in de volgorde van de draai): het verzoek van de eerste beurt past, dat van de tweede ook — 44 van
+        // de 60 — maar na de observatie van de tweede call staat de kop op 82, en dáár stapt de loop uit,
+        // vóór het derde, veroordeelde verzoek. Zonder deze test bewijst de kap alleen dat er iets kapging,
+        // niet dat het plafond het juiste moment koos.
+        let reg = two_readers();
+        let asking = StubSource::calls_for("werk", &[("read_file", json!({"file": "a"}))]);
+        let src = source(vec![asking.clone(), asking, StubSource::prose("had af kunnen sluiten")]);
+        let history = [Msg::user("vraag")];
+        assert!(estimate_tokens_of(&history) <= 60, "de eerste beurt moet door het plafond heen passen");
+        let outcome = drive_chained(
+            &reg,
+            &src,
+            &history,
+            &ctx(),
+            5,
+            |l| l.context_ceiling(60),
+            &RecordingSink::default(),
+            Some("resp-vorige-beurt"),
+        )
+        .await;
+        let LoopOutcome::CapReached { incomplete_reason, steps, .. } = &outcome else {
+            panic!("verwacht een kap, got {outcome:?}");
+        };
+        assert_eq!(incomplete_reason, CONTEXT_LIMIT_REASON);
+        assert_eq!(steps.len(), 2, "twee betaalbare beurten draaiden, het derde verzoek niet");
+        assert_eq!(turns(&src), 2, "het derde verzoek is nooit verstuurd");
+        // De afdruk is geen test maar bewijs: wat de bron per beurt aangereikt kreeg, gemeten door dezelfde
+        // schatter waar het plafond op rekent. Bij een andere observatietekst — of een andere schatter dan de
+        // origineler — zijn dit de getallen om naar te kijken vóór de asserties hierboven aangepast worden.
+        let verzocht = src.estimates.lock().unwrap().clone();
+        assert_eq!(verzocht.len(), 2, "de bron zag precies twee verzoeken");
+        assert!(verzocht.iter().all(|e| *e <= 60), "élk verzoek dat de bron zag, pastte: {verzocht:?}");
+        println!("schatting per verzoek dat de bron zag: {verzocht:?} van plafond 60");
     }
 
     #[tokio::test]

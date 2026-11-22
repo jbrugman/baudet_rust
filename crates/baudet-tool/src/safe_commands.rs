@@ -41,7 +41,7 @@ const DQ_ACTIVE: [char; 4] = ['$', '`', '\\', '!'];
 /// `unsafe` staat waar bash het als syntax zou lezen.
 ///
 /// Een enkele-quote-lus wordt overgeslagen (bash leest hem literaal); binnen dubbele quotes tellen alleen de
-/// tekens die bash daar nog expanteert, met backslash als escape van de volgende. Een teken binen geen
+/// tekens die bash daar nog expanteert, met backslash als escape van de volgende. Een teken binnen geen
 /// quote is syntax en dus verboden. Een niet-gesloten quote is onveilig — de conservatieve richting voor
 /// een poort waar een onjuist "veilig"-oordeel de gevaarlijke fout is.
 fn has_unsafe_outside_quotes(s: &str, unsafe_chars: &[char]) -> bool {
@@ -385,7 +385,7 @@ fn single_family_key(segment: &str) -> Option<String> {
 }
 
 /// `s` splitsen in segmenten en de operatoren ertussen, waarbij de shell-scheiders `&&`, `||`, `|`, `;` en
-/// `&` alleen buiten elke quote worden herkend, zodat een scheider binen een quoted argument (een commit-
+/// `&` alleen buiten elke quote worden herkend, zodat een scheider binnen een quoted argument (een commit-
 /// bericht met een `&&`) niet voor een keten aanziet. `None` voor een vorm waarvoor geen gezin bestaat: een
 /// onbalansquote, een leeg segment (een leidende, trailing of dubbele scheider) of een operator-run die niet
 /// exact één canonieke operator is. De operatoren blijven bewaard, zodat het gezin de vorm van de keten
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn a_commit_message_holding_an_operator_is_not_a_chain() {
-        // De scheider binen een quoted argument is tekst, geen keten: één segment dus, één teken.
+        // De scheider binnen een quoted argument is tekst, geen keten: één segment dus, één teken.
         assert_eq!(trusted_key("git commit -m 'fix a && b'").as_deref(), Some("git commit"));
     }
 

@@ -38,7 +38,7 @@ pub type Undo = Box<dyn Fn() + Send>;
 /// naast de goedkeuringsvraag en bestaat alleen wanneer er een is.
 ///
 /// De proces-velden zijn voor de mens, niet voor het model: een run die "exit code: 2" al in `output`
-/// spellt, zou in een kop alleen maar herhalen, en een kop uit proza ineenraadseld is een kop die raadt.
+/// spellt, zou in een kop alleen maar herhalen, en een kop uit proza inééngeraadseld is een kop die raadt.
 /// `exit_code` blijft precies `None` wanneer er geen code is produced — een timeout, of een commando dat
 /// nooit startte — en dat is het onderscheid waar deze app voor exists.
 #[derive(Default)]

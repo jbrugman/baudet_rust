@@ -1,7 +1,7 @@
 //! De enige plek die beslist of een pad waar een tool aan wil komen echt binnen de projectmap blijft.
 //!
 //! Poort van `tool/FolderBoundary.kt`. De lexicale `starts_with` die een aanroeper eerst doet, vouwt alleen
-//! het letterlijke pad; hij lost geen symlinks op. Een link die binen de map woont maar ernaar buiten wijst,
+//! het letterlijke pad; hij lost geen symlinks op. Een link die binnen de map woont maar ernaar buiten wijst,
 //! zou daardoor doorkomen en daarna door die link gelezen of geschreven worden. Deze module lost het echte
 //! doel op, volgt élke symlink, en geeft het alleen terug wanneer het onder de echte root blijft.
 //!
@@ -20,7 +20,7 @@ pub enum Resolved {
 }
 
 impl Resolved {
-    /// Het pad wanneer het binnen bleef. Handig voor een tool die alleen deInside-kant doorschuift.
+    /// Het pad wanneer het binnen bleef. Handig voor een tool die alleen de Inside-kant doorschuift.
     pub fn path(self) -> Option<PathBuf> {
         match self {
             Resolved::Inside(path) => Some(path),
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn a_symlink_to_a_file_outside_the_folder_is_refused() {
-        // Dit is de echte greep: de link zelf woont binen de map en doorstaat dus elke lexicale check.
+        // Dit is de echte greep: de link zelf woont binnen de map en doorstaat dus elke lexicale check.
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let secret = outside.path().join("secret.txt");
