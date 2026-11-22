@@ -16,6 +16,8 @@ pub mod execute_tool;
 pub mod execute_workspace;
 pub mod folder_boundary;
 pub mod folder_listing;
+pub mod git_command;
+pub mod git_tool;
 pub mod patch;
 pub mod process_runner;
 pub mod read_file;
