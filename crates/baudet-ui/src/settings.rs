@@ -605,6 +605,22 @@ pub const FIELD_ENDPOINT: &str = "settings-endpoint-field";
 /// [`form_row`] terug op etiket-boven-veld in plaats van het etiket te kappen.
 const LABEL_COLUMN: f32 = 168.0;
 
+/// De lucht tussen twee formulierrijen, in pt.
+///
+/// De origineler zet `Insets(4, gap, 4, gap)` op élke cel van zijn `GridBagLayout`
+/// (`Form.kt:16`), dus twee rijen scheiden daar 4 + 4 = 8 pt. Dit formulier stond op
+/// `item_spacing.y` van het venster — 6 pt — en dat merkte men: de etiketrijen plakten tegen elkaars
+/// tekstvelden. Twee keer deze waarde, want de boven- én de ondermarge van een cel gelden allebei.
+const ROW_GAP: f32 = 4.0;
+
+/// De lucht tussen de knoppen onder een veld (Fetch en Test onder het adres, Bewaar onder het formulier).
+///
+/// De origineler scheidt zijn knoppen níét met een `ui.separator()`-lijn: hij groupert ze in een eigen
+/// band (`CommandCenterPanel.kt:397` `buttonRow(...)`) en laat de banden voor de lucht zorgen. Dit
+/// formulier tekent die banden niet, dus is de marge hier expliciet, en kleiner dan `ROW_GAP` omdat
+/// deze knoppen bij het veld erboven horen en niet naast een andere groep mogen lijken.
+const BUTTON_GAP: f32 = 8.0;
+
 /// Eén formulierrij: etiket links, veld rechts, zoals `Form.kt:14-32` het doet.
 ///
 /// De kolombreedte wordt hier bepaald en niet binnen `build`, want `build` roept
@@ -616,14 +632,29 @@ const LABEL_COLUMN: f32 = 168.0;
 /// (Gemeten aan "max output tokens (0 = server)": dat etiket is breder dan de kolom en zijn veld
 /// belandde vóór de velden erboven in plaats van onder ze.)
 fn form_row(ui: &mut Ui, label: impl Into<String>, build: impl FnOnce(&mut Ui)) {
+    form_row_with_gap(ui, ROW_GAP, label, build);
+}
+
+/// Als [`form_row`], met de lucht boven de rij alsparameter.
+///
+/// De lucht hoort vóórdat hem iets wordt aangeboden: `advance_after_rects` past `item_spacing.y` pas
+/// ná een widget toe (`layout.rs:757`), dus een `add_space` ná de rij telt niet voor de rij eronder.
+/// Of er lucht boven mag, weet de aanroeper en niet deze functie: de eerste rij van een groep hangt
+/// aan een `Separator` en krijgt er dus geen, en die weet alleen `body`. Daarom een parameter en geen
+/// blik op de beschikbare hoogte — het formulier staat in een `ScrollArea` met `auto_shrink` uit
+/// (`app.rs`), dus die hoogte is er altijd en zegt niets over wat er boven deze rij stond.
+fn form_row_with_gap(ui: &mut Ui, boven: f32, label: impl Into<String>, build: impl FnOnce(&mut Ui)) {
     let text = dim(label);
     let taken = ui.available_size_before_wrap();
+    if boven > 0.0 {
+        ui.add_space(boven);
+    }
     // Meten in plaats van gokken op een tekenbreedte. `into_galley` is de weg die de label zelf ook
     // gaat: hij lost de letter op zoals de stijl die voorschrijft (`widget_text.rs:742`) en een
     // oneindige breedte breekt niets, dus `size()` is de echte breedte van het etiket. Zo is de maat
     // die meet ook de maat die tekent.
     let inkling = text.clone().into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body);
-    if inkling.size().x + ui.spacing().item_spacing.x <= LABEL_COLUMN {
+    if inkling.size().x + ROW_GAP <= LABEL_COLUMN {
         ui.horizontal(|ui| {
             ui.add_sized([LABEL_COLUMN, 20.0], egui::Label::new(text).selectable(false));
             build(ui);
@@ -637,7 +668,7 @@ fn form_row(ui: &mut Ui, label: impl Into<String>, build: impl FnOnce(&mut Ui)) 
         ui.horizontal(|ui| {
             // `with_layout` en niet `with`: deze egui-build kent alleen de eerste (`ui.rs:2470`).
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
-                ui.set_width(LABEL_COLUMN - ui.spacing().item_spacing.x);
+                ui.set_width(LABEL_COLUMN - ROW_GAP);
                 ui.label(text);
             });
             ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
@@ -657,19 +688,23 @@ pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<S
     ui.set_width(ui.available_width().min(360.0));
     // Taal bovenaan, zoals de rijenlijst van `SettingsPanel.kt:107` — daar staat
     // `LanguageLabel to language` als eerste rij, vóór het endpoint.
-    language_row(ui, view);
+    // Eerste rij van het formulier: er hangt niets boven, dus geen lucht.
+    language_row(ui, view, 0.0);
     ui.separator();
-    endpoint_row(ui, view, &mut commands);
+    // Eerste rij van zijn groep, dus ook hier geen lucht boven de etiketrij.
+    endpoint_row(ui, view, &mut commands, 0.0);
     ui.separator();
-    model_row(ui, view);
+    // Groep, dus geen lucht.
+    model_row(ui, view, 0.0);
     ui.separator();
-    reasoning_row(ui, view);
+    // Groep, dus geen lucht; de rijen eronder wel.
+    reasoning_row(ui, view, 0.0);
     tokens_row(ui, view);
     iterations_row(ui, view);
     ui.separator();
     context_rows(ui, view);
     ui.separator();
-    key_row(ui, view);
+    key_row(ui, view, 0.0);
     if view.blocked {
         ui.separator();
         ui.colored_label(palette::DIFF_REMOVED, "Your settings file is unreadable.");
@@ -701,8 +736,8 @@ pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<S
 /// opslagknop (`Main.kt:74-82`, en `TipSave`: "The language switch is applied here too.").
 /// De kiezer toont dus wat er op slot staat en niet wat er nu op screen staat; dat verschil is
 /// precies wat het verschil tussen "kies" en "pas toe" zichtbaar maakt.
-fn language_row(ui: &mut Ui, view: &mut SettingsView) {
-    form_row(ui, Texts::get(Key::LanguageLabel), |ui| {
+fn language_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
+    form_row_with_gap(ui, boven, Texts::get(Key::LanguageLabel), |ui| {
         let mut current = view.language;
         let picker = egui::ComboBox::from_id_salt("settings-language")
             .selected_text(view.language.native_name())
@@ -717,7 +752,7 @@ fn language_row(ui: &mut Ui, view: &mut SettingsView) {
     });
 }
 
-fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<SettingsCommand>) {
+fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<SettingsCommand>, boven: f32) {
     // Het adres is één rij met zijn etiket; de knoppen eronder zijn geen veld maar een bediening,
     // en die houden hun eigen regel — `SettingsPanel.kt` kent die knoppen niet eens, ze zijn hier
     // het antwoord op "welke server spreekt dit".
@@ -728,7 +763,7 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
     // De breedte die het formulier hier bezet, gelezen vóördat de knoppen eronder hem kunnen verlagen:
     // `ui.horizontal` krompt een rij tot zijn inhoud, en zonder deze zet springt het schuifvlak per rij.
     let rij_breed = ui.available_size_before_wrap().x;
-    form_row(ui, Texts::get(Key::BaseUrlLabel), |ui| {
+    form_row_with_gap(ui, boven, Texts::get(Key::BaseUrlLabel), |ui| {
         let response = ui
             .add_sized(
                 [ui.available_width(), 20.0],
@@ -760,6 +795,7 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
             .clicked()
         })
         .inner;
+    ui.add_space(BUTTON_GAP);
     ui.horizontal(|ui| {
         ui.add_sized([LABEL_COLUMN, 20.0], egui::Label::new("").selectable(false));
         // The second question about an address: not which models are on it, but what it answers.
@@ -797,14 +833,14 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
     }
 }
 
-fn model_row(ui: &mut Ui, view: &mut SettingsView) {
+fn model_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
     // Het woord van de rij is de vraag, het veld erachter is het antwoord; een los woord boven een
     // keuzelijst was het uiterlijk van een koptekst, niet van een veld (`Form.kt:14-32`).
     if view.models.is_empty() {
         // De rij blijft staan met wat er ontbreekt, want een verdwenen veld laat iemand zoeken naar
         // een instelling die er wél is. De vroege `return` staat hier en niet in de sluiting, want
         // die sluiting hoort bij `form_row` en niet bij deze functie.
-        form_row(ui, Texts::get(Key::ModelLabel), |ui| {
+        form_row_with_gap(ui, boven, Texts::get(Key::ModelLabel), |ui| {
             ui.label(dim(if view.fetched_for.is_some() { "this endpoint lists none" } else { "not fetched yet" }));
         });
         return;
@@ -866,8 +902,8 @@ pub(crate) fn row_for(model: &Model) -> String {
     }
 }
 
-fn reasoning_row(ui: &mut Ui, view: &mut SettingsView) {
-    form_row(ui, Texts::get(Key::ReasoningEffortLabel), |ui| {
+fn reasoning_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
+    form_row_with_gap(ui, boven, Texts::get(Key::ReasoningEffortLabel), |ui| {
         let mut current = view.reasoning;
         let reasoning = egui::ComboBox::from_id_salt("settings-reasoning")
             .selected_text(view.reasoning.label())
@@ -979,8 +1015,8 @@ fn parse_keep_recent(text: &str) -> Result<u32, String> {
     trimmed.parse::<u32>().map(|n| n.max(1)).map_err(|_| format!("keep last turns is not a whole number: {trimmed}"))
 }
 
-fn key_row(ui: &mut Ui, view: &mut SettingsView) {
-    form_row(ui, Texts::get(Key::ApiKeyLabel), |ui| {
+fn key_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
+    form_row_with_gap(ui, boven, Texts::get(Key::ApiKeyLabel), |ui| {
         ui.horizontal(|ui| {
             ui.add_sized(
                 [ui.available_width(), 20.0],
@@ -1005,6 +1041,9 @@ fn key_row(ui: &mut Ui, view: &mut SettingsView) {
 }
 
 fn save_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<SettingsCommand>) {
+    // De knop staat los van het veld erboven: er sits al een `Separator` boven deze band, en zonder
+    // eigen marge plakte de knop tegen zijn eigen scheiding.
+    ui.add_space(BUTTON_GAP);
     let save = ui
         .add_enabled(!view.blocked, egui::Button::new(Texts::get(Key::SaveButton)))
         .on_hover_text(Texts::get(Key::TipSave))

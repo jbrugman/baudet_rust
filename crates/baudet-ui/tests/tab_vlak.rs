@@ -9,7 +9,7 @@
 //! tabblad een vlak en oogde de strip als tekst. Daarom leest deze test de geschilderde vormen
 //! idem `knop_zichtbaar.rs`, en wel na een klik.
 
-use baudet_ui::{root_ui_id, Tab, TranscriptApp, TABSTRIP};
+use baudet_ui::{root_ui_id, tab_size, Tab, TranscriptApp, TABSTRIP, TAB_GAP};
 use eframe::egui;
 
 const SCREEN: [f32; 2] = [1200.0, 800.0];
@@ -34,6 +34,30 @@ fn paint_with(ctx: &egui::Context, app: &mut TranscriptApp, frame: egui::RawInpu
 /// Passieve schilderbeurt zonder evenementen.
 fn paint(ctx: &egui::Context, app: &mut TranscriptApp) -> Vec<egui::Shape> {
     paint_with(ctx, app, input())
+}
+
+/// De maten van de tabknoppen zoals de vensterpass ze werkelijk neerzet.
+///
+/// Meten in dezelfde pass die tekent en niet erbuiten: `tab_size` vraagt de `Ui` van die pass, en de
+/// recten van de tabknoppen zijn de bakken die de strip voor ze reserveert (`app.rs` opent per tabblad
+/// een `UiBuilder::max_rect` van precies die maat en tekent de knop er met `add_sized` in, dus rect en
+/// bak zijn één). Een rect erbuiten herbouwen — `tab_size` eromheen rekenen — noemt een maat die de
+/// strip misschien net niet hanteert, dus deze helper leest beide uit dezelfde pass.
+fn tab_maten(ctx: &egui::Context, bak: &mut Option<egui::Vec2>) -> Vec<egui::Rect> {
+    let mut recten = Vec::new();
+    let output = ctx.run_ui(input(), |ui| {
+        *bak = Some(tab_size(ui));
+        recten = Tab::ALL
+            .iter()
+            .map(|tab| {
+                ctx.read_response(root_ui_id(ctx).with((TABSTRIP, tab.label())))
+                    .unwrap_or_else(|| panic!("tabknop {} tekent geen response", tab.label()))
+                    .rect
+            })
+            .collect();
+    });
+    output.drop_without_applying_deltas();
+    recten
 }
 
 /// Klik-helper:beweeg naar het middelpunt van de tabknop, druk in en laat los in twee passen.
@@ -142,4 +166,46 @@ fn het_actieve_tabblad_is_te_onderscheiden_van_de_andere() {
         "beide tabbladen vullen {vullingen0:?}: geen verschil te zien",
         vullingen0 = vullingen[0]
     );
+}
+
+#[test]
+fn de_tabknoppen_plakken_niet_tegen_elkaar() {
+    // De klacht: "er mag wat meer ruimte tussen de elementen, ze plakken tegen elkaar". Voor de tab-
+    // strip betekent dat één ding: twee bakken met 1 pt rand tegen elkaar zijn een blok met twee
+    // woorden en geen twee tabbladen. Daarom meten wij hier de lucht zélf, in de pass die tekent
+    // (`tab_maten`), en wel vóórdat er geklikt is: een strip die pas na een klik lucht krijgt, is
+    // geen strip. Een styleveld lezen had deze klacht groen laten staan.
+    let ctx = egui::Context::default();
+    baudet_ui::palette::install(&ctx);
+    let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+    let vormen = paint(&ctx, &mut app);
+    let mut bak = None;
+    let recten = tab_maten(&ctx, &mut bak);
+    let bak = bak.expect("de strip meet geen tab-maat");
+    // Eerst de maat van de bak: een spleet meten tussen recten die niet de bakken zijn, meet lucht
+    // die er niet staat. Daarna pas de lucht zélf, en dan op de maat van TAB_GAP — de waarde die de
+    // strook zet en niet een grens die de test verzint.
+    for rect in &recten {
+        assert!(
+            (rect.width() - bak.x).abs() < 0.5 && (rect.height() - bak.y).abs() < 0.5,
+            "tabknop {rect:?} vult zijn bak van {bak:?} niet: de strip deelt bredere sloten uit dan hij tekent",
+        );
+    }
+    for paar in recten.windows(2) {
+        let (vorige, volgende) = (paar[0], paar[1]);
+        assert!(
+            volgende.min.x - vorige.max.x >= TAB_GAP - 0.5,
+            "tabknoppen {vorige:?} en {volgende:?} laten {vrij:.1} pt lucht, minder dan de {luchtmaat:.0} pt van TAB_GAP",
+            vrij = volgende.min.x - vorige.max.x,
+            luchtmaat = TAB_GAP
+        );
+        assert!(
+            (volgende.min.y - vorige.min.y).abs() < 0.5 && (volgende.max.y - vorige.max.y).abs() < 0.5,
+            "de knoppen {vorige:?} en {volgende:?} hangen niet op één lijn: de strip breekt",
+        );
+        assert!(
+            tab_vlak(&vormen, vorige).is_some(),
+            "tabknop op {vorige:?} bevat geen gevuld vlak: de strip oogt als losse tekst",
+        );
+    }
 }

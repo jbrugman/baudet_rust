@@ -617,21 +617,8 @@ impl TranscriptApp {
                 // woorden van verschillende breedte oogden als tekst, niet als knoppen. De breedte is
                 // het langste tabwoord dat hier voorkomt — in het Duits "Einstellungen" — met de vulling
                 // van de knop eromheen; de hoogte is een aanwijsbare rij.
-                let tab_size = {
-                    let pad = ui.spacing().button_padding;
-                    let widest = Tab::ALL
-                        .iter()
-                        .map(|candidate| {
-                            egui::WidgetText::from(candidate.label()).into_galley(
-                                ui,
-                                Some(egui::TextWrapMode::Extend),
-                                f32::INFINITY,
-                                egui::TextStyle::Button,
-                            )
-                        })
-                        .fold(0.0_f32, |w, galley| w.max(galley.size().x));
-                    egui::vec2(widest + 2.0 * pad.x + 8.0, ui.spacing().interact_size.y.max(24.0))
-                };
+                // Maat uit het eigen lettertype en gelijk voor beide knoppen; zie `tab_size`.
+                let tab_size = tab_size(ui);
                 // De strook erft zijn uitlijning van het `Panel::top`-kader, en dat is `RightTop`
                 // gemeten: de Woord-schakelaar en het Baudet-woord staan er ook in. Voor een rij
                 // knoppen betekent die uitlijning dat de hoogste het dak bepaalt en de andere mee naar
@@ -639,6 +626,14 @@ impl TranscriptApp {
                 // knoppen van verschillende hoogte en één die losser hing. `LeftTop` is wat de
                 // origineler doet: zijn `JTabbedPane`-tabs staan links en boven, en elk tabblad vult
                 // zijn eigen slot (`Main.kt:131-134`).
+                // De strook is de eigenaar van haar eigen lucht. `Ui::style_mut` werkt op het
+                // `DerivedStyle` van deze `Ui` en dus op al haar kindjes — `spacing()` en
+                // `style()` (`ui.rs:622-639`) — terwijl de ouder en het venster hun 6 pt van
+                // `App::ui` houden. Een `add_space` naast de bak en een bredere bak voor de tweede
+                // tabblad waren hier twee gemeten mislukkingen (zie `TAB_GAP`); wat wél werkt, is de
+                // maat van de afstand zélf, want `Layout::horizontal()` leest die per pass uit de
+                // stijl van de `Ui` die hem tekent.
+                ui.style_mut().spacing.item_spacing.x = TAB_GAP;
                 ui.horizontal_top(|ui| {
                     // `horizontal_top` en niet `horizontal_wrapped`: beide tabbladen passen in elke breedte
                     // die dit venster haalt, en een strip die omvouwt, verbergt de weg terug uit een tab.
@@ -903,6 +898,41 @@ impl TranscriptApp {
 /// zelf (`egui::Button`, `selectable_label`) zou een eigen auto-adres dragen dat van buiten niet te
 /// reconstruëren is, dus de klik wordt op de wikkel geteld, niet op die knop.
 pub const TABSTRIP: &str = "tabstrip";
+
+/// De ruimte tussen twee tabknoppen in de strip, in pt.
+///
+/// De strook erft haar horizontale afstand van `spacing.item_spacing.x`, en twee pogingen om die op te
+/// krikken zonder de afstand zelf te verzetten, mislukten op dezelfde manier: een `add_space` vóór de
+/// bak verschoof de volgende bak géén maat, en een bak die TAB_GAP breder was dan de knop vergrootte
+/// diens vlak maar niet de spleet ernaartoe — telkens precies de oude 8 pt, want de strook is breder
+/// dan twee tabbladen en haar uitlijning hergroepeert de plaats van de rij, niet de maat van haar
+/// lucht. Wat wél werkt, is de afstand zélf binnen de stijl van de strook (`ui.style_mut()`, zie
+/// `App::paint_layout`), want `Layout::horizontal()` leest die per pass. 10 pt: breder dan de rand van
+/// 1 pt dik en smaller dan een bak, zodat élk tabblad een eigen knop blijft. De 8 pt die hier eerder
+/// stonden waren meetbaar te krap — twee bakken met 1 pt rand tegen elkaar oogden als één blok.
+pub const TAB_GAP: f32 = 10.0;
+
+/// De maat van een tabknop, gemeten in de `Ui` die hem tekent.
+///
+/// Geen raden: de breedte is het langste tabwoord dat hier voorkomt — in het Duits "Einstellungen" —
+/// met de vulling van de knop eromheen, en de hoogte is een aanwijsbare rij. De maat geldt voor élke
+/// knop in de strip, want woorden van verschillende breedte oogden als tekst en niet als knoppen.
+/// `pub` zodat tests/tab_vlak.rs dezelfde maat aanwijst in plaats van er een te raden.
+pub fn tab_size(ui: &egui::Ui) -> egui::Vec2 {
+    let pad = ui.spacing().button_padding;
+    let breedst = Tab::ALL
+        .iter()
+        .map(|candidate| {
+            egui::WidgetText::from(candidate.label()).into_galley(
+                ui,
+                Some(egui::TextWrapMode::Extend),
+                f32::INFINITY,
+                egui::TextStyle::Button,
+            )
+        })
+        .fold(0.0_f32, |breed, galley| breed.max(galley.size().x));
+    egui::vec2(breedst + 2.0 * pad.x + 8.0, ui.spacing().interact_size.y.max(24.0))
+}
 
 /// Het stabiele zout van het vraagveld.
 ///
