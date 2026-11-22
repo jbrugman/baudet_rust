@@ -1,0 +1,452 @@
+//! Het eerste schrijfbare gereedschap: één bestand in de projectmap patched door exacte tekst-edits.
+//!
+//! Poort van `tool/EditFileTool.kt`. De rechten die deze tool afdwingt, zijn precies diegene die het
+//! rechtenmodel al bewaart — er moet een map gekoppeld zijn en Write moet gegeven zijn — hij weigert élk pad
+//! dat buiten die map uitkomt, hij toont een diff en vraagt vóór er iets landt, en hij houdt de originele
+//! bytes zodat de write ongedaan kan. Élke weigering is een [`ToolResult`] met een model-gerichte reden en
+//! nooit een exception, zodat het model hetzelfde faalkanaal ziet, of de oorzaak nu een slecht pad is dan wel
+//! een verouderde match.
+//!
+//! De tijdvolgorde hier is de eigenlijke veiligheid, niet de tekst: lezen → patchen in het geheugen →
+//! vragen → nog eens lezen → pas schrijven. Die tweede lezing is geen overdaad. Tussen de preview en de klik
+//! kan de persoon zélf in de editor hebben gewijzigd, en zonder die lezing zou de tool zijn werk overschrijven
+//! met een patch die op een oudere tekst was berekend.
+
+use crate::diff::{LineDiff, UnifiedDiff};
+use crate::folder_boundary::FolderBoundary;
+use crate::folder_listing;
+use crate::patch::{Edit, PatchApplier, PatchOutcome};
+use crate::tool::{Tool, ToolContext, ToolResult, Undo};
+use baudet_core::item::ItemKind;
+use serde_json::{json, Value};
+use std::fs;
+use std::path::Path;
+
+/// De tool zelf.
+#[derive(Debug, Default)]
+pub struct EditFileTool;
+
+impl Tool for EditFileTool {
+    fn name(&self) -> &str {
+        "edit_file"
+    }
+
+    fn description(&self) -> &str {
+        "Change one file in the project folder by replacing exact text. \
+         Give the exact old_text to find and the new_text to put in its place. \
+         old_text must appear once, or be unambiguous when replace_all is true."
+    }
+
+    /// Altijd een update, nooit een toevoeging of een verwijdering: de tool patched tekst in een bestand dat
+    /// hij eerst leest, en een pad dat hij niet kan lezen is een weigering in plaats van een nieuw bestand.
+    /// `add` melden voor een bestand dat deze tool niet had kunnen aanmaken, zou een kaart zijn die liegt.
+    fn item_kind(&self) -> ItemKind {
+        ItemKind::FileChange
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "file": { "type": "string", "description": "a file inside the project folder" },
+                "edits": {
+                    "type": "array",
+                    "description": "the edits to apply, in order",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_text": { "type": "string" },
+                            "new_text": { "type": "string" },
+                            "replace_all": { "type": "boolean" }
+                        },
+                        "required": ["old_text", "new_text"]
+                    }
+                }
+            },
+            "required": ["file", "edits"]
+        })
+    }
+
+    fn execute(&self, args: &Value, ctx: &ToolContext) -> ToolResult {
+        let Some(rel) = args.get("file").and_then(Value::as_str) else {
+            return fail("needs a file argument");
+        };
+        let Some(root) = ctx.root.as_deref() else {
+            return fail("no project folder is linked to write into");
+        };
+        if !ctx.write_granted {
+            return fail("write access to the project folder has not been granted");
+        }
+
+        let edits = parse_edits(args.get("edits"));
+        if edits.is_empty() {
+            return fail("needs at least one edit");
+        }
+
+        let resolved = match FolderBoundary::resolve_file_within(root, rel) {
+            crate::folder_boundary::Resolved::Inside(path) => path,
+            crate::folder_boundary::Resolved::Refused(reason) => return fail(reason),
+        };
+
+        let original = match fs::read_to_string(&resolved) {
+            Ok(text) => text,
+            Err(_) => return fail(format!("{rel} could not be read.{}", folder_listing::hint(root))),
+        };
+
+        match PatchApplier::apply(&original, &edits) {
+            PatchOutcome::Rejected { reason } => fail(reason),
+            PatchOutcome::Applied { content } => write_if_approved(ctx, root, &resolved, rel, &original, &content),
+        }
+    }
+}
+
+/// Vragen, opnieuw lezen en pas dan schrijven. Zie de module-comment voor waarom de tweede lezing nodig is.
+fn write_if_approved(
+    ctx: &ToolContext,
+    root: &Path,
+    resolved: &Path,
+    rel: &str,
+    original: &str,
+    updated: &str,
+) -> ToolResult {
+    if original == updated {
+        return ToolResult::ok(format!("no change: new_text equals old_text for {rel}"));
+    }
+    let diff = UnifiedDiff::render(&format!("a/{rel}"), &format!("b/{rel}"), &LineDiff::diff(original, updated));
+    if !(ctx.approve)(rel, &diff) {
+        return ToolResult {
+            ok: false,
+            output: format!("the user declined the change to {rel}; do not retry it, tell the user instead"),
+            diff: Some(diff),
+            ..Default::default()
+        };
+    }
+    let safe = match FolderBoundary::real_within(root, resolved) {
+        Some(path) => path,
+        None => return fail(format!("{rel} resolves outside the folder once links are followed")),
+    };
+    let current = match fs::read_to_string(&safe) {
+        Ok(text) => text,
+        Err(_) => return fail(format!("{rel} could not be re-read before writing")),
+    };
+    if current != original {
+        return fail(format!("{rel} changed since the preview; not overwriting a newer edit"));
+    }
+    // Terugdraaien schrijft de originele bytes terug. In de origineler is dat `runCatching`, dus een mislukkende
+    // recover mag geen panic worden: de handgreep slikt de fout stil, want er is niemand die er dan nog iets
+    // mee kan dan de persoon die het bestand zelf bekijkt.
+    let undo: Undo = {
+        let path = safe.clone();
+        let restore = original.to_owned();
+        Box::new(move || {
+            let _ = fs::write(&path, &restore);
+        })
+    };
+    match fs::write(&safe, updated) {
+        Ok(()) => ToolResult {
+            ok: true,
+            output: format!("wrote {rel}"),
+            diff: Some(diff),
+            undo: Some(undo),
+            ..Default::default()
+        },
+        Err(e) => fail(format!("writing {rel} failed: {e}")),
+    }
+}
+
+/// De edits uit het argument, in volgorde. Een element dat geen object is of waaraan een van de twee
+/// verplichte teksten ontbreekt, valt weg — precies zoals de origineler `mapNotNull` doet — zodat één rommelig
+/// element de rest van de lijst niet kost.
+fn parse_edits(value: Option<&Value>) -> Vec<Edit> {
+    let Some(Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let old_text = item.get("old_text")?.as_str()?.to_owned();
+            let new_text = item.get("new_text")?.as_str()?.to_owned();
+            // Alleen een echte boolean telt; een string "true" is geen waarheid, want `false` zou er dan uit
+            // moeten volgen en dat is een stil ander gedrag dan de aanvrager bedoelde.
+            let replace_all = item.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
+            Some(Edit { old_text, new_text, replace_all })
+        })
+        .collect()
+}
+
+/// De weigeringsformat van deze tool: de naam er vóór, zodat het model uit de tekst alleen al ziet welk
+/// gereedschap sprak.
+fn fail(reason: impl Into<String>) -> ToolResult {
+    ToolResult::fail(format!("edit_file: {}", reason.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::path::{Path as StdPath, PathBuf as StdPathBuf};
+    use std::sync::{Arc, Mutex};
+
+    /// Een context die mag schrijven naar `root`, en die onthoudt wat er gevraagd is.
+    ///
+    /// De callback moet onthouden wat hij vroeg zonder `&mut` te kunnen vragen, dus de lijst leeft achter een
+    /// slot. `ToolContext` eist `Send` van zijn callbacks — hetrechte punt waar de UI op háár thread vraagt —
+    /// dus `Rc<RefCell>` valt af en is hier vervangen door `Arc<Mutex<_>>`. De mutex regelt geen concurrentie
+    /// in deze tests, hij zet alleen het type recht.
+    struct Recorder {
+        asked: Mutex<Vec<(String, String)>>,
+        answer: bool,
+    }
+
+    impl Recorder {
+        fn new(answer: bool) -> Arc<Self> {
+            Arc::new(Recorder { asked: std::sync::Mutex::new(Vec::new()), answer })
+        }
+    }
+
+    fn write_ctx(root: &StdPath, recorder: &Arc<Recorder>) -> ToolContext {
+        let shared = Arc::clone(recorder);
+        ToolContext {
+            root: Some(root.to_path_buf()),
+            write_granted: true,
+            read_granted: true,
+            approve: Box::new(move |rel: &str, diff: &str| {
+                shared.asked.lock().unwrap().push((rel.to_owned(), diff.to_owned()));
+                shared.answer
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn edit(root: &StdPath, args: Value, recorder: &Arc<Recorder>) -> ToolResult {
+        EditFileTool.execute(&args, &write_ctx(root, recorder))
+    }
+
+    fn edit_with(answer: bool, root: &StdPath, args: Value) -> (ToolResult, Arc<Recorder>) {
+        let recorder = Recorder::new(answer);
+        let result = edit(root, args, &recorder);
+        (result, recorder)
+    }
+
+    #[test]
+    fn it_refuses_without_a_file_an_edits_or_a_folder_or_write() {
+        let recorder = Recorder::new(true);
+        let dir = tempfile::tempdir().unwrap();
+
+        let no_file = edit(dir.path(), json!({"edits": [{"old_text": "a", "new_text": "b"}]}), &recorder);
+        assert_eq!(no_file.output, "edit_file: needs a file argument");
+
+        let no_edits = edit(dir.path(), json!({"file": "x.txt"}), &recorder);
+        assert_eq!(no_edits.output, "edit_file: needs at least one edit");
+
+        // Een context zonder map én zonder recht: de map wordt eerst bekeken, dus dat is het antwoord.
+        let ctx = ToolContext::default();
+        let no_folder =
+            EditFileTool.execute(&json!({"file": "x.txt", "edits": [{"old_text": "a", "new_text": "b"}]}), &ctx);
+        assert_eq!(no_folder.output, "edit_file: no project folder is linked to write into");
+
+        // Zelfde pad, nu mét map maar zonder Write: het recht is het volgende hok.
+        let ctx = ToolContext { root: Some(dir.path().to_path_buf()), ..Default::default() };
+        let no_write =
+            EditFileTool.execute(&json!({"file": "x.txt", "edits": [{"old_text": "a", "new_text": "b"}]}), &ctx);
+        assert_eq!(no_write.output, "edit_file: write access to the project folder has not been granted");
+    }
+
+    #[test]
+    fn it_refuses_a_path_that_leaves_the_folder_and_never_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let recorder = Recorder::new(true);
+        let result = edit(
+            dir.path(),
+            json!({"file": "../buiten.txt", "edits": [{"old_text": "a", "new_text": "b"}]}),
+            &recorder,
+        );
+        assert!(!result.ok);
+        assert!(result.output.starts_with("edit_file: "), "{}", result.output);
+        assert!(recorder.asked.lock().unwrap().is_empty(), "buiten de map mag er niet eens om gevraagd worden");
+    }
+
+    #[test]
+    fn it_hints_the_folder_listing_when_the_file_cannot_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("bestaand.txt"), "x\n").unwrap();
+        let recorder = Recorder::new(true);
+        let result = edit(
+            dir.path(),
+            json!({"file": "ontbreekt.txt", "edits": [{"old_text": "a", "new_text": "b"}]}),
+            &recorder,
+        );
+        // Dit pad valt al vóór het lezen weg: `resolve_file_within` eist een regelbaar bestand en melden
+        // zelf de opsomming, precies zoals de origineler. Het "could not be read"-pad is er een van een
+        // bestand dat wél bestaat maar niet te lezen is (rechten, of een directory-race).
+        assert_eq!(
+            result.output,
+            format!("edit_file: ontbreekt.txt does not exist inside the folder.{}", folder_listing::hint(dir.path()))
+        );
+        assert!(result.output.contains("bestaand.txt"), "de opsomming moet het echte bestand noemen");
+    }
+
+    #[test]
+    fn it_shows_a_unified_diff_and_asks_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("notes.txt"), "eerste regel\n").unwrap();
+        let (result, recorder) = edit_with(
+            true,
+            dir.path(),
+            json!({"file": "notes.txt", "edits": [{"old_text": "eerste", "new_text": "tweede"}]}),
+        );
+
+        assert!(result.ok);
+        assert_eq!(result.output, "wrote notes.txt");
+        assert_eq!(result.diff.as_deref(), Some("--- a/notes.txt\n+++ b/notes.txt\n-eerste regel\n+tweede regel\n \n"));
+        let asked = recorder.asked.lock().unwrap();
+        assert_eq!(asked.len(), 1, "één vraag per schrijfbare run");
+        assert_eq!(asked[0].0, "notes.txt");
+        assert_eq!(asked[0].1, *result.diff.as_ref().unwrap(), "de vraag toont dezelfde tekst als de kaart");
+        assert_eq!(fs::read_to_string(dir.path().join("notes.txt")).unwrap(), "tweede regel\n");
+    }
+
+    #[test]
+    fn a_decline_writes_nothing_and_says_do_not_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("notes.txt"), "eerste regel\n").unwrap();
+        let (result, _) = edit_with(
+            false,
+            dir.path(),
+            json!({"file": "notes.txt", "edits": [{"old_text": "eerste", "new_text": "tweede"}]}),
+        );
+        assert!(!result.ok);
+        assert_eq!(result.output, "the user declined the change to notes.txt; do not retry it, tell the user instead");
+        // De diff gaat mee naar de kaart, ook bij weigering: de persoon moet zien wat hij zojuist afwees.
+        assert!(result.diff.is_some());
+        assert_eq!(fs::read_to_string(dir.path().join("notes.txt")).unwrap(), "eerste regel\n");
+    }
+
+    #[test]
+    fn an_edit_that_changes_nothing_writes_and_asks_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("notes.txt"), "ongewijzigd\n").unwrap();
+        let (result, recorder) = edit_with(
+            true,
+            dir.path(),
+            json!({"file": "notes.txt", "edits": [{"old_text": "ongewijzigd", "new_text": "ongewijzigd"}]}),
+        );
+        assert!(result.ok);
+        assert_eq!(result.output, "no change: new_text equals old_text for notes.txt");
+        assert!(result.diff.is_none());
+        assert!(recorder.asked.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn it_refuses_to_overwrite_an_edit_that_landed_since_the_preview() {
+        // De vraag is het moment waarop de wereld buiten de tool doorloopt: hier wijzigt "de persoon" het
+        // bestand alsnog, tussen preview en klik. De tool mag dan niet zijn eigen patch erover zetten.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        fs::write(&file, "eerste regel\n").unwrap();
+
+        let recorder = Arc::new(Recorder { asked: std::sync::Mutex::new(Vec::new()), answer: true });
+        let shared = Arc::clone(&recorder);
+        let path: StdPathBuf = file.clone();
+        let ctx = ToolContext {
+            root: Some(dir.path().to_path_buf()),
+            write_granted: true,
+            read_granted: true,
+            approve: Box::new(move |rel: &str, diff: &str| {
+                shared.asked.lock().unwrap().push((rel.to_owned(), diff.to_owned()));
+                fs::write(&path, "handmatig gewijzigd\n").unwrap();
+                true
+            }),
+            ..Default::default()
+        };
+        let result = EditFileTool
+            .execute(&json!({"file": "notes.txt", "edits": [{"old_text": "eerste", "new_text": "tweede"}]}), &ctx);
+        assert!(!result.ok);
+        assert_eq!(result.output, "edit_file: notes.txt changed since the preview; not overwriting a newer edit");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "handmatig gewijzigd\n");
+    }
+
+    #[test]
+    fn a_landed_write_can_be_undone_to_the_original_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        fs::write(&file, "eerste regel\n").unwrap();
+        let (result, _) = edit_with(
+            true,
+            dir.path(),
+            json!({"file": "notes.txt", "edits": [{"old_text": "eerste", "new_text": "tweede"}]}),
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), "tweede regel\n");
+        let undo = result.undo.expect("een gelande write draagt zijn handgreep mee");
+        undo();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "eerste regel\n");
+    }
+
+    #[test]
+    fn it_applies_several_edits_in_order_through_one_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("list.txt"), "a\nb\nc\n").unwrap();
+        let (result, recorder) = edit_with(
+            true,
+            dir.path(),
+            json!({"file": "list.txt", "edits": [
+                {"old_text": "a", "new_text": "A"},
+                {"old_text": "b", "new_text": "B"}
+            ]}),
+        );
+        assert!(result.ok);
+        assert_eq!(fs::read_to_string(dir.path().join("list.txt")).unwrap(), "A\nB\nc\n");
+        assert_eq!(recorder.asked.lock().unwrap().len(), 1, "twee edits zijn één vraag, niet twee");
+    }
+
+    #[test]
+    fn a_refused_patch_reaches_the_model_without_asking_and_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("notes.txt"), "x x\n").unwrap();
+        let (result, recorder) =
+            edit_with(true, dir.path(), json!({"file": "notes.txt", "edits": [{"old_text": "x", "new_text": "y"}]}));
+        assert_eq!(
+            result.output,
+            "edit_file: edit 1: old_text matches 2 times; add surrounding context or set replace_all"
+        );
+        assert!(recorder.asked.lock().unwrap().is_empty());
+        assert_eq!(fs::read_to_string(dir.path().join("notes.txt")).unwrap(), "x x\n");
+    }
+
+    #[test]
+    fn a_junk_element_is_dropped_and_the_good_ones_still_land() {
+        // Eén element zonder new_text valt weg; de tweede edit blijft en is de enige die landt. De tekst kent
+        // "a" maar één keer als hele occurrence — "a2" bevat "a" wel, dus deze tekst is zonder die valkuil.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("notes.txt"), "eerste\ntweede\n").unwrap();
+        let (result, _) = edit_with(
+            true,
+            dir.path(),
+            json!({"file": "notes.txt", "edits": [
+                {"old_text": "tweede"},
+                {"old_text": "eerste", "new_text": "EERSTE"}
+            ]}),
+        );
+        assert!(result.ok, "{}", result.output);
+        assert_eq!(fs::read_to_string(dir.path().join("notes.txt")).unwrap(), "EERSTE\ntweede\n");
+    }
+
+    #[test]
+    fn it_declares_the_card_of_a_file_change_and_stays_serial() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = write_ctx(dir.path(), &Recorder::new(true));
+        assert_eq!(EditFileTool.item_kind(), ItemKind::FileChange);
+        assert!(
+            !EditFileTool.can_run_parallel(&json!({"file": "notes.txt"}), &ctx),
+            "schrijven mag nooit naast zijn buren racen"
+        );
+    }
+
+    #[test]
+    fn its_schema_requires_both_arguments_and_names_both_edit_texts() {
+        let schema = EditFileTool.parameters();
+        assert_eq!(schema["required"], json!(["file", "edits"]));
+        assert_eq!(schema["properties"]["edits"]["items"]["required"], json!(["old_text", "new_text"]));
+        assert_eq!(schema["properties"]["edits"]["items"]["properties"]["replace_all"]["type"], "boolean");
+    }
+}

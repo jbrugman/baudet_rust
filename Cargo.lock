@@ -234,6 +234,7 @@ dependencies = [
 name = "baudet-tool"
 version = "0.1.0"
 dependencies = [
+ "baudet-core",
  "serde",
  "serde_json",
  "tempfile",

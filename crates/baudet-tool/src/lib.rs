@@ -10,8 +10,11 @@
 //! rechtstreeks naar het model, ongeacht de UI-taal, precies zoals in de origineler.
 
 pub mod command_signature;
+pub mod diff;
+pub mod edit_file;
 pub mod folder_boundary;
 pub mod folder_listing;
+pub mod patch;
 pub mod read_file;
 pub mod safe_commands;
 pub mod tool;

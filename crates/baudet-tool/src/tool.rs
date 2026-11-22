@@ -6,6 +6,7 @@
 //!
 //! Model-gerichte tekst (`description`, `output`) blijft Engels, ongeacht de UI-taal, precies zoals daar.
 
+use baudet_core::item::ItemKind;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -29,6 +30,10 @@ impl ToolCall {
     }
 }
 
+/// De handgreep die een gelande write terugdraait. Een los alias omdat twee plekken hem noemen: het veld op
+/// [`ToolResult`] en de lijst die de loop ervan verzamelt.
+pub type Undo = Box<dyn Fn() + Send>;
+
 /// Wat een tool-run teruggeeft. `output` gaat naar het model; `diff` is de mens-gerichte unified preview
 /// naast de goedkeuringsvraag en bestaat alleen wanneer er een is.
 ///
@@ -36,7 +41,7 @@ impl ToolCall {
 /// spellt, zou in een kop alleen maar herhalen, en een kop uit proza ineenraadseld is een kop die raadt.
 /// `exit_code` blijft precies `None` wanneer er geen code is produced — een timeout, of een commando dat
 /// nooit startte — en dat is het onderscheid waar deze app voor exists.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Default)]
 pub struct ToolResult {
     pub ok: bool,
     pub output: String,
@@ -46,6 +51,43 @@ pub struct ToolResult {
     pub timed_out: bool,
     pub duration_ms: u64,
     pub cwd: Option<String>,
+    /// De handgreep die een gelande write terugdraait; `None` bij een tool die niets schrijft.
+    ///
+    /// meegegeven als waarde en niet weggeworpen, omdat de loop ze verzamelt: `LoopOutcome.undos` is de lijst
+    /// waarmee de persoon later de hele beurt kan terugdraaien, in de volgorde waarin ze landden.
+    pub undo: Option<Undo>,
+}
+
+impl std::fmt::Debug for ToolResult {
+    /// De handgreep is niet debugbaar en de rest wél: een log of een test wil de model-tekst en de code zien,
+    /// en alleen of er iets te draaien is. Dit is dezelfde keuze die [`ToolContext`] maakt voor zijn callbacks.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolResult")
+            .field("ok", &self.ok)
+            .field("output", &self.output)
+            .field("diff", &self.diff)
+            .field("exit_code", &self.exit_code)
+            .field("timed_out", &self.timed_out)
+            .field("duration_ms", &self.duration_ms)
+            .field("cwd", &self.cwd)
+            .field("undo", &self.undo.as_ref().map(|_| "<handgreep>"))
+            .finish()
+    }
+}
+
+impl PartialEq for ToolResult {
+    /// Twee runs zijn gelijk als het model en de mens er hetzelfde van zagen. De handgreep valt buiten die
+    /// vergelijking: sluitingen zijn niet vergelijkbaar, en twee runs met dezelfde tekst en dezelfde diff zijn
+    /// voor elke test feitelijke dezelfde uitkomst — ook al wijzen hun sluitingen naar een ander pad.
+    fn eq(&self, other: &ToolResult) -> bool {
+        self.ok == other.ok
+            && self.output == other.output
+            && self.diff == other.diff
+            && self.exit_code == other.exit_code
+            && self.timed_out == other.timed_out
+            && self.duration_ms == other.duration_ms
+            && self.cwd == other.cwd
+    }
 }
 
 impl ToolResult {
@@ -162,6 +204,16 @@ pub trait Tool {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters(&self) -> Value;
+
+    /// De kaart waarin een run van deze tool getoond wordt.
+    ///
+    /// Hier gedeclareerd en niet in de loop beslist, omdat de loop anders op de *naam* van een tool zou gaan
+    /// matchen: een hernoeming of een nieuwe tool zou een run dan stil in de verkeerde rij zetten en er zou
+    /// niets falen. Default is [`ItemKind::ToolCall`], het eerlijke vangnet voor een tool waar de interface geen
+    /// eigen kaart voor heeft.
+    fn item_kind(&self) -> ItemKind {
+        ItemKind::ToolCall
+    }
 
     /// Of deze call naast zijn buren in dezelfde batch mag draaien. Een tool zegt alleen ja wanneer de call
     /// niets schrijft én op niemand wacht, zodat een fan-out nooit een write kan racen en nooit aan een

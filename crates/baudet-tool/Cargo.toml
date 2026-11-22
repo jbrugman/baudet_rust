@@ -8,6 +8,7 @@ license.workspace = true
 # origineler onderhandelt een tool met de mens uitsluitend via ToolContext, nooit via Swing
 # (`tool/Tool.kt`). Die grens is hier dezelfde: deze crate compileert zonder egui.
 [dependencies]
+baudet-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

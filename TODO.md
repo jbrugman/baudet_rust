@@ -107,7 +107,21 @@ writes/gepinde calls blijven serieel.
       (een test met 60 001 × `é` bewijst dat het geen bytes zijn), binaire weigering op byte 0, een leeg
       bestand is succes, en een ontbrekend pad hint naar de mapinhoude via `folder_listing`. Weigeringsformat
       `read_file: <reden>`, zodat het model uit de tekst alleen al weet wat het anders moet doen.
-- [ ] `EditFileTool` + `PatchApplier` + `Edit` — `tool/{EditFileTool,PatchApplier,Edit}.kt`; Ask toont diff-preview (turn-decision.puml).
+- [x] `EditFileTool` + `PatchApplier` + `Edit` + de diff-laag — `tool/{EditFileTool,PatchApplier,Edit,PatchOutcome}.kt`,
+      `diff/{LineDiff,UnifiedDiff,DiffLineKind}.kt`. Ask toont de diff-preview vóór élke write. Twee dingen
+      opgemeten in plaats van aangenomen, en beide keerden mijn test: `"c\n"` zijn bij `split('\n')` **twee**
+      regels, dus de diff draagt een lege slot-regel mee en die wordt `" \n"` in de render — gladstrijsen zou
+      de output onherkenbaar maken voor een externe kijker; en een afwezig bestand valt al weg in
+      `resolve_file_within`, dat de map-opsomming zelf meldt, zodat de "could not be read"-tak alleen een
+      bestand treft dat wél bestaat. "no change" en "declined" dragen géén `edit_file:`-prefix, want de
+      origineler bouwt die `ToolResult` rechtstreeks. De tijdvolgorde is de veiligheid: lezen → patchen in het
+      geheugen → vragen → **opnieuw lezen** → pas schrijven; die tweede lezing vangt een handmatige wijziging
+      tussen preview en klik. Een gelande write draagt zijn `Undo`-handgreep mee, zodat `LoopOutcome.undos`
+      straks de hele beurt terug kan draaien. `Tool` kreeg `item_kind` (edit = `FileChange`), zodat de loop
+      nooit op tool-*naam* hoeft te matchen.
+      Besluit: `ToolResult` verloor `Clone` en kreeg `Debug`/`PartialEq` met de hand, want een sluiting is noch
+      kopieer- noch vergelijkbaar en `Debug` toont alleen of er een handgreep is — dezelfde keuze die
+      `ToolContext` al voor zijn callbacks maakte. commit `TODO-HASH`.
 - [ ] `ExecuteTool` + `SafeCommands` + `CommandSignature` + `ExecuteWorkspace` + `ProcessRunner` — shell in map, TMPDIR, read-only auto / altijd-vraag, family-pin. `tool/{ExecuteTool,SafeCommands,CommandSignature,ExecuteWorkspace,ProcessRunner}.kt` (embed 0.62).
 - [ ] `GitTool` — lezen standaard; schrijft verbs (add/commit/checkout/stash/push) opt-in + Write-recht + goedkeuring; force-push/rewrite geblokkeerd. `tool/GitTool.kt` + `git/`.
 - [ ] `ToolGate` (Active/Disabled/NoProject/NoFolder/NoWrite) + ToolMode-afdwinging — `app/ToolGate.kt`, turn-decision.puml.
