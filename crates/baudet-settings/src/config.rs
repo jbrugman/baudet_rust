@@ -155,7 +155,7 @@ impl ContextStrategy {
 /// Every field is `#[serde(default)]`-tolerant on read and skips nothing on write, so a newer
 /// build adds a field by adding a default, and an older build reading this file keeps the fields
 /// it knows. That is the same forward-compatibility rule the rollout records follow.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// The endpoint a turn is sent to. One base URL, because the seam takes one
@@ -173,6 +173,31 @@ pub struct Settings {
     /// [`baudet_backend::SendRequest::max_output_tokens`]. `None` leaves the decision to the
     /// endpoint rather than inventing a budget here.
     pub max_output_tokens: Option<u32>,
+    /// De sampling-temperatuur van het model.
+    ///
+    /// Poort van `config/AppConfig.kt:70` (`var temperature: Double = 0.7`), default 0,7. Dit is een
+    /// `f64` en geen tekst, want unlike `reasoning` kent de server hier een getal: de origineler
+    /// stuurt `temperature` letterlijk mee met een verzoek, en een woord dat erin stond maar geen
+    /// getal is, is een kapot veld en geen keuze. Een `Option` zou betekenen "er is temperatuur die
+    /// niet meegaat", en dat doet deze backend niet: de 0,7 gaat altijd mee.
+    pub temperature: f64,
+    /// De nucleus-marge (`top_p`) van het model, of `None` wanneer die níét meegaat.
+    ///
+    /// Poort van `AppConfig.kt:71` (`var topP: Double? = null`). De `null` is hier dragend en niet
+    /// "vergeten in te vullen": het label van de origineler zegt letterlijk "blank = do not send"
+    /// (`SettingsPanel.kt`, `TopPLabel`), dus afwezig is een andere toestand dan 1,0. Daarom een
+    /// `Option<f64>` en niet een `f64` op 1,0 — dat zou de server een marge sturen die de persoon
+    /// bewust niet vroeg.
+    pub top_p: Option<f64>,
+    /// Hoeveel beurten de app tegelijk draait.
+    ///
+    /// Poort van `AppConfig.kt:97` (`var maxParallelTurns: Int = 1`), default 1. De vloer is 1, zoals
+    /// de herkomst die hem in het panel afdwingt (`ErrMaxParallelTurns`: "1 or more"): nul beurten
+    /// tegelijk is geen "serieel" maar "niets". Voorlopig handelt de gesprekslaag hier nog niet naar
+    /// — de tip van de rij zegt dat de app het eert "voor zover zijn gespreksmodel dat vandaag
+    /// toelaat" — maar het veld overleeft het bestand vanaf nu, zodat een later antwoord er niets
+    /// voor hoeft te verhuizen.
+    pub max_parallel_turns: u32,
     /// The credential as the person typed it. `None` means "not typed", which is not the same as
     /// "none": [`Settings::resolved_key`] still looks at the environment, and that is what lets a
     /// checkout work without putting a secret in a file at all.
@@ -304,6 +329,11 @@ impl Default for Settings {
             model: None,
             reasoning: None,
             max_output_tokens: None,
+            // De sampling-standaarden van de origineler (`AppConfig.kt:70-71,97`), geen eigen
+            // voorkeur: 0,7 temperatuur, geen top_p die meegaat, één beurt tegelijk.
+            temperature: DEFAULT_TEMPERATURE,
+            top_p: None,
+            max_parallel_turns: DEFAULT_MAX_PARALLEL_TURNS,
             api_key: None,
             // The variable this machine's local server actually uses, which is why it is the default
             // rather than a generic `BAUDET_API_KEY`.
@@ -350,6 +380,12 @@ pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 8;
 /// omdat de default hier, de settingskaart en de test die een oud bestand leest hetzelfde getal
 /// moeten dragen.
 pub const DEFAULT_KEEP_RECENT_MESSAGES: u32 = 15;
+
+/// De standaard-temperatuur van de origineler, uit `AppConfig.kt:70`.
+pub const DEFAULT_TEMPERATURE: f64 = 0.7;
+
+/// Het standaard-aantal tegelijk gedraaide beurten, uit `AppConfig.kt:97`.
+pub const DEFAULT_MAX_PARALLEL_TURNS: u32 = 1;
 
 impl Settings {
     /// The credential to actually send: what was typed, otherwise what the named variable holds.
@@ -629,6 +665,47 @@ mod tests {
         assert!(json.contains("\"context_strategy\":\"stopatlimit\""), "het bestand noemt het veld: {json}");
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back, written);
+    }
+
+    #[test]
+    fn de_generatie_parameters_zijn_de_default_en_overleven_het_bestand() {
+        // De drie sampling-velden van `AppConfig.kt:70-71,97` vormen samen één beleid en verdienen
+        // daarom één bewijs. Wat telt, is niet dat een constructor 0,7 typt, maar wat het bestand
+        // ermee doet: `top_p` is afwezig-bewarend (leeg = niet sturen, niet 1,0), temperatuur is een
+        // getal en geen keuze-afwezigheid, en parallel-eerste-beurt heeft een vloer van 1.
+        let settings = Settings::default();
+        assert_eq!(settings.temperature, DEFAULT_TEMPERATURE);
+        assert_eq!(DEFAULT_TEMPERATURE, 0.7, "de origineler begint op 0,7");
+        assert_eq!(settings.top_p, None, "geen top_p ingetypt is geen 1,0 maar 'stuur hem niet'");
+        assert_eq!(settings.max_parallel_turns, DEFAULT_MAX_PARALLEL_TURNS);
+        assert_eq!(DEFAULT_MAX_PARALLEL_TURNS, 1, "de origineler draait één beurt tegelijk");
+
+        // De waarden worden geschreven zoals ze heten en komen er gelijk uit terug.
+        let filled = Settings { temperature: 0.2, top_p: Some(0.9), max_parallel_turns: 4, ..Default::default() };
+        let json = serde_json::to_string(&filled).unwrap();
+        assert!(json.contains("\"temperature\":0.2"), "het bestand noemt de temperatuur: {json}");
+        assert!(json.contains("\"top_p\":0.9"), "het bestand noemt de marge: {json}");
+        assert!(json.contains("\"max_parallel_turns\":4"), "het bestand noemt de parallelstand: {json}");
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, filled);
+
+        // Een leeg `top_p` veld schrijft null en leest terug als "niet sturen", niet als 0 of 1.
+        let no_top = Settings { temperature: 1.0, ..Default::default() };
+        let json = serde_json::to_string(&no_top).unwrap();
+        assert!(json.contains("\"top_p\":null"), "afwezig blijft afwezig in het bestand: {json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap().top_p, None);
+    }
+
+    #[test]
+    fn een_oud_bestand_zonder_de_generatie_velden_opent_met_de_default() {
+        // Forward-compatibiliteit: een bestand van vóór deze drie velden moet openen op de
+        // origineler-defaults, en niet op temperatuur 0 of top_p 1,0 vallen — dat zou elke bestaande
+        // installatie stil een andere sampling geven.
+        let json = r#"{"base_url":"http://studio:8000/v1","model":"gemma-3-4b-it"}"#;
+        let read: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(read.temperature, DEFAULT_TEMPERATURE);
+        assert_eq!(read.top_p, None);
+        assert_eq!(read.max_parallel_turns, DEFAULT_MAX_PARALLEL_TURNS);
     }
 
     #[test]

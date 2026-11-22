@@ -14,7 +14,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Why a settings file was not usable, and what was done about it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ReadOutcome {
     /// The file held settings, and they were used.
     Loaded(Settings),
@@ -222,6 +222,12 @@ mod tests {
             // Niet de default, zodat dit rondreisje bewijst dat het veld meegaat en niet op 8
             // terugvalt wanneer het bestand het wel bevatte.
             max_tool_iterations: 3,
+            // De drie generatie-parameters (`AppConfig.kt:70-71,97`) reizen door hetzelfde bestand
+            // en staan hier niet op de default: `top_p` Some bewijst dat een marge wordt
+            // weggeschreven, en niet dat hij op null terugvalt.
+            temperature: 0.35,
+            top_p: Some(0.92),
+            max_parallel_turns: 2,
             // Ook de contextvelden moeten meegaan: een geleerd venster dat het schrijven kwijt
             // raakt, betekent dat de app opnieuw op dezelfde manier faalt na een herstart.
             context_budget_tokens: 24_000,

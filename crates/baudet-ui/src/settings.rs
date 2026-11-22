@@ -72,7 +72,7 @@ pub enum SettingsEvent {
 /// from nowhere would therefore refuse its own draft. That cannot happen on a real start — `new`
 /// calls `load`, and `load` calls `adopt`, which fills the cap from the file or from the settings'
 /// own default — so the empty is filled where it is actually observable: in the test fixture below.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct SettingsView {
     /// The endpoint as typed. A free field, because the whole point of the panel is to correct it.
     base_url: String,
@@ -121,6 +121,15 @@ pub struct SettingsView {
     context_strategy: ContextStrategy,
     context_budget: String,
     context_keep_recent: String,
+    /// De sampling-temperatuur als tekst, precies zoals `max_output_tokens` dat doet: het vakje is
+    /// het antwoord van de persoon, `draft` beslist of het een getal is. Een `f64`-veld zou een
+    /// halve invoer ("0.") verstoppen die de persoon nog wil corrigeren.
+    temperature: String,
+    /// De `top_p`-marge als tekst, blanco = "stuur hem niet" — de toestand die het label van de
+    /// origineler benoemt, dus blanco is hier wél betekenisvol en geen lege `f64`.
+    top_p: String,
+    /// Het aantal tegelijk gedraaide beurten als tekst, met dezelfde text-vs-getal-reden als hierboven.
+    max_parallel_turns: String,
     /// The credential as typed. A separate field from the password widget's buffer is not needed:
     /// this is that buffer, and empty means "not typed" (so the environment still answers).
     api_key: String,
@@ -267,6 +276,11 @@ impl SettingsView {
         self.context_strategy = settings.context_strategy;
         self.context_budget = settings.context_budget_tokens.to_string();
         self.context_keep_recent = settings.context_keep_recent_messages.to_string();
+        // De drie generatie-parameters worden tekst, zoals de andere getal-velden: blanco bij
+        // `top_p` betekent "staat niet in het bestand", want de default is `None`.
+        self.temperature = settings.temperature.to_string();
+        self.top_p = settings.top_p.map(|p| p.to_string()).unwrap_or_default();
+        self.max_parallel_turns = settings.max_parallel_turns.to_string();
         self.stored_context.use_server_session = settings.use_server_session;
         self.stored_context.learned_context_window = settings.learned_context_window;
         self.stored_context.learned_context_key = settings.learned_context_key.clone();
@@ -325,6 +339,9 @@ impl SettingsView {
             context_budget_tokens: parse_context_budget(&self.context_budget)?,
             context_strategy: self.context_strategy,
             context_keep_recent_messages: parse_keep_recent(&self.context_keep_recent)?,
+            temperature: parse_temperature(&self.temperature)?,
+            top_p: parse_top_p(&self.top_p)?,
+            max_parallel_turns: parse_parallel_turns(&self.max_parallel_turns)?,
             use_server_session: self.stored_context.use_server_session,
             learned_context_window: self.stored_context.learned_context_window,
             learned_context_key: self.stored_context.learned_context_key.clone(),
@@ -697,10 +714,15 @@ pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<S
     // Groep, dus geen lucht.
     model_row(ui, view, 0.0);
     ui.separator();
+    // De sampling-rijen staan vóór de redeneer-kiezer, zoals de volgorde van `SettingsPanel.kt:117-119`
+    // (temperature en topP tussen de beurtteller en reasoning). De eerste draagt geen lucht boven
+    // zich, want hij hangt aan de scheiding erboven.
+    sampling_rows(ui, view);
     // Groep, dus geen lucht; de rijen eronder wel.
     reasoning_row(ui, view, 0.0);
     tokens_row(ui, view);
     iterations_row(ui, view);
+    parallel_row(ui, view);
     ui.separator();
     context_rows(ui, view);
     ui.separator();
@@ -918,6 +940,38 @@ fn reasoning_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
     });
 }
 
+/// De drie sampling-rijen: temperatuur en `top_p`, in de volgorde van `SettingsPanel.kt:117-118`
+/// (na de beurtteller, vóór de redeneer-kiezer). Beide zijn tekstvakken in dezelfde vorm als
+/// `max_output_tokens`, want blanco is hier betekenisvol: bij `top_p` is blanco "niet sturen".
+fn sampling_rows(ui: &mut Ui, view: &mut SettingsView) {
+    form_row(ui, Texts::get(Key::TemperatureLabel), |ui| {
+        ui.add_sized(
+            [ui.available_width(), 20.0],
+            egui::TextEdit::singleline(&mut view.temperature).hint_text("e.g. 0.7").desired_width(f32::INFINITY),
+        )
+        .on_hover_text(Texts::get(Key::TipTemperature));
+    });
+    form_row(ui, Texts::get(Key::TopPLabel), |ui| {
+        ui.add_sized(
+            [ui.available_width(), 20.0],
+            egui::TextEdit::singleline(&mut view.top_p).hint_text("blank = do not send").desired_width(f32::INFINITY),
+        )
+        .on_hover_text(Texts::get(Key::TipTopP));
+    });
+}
+
+/// De parallelstand, na de lus-deksel, zoals `SettingsPanel.kt:121`. Bewerkbaar vak in dezelfde vorm
+/// als de andere getallen; blanco valt bij `draft` op de default van 1.
+fn parallel_row(ui: &mut Ui, view: &mut SettingsView) {
+    form_row(ui, Texts::get(Key::MaxParallelTurnsLabel), |ui| {
+        ui.add_sized(
+            [ui.available_width(), 20.0],
+            egui::TextEdit::singleline(&mut view.max_parallel_turns).hint_text("1").desired_width(f32::INFINITY),
+        )
+        .on_hover_text(Texts::get(Key::TipMaxParallelTurns));
+    });
+}
+
 fn tokens_row(ui: &mut Ui, view: &mut SettingsView) {
     form_row(ui, Texts::get(Key::MaxTokensLabel), |ui| {
         ui.add_sized(
@@ -1013,6 +1067,54 @@ fn parse_keep_recent(text: &str) -> Result<u32, String> {
         return Ok(1);
     }
     trimmed.parse::<u32>().map(|n| n.max(1)).map_err(|_| format!("keep last turns is not a whole number: {trimmed}"))
+}
+
+/// De temperatuur: blanco of niet-getal is een fout, want unlike `top_p` gaat dit getal altijd mee
+/// en bestaat er geen "stuur hem niet" voor. Het interval [0, 2] is de grens die de origineler en
+/// elke OpenAI-compatibele server hanteren; erbuiten is het geen smakelijkheid maar een typefout.
+fn parse_temperature(text: &str) -> Result<f64, String> {
+    let trimmed = text.trim();
+    // Blanco is hier een fout en geen "neem de default": unlike `top_p` is er geen "stuur hem niet"
+    // voor de temperatuur, en deze panel valst nooit stil terug op een standaard (dezelfde regel als
+    // `max_tool_iterations`). Het vakje toont daarom altijd een getal, en `draft` eist er een.
+    let value = trimmed.parse::<f64>().map_err(|_| {
+        format!("{} is not a number between 0 and 2", if trimmed.is_empty() { "temperature" } else { trimmed })
+    })?;
+    if (0.0..=2.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err(format!("temperature must be between 0 and 2, not {trimmed}"))
+    }
+}
+
+/// De `top_p`-marge: blanco is `None` ("stuur hem niet", de toestand van het label), een getal in
+/// [0, 1] is de marge, en alles erbuiten of niet-getals is een fout die niet stil mag terugvallen.
+fn parse_top_p(text: &str) -> Result<Option<f64>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let value = trimmed.parse::<f64>().map_err(|_| format!("top_p is not a number between 0 and 1: {trimmed}"))?;
+    if (0.0..=1.0).contains(&value) {
+        Ok(Some(value))
+    } else {
+        Err(format!("top_p must be between 0 and 1, not {trimmed}"))
+    }
+}
+
+/// De parallelstand: blanco valt op de default van 1, en een getal ≥ 1 is de stand. De vloer is de
+/// regel van `ErrMaxParallelTurns` ("1 or more"): nul beurten tegelijk is geen "serieel" maar "niets".
+fn parse_parallel_turns(text: &str) -> Result<u32, String> {
+    let trimmed = text.trim();
+    // Blanco is een fout, geen stil-terugval-op-de-default: dezelfde regel als bij de lus-deksel,
+    // want het vakje toont altijd een getal. De vloer is `ErrMaxParallelTurns` ("1 or more"): nul
+    // beurten tegelijk is geen "serieel" maar "niets".
+    let value = trimmed.parse::<u32>().map_err(|_| Texts::get(Key::ErrMaxParallelTurns).to_string())?;
+    if value >= 1 {
+        Ok(value)
+    } else {
+        Err(Texts::get(Key::ErrMaxParallelTurns).to_string())
+    }
 }
 
 fn key_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
@@ -1117,6 +1219,47 @@ mod tests {
         assert!(view.draft().is_err(), "een woord als budget moet geweigerd worden");
     }
 
+    /// De drie generatie-rijen doen hun werk in `draft`: temperatuur is een getal in [0, 2] en blanco
+    /// is een fout (geen stil-terugval, zoals de lus-deksel); `top_p` is blanco-bewarend (blanco =
+    /// `None` = "stuur hem niet", niet 1,0); de parallelstand heeft de vloer van 1 en witgeeft een
+    /// witregel niet op de default. Dit staat hier en niet in `baudet-settings`: deze grenzen leven in
+    /// de tekst-naar-waarde-vertaling van de panel, niet in het bestand.
+    #[test]
+    fn sampling_en_parallel_rondje_en_vloeren() {
+        // Gelddrige invoer reist naar de gereserveerde waarde.
+        let mut view = view();
+        view.temperature = "0.3".to_string();
+        view.top_p = "0.9".to_string();
+        view.max_parallel_turns = "3".to_string();
+        let drafted = view.draft().expect("een geldige sampling mag niet worden geweigerd");
+        assert_eq!(drafted.temperature, 0.3);
+        assert_eq!(drafted.top_p, Some(0.9));
+        assert_eq!(drafted.max_parallel_turns, 3);
+
+        // Blanco `top_p` is `None` en niet 1,0 of 0: dat is de betekenis van het label.
+        view.top_p = String::new();
+        let drafted = view.draft().expect("blanco top_p is een keuze en geen fout");
+        assert_eq!(drafted.top_p, None, "blanco betekent niet sturen");
+
+        // Blanco temperatuur en blanco parallelstand zijn fouten: geen stil-terugval-op-de-default.
+        view.temperature = String::new();
+        assert!(view.draft().is_err(), "blanco temperatuur mag niet stilletjes op 0,7 terugvallen");
+        view.temperature = "0.7".to_string();
+        view.max_parallel_turns = String::new();
+        assert!(view.draft().is_err(), "blanco parallelstand mag niet stilletjes op 1 terugvallen");
+        view.max_parallel_turns = "1".to_string();
+
+        // Buiten het interval of niet-getals is een fout.
+        view.temperature = "3".to_string();
+        assert!(view.draft().is_err(), "temperatuur boven 2 is geen smakelijkheid maar een typefout");
+        view.temperature = "0.7".to_string();
+        view.top_p = "1.5".to_string();
+        assert!(view.draft().is_err(), "top_p boven 1 moet geweigerd worden");
+        view.top_p = String::new();
+        view.max_parallel_turns = "0".to_string();
+        assert!(view.draft().is_err(), "nul beurten tegelijk is geen 'serieel' maar 'niets'");
+    }
+
     /// A view-model holding a whole endpoint, so a test starts from something a person could have
     /// typed rather than from a `Default` that no panel ever shows.
     fn view() -> SettingsView {
@@ -1129,6 +1272,11 @@ mod tests {
             // uit `load` krijgt deze waarde vanzelf uit het bestand of uit de default.
             max_tool_iterations: baudet_settings::DEFAULT_MAX_TOOL_ITERATIONS.to_string(),
             stored_max_tool_iterations: baudet_settings::DEFAULT_MAX_TOOL_ITERATIONS,
+            // Zelfde reden als `max_tool_iterations` hierboven: deze twee getallen kennen geen
+            // blanco-toestand en `draft` valst er niet stil op terug. `top_p` mag wél blanco, want
+            // daar is blanco de betekenis "stuur hem niet".
+            temperature: baudet_settings::config::DEFAULT_TEMPERATURE.to_string(),
+            max_parallel_turns: baudet_settings::DEFAULT_MAX_PARALLEL_TURNS.to_string(),
             ..SettingsView::default()
         }
     }
