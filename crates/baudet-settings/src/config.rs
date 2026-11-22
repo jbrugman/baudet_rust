@@ -13,6 +13,63 @@
 
 use serde::{Deserialize, Serialize};
 
+/// When the assistant may use tools during a turn.
+///
+/// Poort van `config/ToolMode.kt`, including de volgorde van de claim: in de origineler drijft die
+/// volgorde de index van de Settings-combo (`SettingsPanel.kt:263,371`), dus die blijft Off|Ask|Auto.
+///
+/// De drie betekenissen staan zo ook in de origineler (`AppState.kt:739,951`): `Off` haalt de lus
+/// helemaal uit spel via `ToolGate.Disabled`, `Ask` legt elke schrijfwijziging apart ter
+/// goedkeuring voor, en `Auto` schrijft direct. Een commando vraagt overigens altijd, ook bij
+/// `Auto`, want een subproces valt niet binnen de mapgrens te vangen (`AppState.kt:958-965`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolMode {
+    /// Geen enkele beurt bereikt de tool-lus.
+    Off,
+    /// Toon elke wijziging ter goedkeuring. De default van de origineler: schrijven in een
+    /// projectmap gebeurt niet achter de rug van de persoon om bij een verse installatie
+    /// (`AppConfig.kt:82-86`).
+    #[default]
+    Ask,
+    /// Schrijf zonder vragen.
+    Auto,
+}
+
+impl ToolMode {
+    /// De index in de keuzelijst, volgens de claimvolgorde van de origineler. `word` is de
+    /// settings-combo die zijn positie uit de declaratievolgorde haalt (`SettingsPanel.kt:263`).
+    pub fn index(self) -> usize {
+        match self {
+            ToolMode::Off => 0,
+            ToolMode::Ask => 1,
+            ToolMode::Auto => 2,
+        }
+    }
+
+    /// Het woord zoals de instelling er in staat, ook voor een keuzelijst die zijn eigen
+    /// vertaalde teksten al kent (item H). De JSON-catalogus gebruikt exact deze schrijfwijze.
+    pub fn word(self) -> &'static str {
+        match self {
+            ToolMode::Off => "off",
+            ToolMode::Ask => "ask",
+            ToolMode::Auto => "auto",
+        }
+    }
+
+    /// De positie van een woord in de lijst, of `None` als het woord er niet in staat. Het woord
+    /// komt van buiten (een bestand of een keuzelijst), dus onbekende tekst wordt hier geweigerd
+    /// in plaats van stil op `Ask` gezet — een stil gerepareerde instelling is onleesbaar.
+    pub fn from_word(word: &str) -> Option<ToolMode> {
+        match word.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(ToolMode::Off),
+            "ask" => Some(ToolMode::Ask),
+            "auto" => Some(ToolMode::Auto),
+            _ => None,
+        }
+    }
+}
+
 /// Everything the app remembers between starts.
 ///
 /// Every field is `#[serde(default)]`-tolerant on read and skips nothing on write, so a newer
@@ -57,6 +114,12 @@ pub struct Settings {
     /// whose dialect is known, so an unset dialect keeps the window on its scripted player instead
     /// of letting it guess a dialect against a server that may not speak it.
     pub protocol: Option<String>,
+    /// Wanneer de assistent tools mag gebruiken. Standaard `Ask`, zoals in de origineler: de lus
+    /// staat aan, maar elke schrijfwijziging vraagt eerst om goedkeuring.
+    ///
+    /// Het veld heet hier `tool_mode` en in de origineler `toolMode`, omdat de JSON hier de
+    /// Rust-veljnaam woord-voor-woord herhaalt. De waarden blijven smallcase, zoals `protocol` dat ook is.
+    pub tool_mode: ToolMode,
 }
 
 impl Default for Settings {
@@ -74,6 +137,9 @@ impl Default for Settings {
             api_key_env_var: DEFAULT_KEY_ENV_VAR.to_string(),
             // Nothing is known about the server behind a default endpoint, so nothing is claimed.
             protocol: None,
+            // Ask by default, for the reason on the field: a fresh install must not write to a
+            // project folder behind the person's back.
+            tool_mode: ToolMode::default(),
         }
     }
 }
@@ -123,6 +189,44 @@ mod tests {
         assert_eq!(back, Settings::default());
         // The reference app's own default, so this checkout starts against the same server.
         assert_eq!(back.base_url, "http://127.0.0.1:8000/v1");
+    }
+
+    #[test]
+    fn tool_mode_waits_for_approval_by_default_and_survives_the_file() {
+        // De default van de origineler (`AppConfig.kt:86`), en de reden ervoor: een verse
+        // installatie mag niet zelfstandig in een projectmap schrijven.
+        assert_eq!(Settings::default().tool_mode, ToolMode::Ask);
+        assert_eq!(ToolMode::default(), ToolMode::Ask);
+
+        let json = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(json.contains("\"tool_mode\":\"ask\""), "het bestand noemt het veld zoals het heet: {json}");
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Settings::default());
+    }
+
+    #[test]
+    fn an_older_file_without_tool_mode_still_reads_as_ask() {
+        // Forward-compatibiliteit voor dit veld specifiek: een bestand van vóór de tool-lus moet
+        // gewoon openen met de veilige default, en mag niet op `Off` vallen — dat zou de lus
+        // stil uitzetten. Het bekende `an_unknown_field...`-bewijs dekt de regel, dit dekt het veld.
+        let json = r#"{"base_url":"http://studio:8000/v1","model":"gemma"}"#;
+        let read: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(read.tool_mode, ToolMode::Ask);
+    }
+
+    #[test]
+    fn tool_mode_words_and_positions_match_the_reference_list() {
+        // De claimvolgorde van `ToolMode.kt` drijft de combopositie in de origineler; die mag niet
+        // stilletjes omwisselen als hier later een variant bijkomt.
+        let modes = [ToolMode::Off, ToolMode::Ask, ToolMode::Auto];
+        for (expected, mode) in modes.iter().copied().enumerate() {
+            assert_eq!(mode.index(), expected);
+            assert_eq!(ToolMode::from_word(mode.word()), Some(mode));
+        }
+        // Een woord van buiten is geen garantie: `ToolsOn` is niet hetzelfde woord als de
+        // settings-lijst van de origineler en wordt geweigerd in plaats van gerepareerd.
+        assert_eq!(ToolMode::from_word("ToolsOn"), None);
+        assert_eq!(ToolMode::from_word(" ASK "), Some(ToolMode::Ask), "spaties en kas zijn geen betekenis");
     }
 
     #[test]

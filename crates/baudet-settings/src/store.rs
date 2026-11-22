@@ -215,6 +215,7 @@ mod tests {
             api_key: Some("sk-local".into()),
             api_key_env_var: "SOME_OTHER_KEY".into(),
             protocol: Some("chat_completions".into()),
+            tool_mode: crate::config::ToolMode::Auto,
         };
         file.write(&settings).unwrap();
         assert_eq!(file.read().settings(), &settings);

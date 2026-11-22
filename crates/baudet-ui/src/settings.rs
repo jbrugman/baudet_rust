@@ -21,6 +21,7 @@
 
 use crate::palette;
 use baudet_backend::protocol::Protocol;
+use baudet_settings::config::ToolMode;
 use baudet_settings::{ListingError, Model, ReadOutcome, Settings, SettingsFile, WriteError};
 use egui::Ui;
 
@@ -75,6 +76,10 @@ pub struct SettingsView {
     /// rather than look like a corrupt file, and it is the transport's `Protocol::from_word` that
     /// decides whether a turn may be sent at all.
     protocol: Option<String>,
+    /// Wanneer de assistent tools mag gebruiken, zoals het bestand het noemt. Nu alleen vastgelegd
+    /// en doorgegeven: de keuzelijst die hierover beschikt komt pas als er een tool-lus onder staat
+    /// (item E/F), want een keuzelijst die niets bediende is precies de fout die deze port al maakte.
+    tool_mode: ToolMode,
     /// The reasoning level, kept as the four words the endpoint accepts plus "unset". Text rather
     /// than a parsed value because the honest levels belong to the model, exactly as in the config.
     reasoning: Reasoning,
@@ -209,6 +214,7 @@ impl SettingsView {
         self.api_key = settings.api_key.clone().unwrap_or_default();
         self.api_key_env_var = settings.api_key_env_var.clone();
         self.protocol = settings.protocol_word().map(str::to_string);
+        self.tool_mode = settings.tool_mode;
         self.fetched_for = None;
         self.listing_answered = false;
         // A stored dialect is a claim about an endpoint this panel has not asked yet, so it is shown
@@ -238,6 +244,7 @@ impl SettingsView {
             api_key: Some(self.api_key.clone()).filter(|k| !k.trim().is_empty()),
             api_key_env_var: self.api_key_env_var.trim().to_string(),
             protocol: self.protocol.clone().map(|word| word.trim().to_string()).filter(|w| !w.is_empty()),
+            tool_mode: self.tool_mode,
         })
     }
 
