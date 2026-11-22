@@ -14,6 +14,36 @@ naar het opgeslagen endpoint via `ResponsesBackend`, die beide OpenAI-dialecten 
 dialect uit een server-scan komt. Het transport bestaat dus; wat er nu bovenop gebeurt, is hier
 onder.
 
+## Bouwen en draaien
+
+De toolchain staat vast in `rust-toolchain.toml` (1.95.0, met `clippy` en `rustfmt`). Een `cargo`
+van vóór 1.82 kan het transieveboom van egui/eframe 0.36 niet eens parseren (edition 2024), dus
+gebruik de gepinde toolchain — `rustup` pakt hem automatisch zodra `rust-toolchain.toml` hier staat;
+de machine-standaard blijft 1.82 en geen ander project verandert daardoor.
+
+```sh
+cargo run -p baudet-ui          # de app, met de demo-gesprek (geen server nodig)
+cargo test --workspace          # alle crates, inclusief de UI-tests (vensters getekend via run_ui)
+cargo clippy -p baudet-ui       # schone lint voor iets groen te noemen
+```
+
+Twee bouwprofielen, twee binaire — ze lopen uiteen, dus let op welk profiel je aanroept:
+
+| profiel | commando | binair | doel |
+|---|---|---|---|
+| debug (default) | `cargo build -p baudet-ui` | `target/debug/baudet-ui` | ontwikkelen en testen; snelle compile |
+| release | `cargo build --release -p baudet-ui` | `target/release/baudet-ui` | de vlotte versie om te tonen |
+
+Een nieuwe bronwijziging bouwt alleen het profiel dat je aanroept; wie beide gebruikt, bouwt beide
+(`--release` vergeet de debug niet, en omgekeerd). Er is geen `.app`-bundle — het binaire is een
+los staand executable dat je rechtstreeks start of met `cargo run`.
+
+De opties op de commandoregel staan volledig in `baudet-ui --help`; de gebruikelijke: `--screenshot
+<file>` tekent en sluit (headless bewijs, geen focusdiefstal), `--workspace <folder>` opent een map bij
+start, `--settings` opent het ingesttabblad, `--fetch-models` vraagt de endpoint na zijn modellen,
+`--live` stuurt beurten naar het opgeslagen endpoint in plaats van de scriptspeler, en `--discover`
+noemt de plaatselijke servers die antwoorden.
+
 ## Besluit: de fetch-sleutel komt uit de omgeving, en "geland" is niet "geslaagd"
 
 Twee gaten in het ingestpaneel, beide gemeten tegen de echte servers (oMLX-gateway met
