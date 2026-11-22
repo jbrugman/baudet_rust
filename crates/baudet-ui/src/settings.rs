@@ -14,10 +14,10 @@
 //! after the panel closed still lands in the state, because a refresh the person asked for should not
 //! be lost to a click on the close button.
 //!
-//! Deliberately a small subset of the Kotlin `SettingsPanel`: endpoint, model (a fetched dropdown,
-//! not free text), reasoning level, output ceiling, and the credential. The rest — context strategy,
-//! tool mode, the MCP and command managers — are fields with no backend reader yet in this rewrite,
-//! and a setting that nothing reads is a promise the app cannot keep.
+//! The panel carries what the Kotlin `SettingsPanel` carries, except one row: the MCP manager
+//! (`SettingsPanel.kt:163-166`). `mcpServers` and `mcpAllowServers` have no client in this rewrite
+//! yet, and a setting that nothing reads is a promise the app cannot keep — that row arrives with
+//! the MCP-client item, not before it.
 
 use crate::palette;
 use baudet_backend::protocol::Protocol;
@@ -45,6 +45,18 @@ pub enum SettingsCommand {
     /// Persist `settings`. The worker writes it and reports the outcome; it never keeps the settings,
     /// because the view-model is the truth about what is on screen.
     Save(Settings),
+    /// De inhoud van het vertrouwde-families-vak toepassen, zoals `SettingsPanel.kt:286-292` dat
+    /// doet: de regels zijn hier al getrimd en van hun ledige regels ontdaan, en wat overgaat is de
+    /// drager van de keuze. De **dragerlijst** gaat mee en niet de ruwe tekst uit het vak, want de
+    /// regel die beslist of een gezin vertrouwd mag worden, kent alleen de tekenlaag — en een
+    /// tweede implementatie van die regel in dit paneel is hoe een UI breder gaat vertrouwen dan
+    /// de commandolaag eronder. Het tellen van afgevallen regels hoort daar daarom ook.
+    ApplyTrusted(Vec<String>),
+    /// Elke vertrouwde family wissen (`SettingsPanel.kt:294-297`).
+    ClearTrusted,
+    /// Elke altijd-toestaan-speld wissen, zodat elk commando opnieuw vraagt
+    /// (`SettingsPanel.kt:299-302`).
+    ClearAlways,
 }
 
 /// What the worker reports back. Drained and painted; nothing here is read twice.
@@ -63,6 +75,17 @@ pub enum SettingsEvent {
     Adopted { model: Option<String>, reasoning: Option<String>, max_output_tokens: Option<u32> },
     /// A save, refused or done, in the words the store produced.
     Saved(Result<(), WriteError>),
+    /// Het vertrouwde-vak is toegepast: hoeveel regels er vielen, en of het bestand ze nam. De twee
+    /// moeten allebei landen — `TrustedDropped` is een succes-melding, en wie niet weet dat de
+    /// schrijfpoging weigerde, gelooft dat zijn lijst geldt.
+    TrustedApplied {
+        /// De lijsten zoals het bestand ze nu draagt: de families na teken-en-afval, en de pins.
+        /// Ze reizen mee omdat het paneel anders meteen weer tekent wat er vóór de knop stond.
+        trusted: Vec<String>,
+        always: Vec<String>,
+        dropped: usize,
+        outcome: Result<(), WriteError>,
+    },
 }
 
 /// The panel's whole state: the view-model plus what the last read, fetch, and save reported.
@@ -144,6 +167,15 @@ pub struct SettingsView {
     /// (`SettingsPanel.kt:52`). Tekst en niet `Option<String>`: blanco is hier de toestand "geen
     /// eigen prompt" (`AppConfig.kt:210` `ifBlank`), en die toestand bestaat al in de snaar.
     system_prompt: String,
+    /// De vertrouwde commandofamilies als tekst, één per regel — de `JTextArea(6, 34)` van
+    /// `SettingsPanel.kt:58`. De tekst is de **bewerking**, de lijst in `Settings` is het resultaat:
+    /// pas `apply` vertaalt regels naar gezins-tekens, dus een half getypte regel kan hier staan
+    /// zonder dat hij iets vertrouwt.
+    trusted_text: String,
+    /// De всегда-allow-spelden, als tekst die niemand bewerkt (`SettingsPanel.kt:61` zet
+    /// `isEditable = false`). Ze ontstaan uit "altijd" op een goedkeuringskaart en niet uit dit
+    /// vak, dus een bewerkbaar vakje zou goedkortjes suggereren die het domein niet kent.
+    auto_allow_text: String,
     /// The credential as typed. A separate field from the password widget's buffer is not needed:
     /// this is that buffer, and empty means "not typed" (so the environment still answers).
     api_key: String,
@@ -306,6 +338,8 @@ impl SettingsView {
         self.transcript_wrap = settings.transcript_wrap;
         self.honesty_footer = settings.honesty_footer;
         self.system_prompt = settings.system_prompt.clone();
+        self.trusted_text = settings.trusted_commands.join("\n");
+        self.auto_allow_text = settings.auto_allow_commands.join("\n");
         self.stored_context.use_server_session = settings.use_server_session;
         self.stored_context.learned_context_window = settings.learned_context_window;
         self.stored_context.learned_context_key = settings.learned_context_key.clone();
@@ -377,6 +411,12 @@ impl SettingsView {
             // De tekst gaat zoals hij is: `resolved_system_prompt` kent de ledig-regel en `draft`
             // mag een spa vooraan niet wegpoetsten, want die kan bedoeld zijn.
             system_prompt: self.system_prompt.clone(),
+            // De twee vertrouwenslijsten komen uit het **bestand** en niet uit de tekstvakken
+            // hierboven: `SettingsPanel.kt:286-292` past ze alleen toe op zijn eigen
+            // "vertrouwde lijst"-knop, en een opslagknop die een half getypte regel meeneemt,
+            // vertrouwt iets wat niemand afmaakte. Daarom deze kopie uit de voorraad.
+            trusted_commands: self.stored_context.trusted_commands.clone(),
+            auto_allow_commands: self.stored_context.auto_allow_commands.clone(),
             learned_context_window: self.stored_context.learned_context_window,
             learned_context_key: self.stored_context.learned_context_key.clone(),
             left_divider: self.stored_context.left_divider,
@@ -432,6 +472,8 @@ impl SettingsView {
     /// field, so a slow answer to an old endpoint cannot overwrite the picker for a new one.
     pub fn apply_event(&mut self, event: SettingsEvent) {
         match event {
+            // De drie vertrouwensrapporten delen één slot: het paneel toont daarna wat er werkelijk
+            // staat, want de knoppen schrijven zélf en hun tekstvak is een bewerking, niet de waarheid.
             SettingsEvent::Listing(result, endpoint) => {
                 self.fetching = false;
                 self.listing_answered = true;
@@ -478,6 +520,26 @@ impl SettingsView {
                     Err(WriteError::WouldDiscard { reason, .. }) => {
                         // Save refused at the store: the file is unparseable. Stay blocked so the
                         // panel's own button agrees with the store's refusal.
+                        self.blocked = true;
+                        reason
+                    }
+                    Err(other) => other.to_string(),
+                };
+            }
+            // De knop schreef zélf, dus wat er nu in de vakken staat, komt uit het antwoord en niet
+            // uit wat iemand typte. Bij een weigering blijven de vakken zoals ze waren: de persoon
+            // wil zijn regels terugzien, niet een lijst die hij nooit goedkeurde. `editie`-velden
+            // en voorraad gaan samen — één waarheid, twee plekken.
+            SettingsEvent::TrustedApplied { trusted, always, dropped, outcome } => {
+                if let Ok(()) = outcome {
+                    self.stored_context.trusted_commands = trusted.clone();
+                    self.stored_context.auto_allow_commands = always.clone();
+                    self.trusted_text = trusted.join("\n");
+                    self.auto_allow_text = always.join("\n");
+                }
+                self.status = match outcome {
+                    Ok(()) => Texts::fmt(Key::TrustedDropped, &[&dropped]),
+                    Err(WriteError::WouldDiscard { reason, .. }) => {
                         self.blocked = true;
                         reason
                     }
@@ -661,16 +723,22 @@ const LABEL_COLUMN: f32 = 168.0;
 /// De origineler zet `Insets(4, gap, 4, gap)` op élke cel van zijn `GridBagLayout`
 /// (`Form.kt:16`), dus twee rijen scheiden daar 4 + 4 = 8 pt. Dit formulier stond op
 /// `item_spacing.y` van het venster — 6 pt — en dat merkte men: de etiketrijen plakten tegen elkaars
-/// tekstvelden. Twee keer deze waarde, want de boven- én de ondermarge van een cel gelden allebei.
-const ROW_GAP: f32 = 4.0;
-
-/// De lucht tussen de knoppen onder een veld (Fetch en Test onder het adres, Bewaar onder het formulier).
+/// tekstvelden.
 ///
-/// De origineler scheidt zijn knoppen níét met een `ui.separator()`-lijn: hij groupert ze in een eigen
-/// band (`CommandCenterPanel.kt:397` `buttonRow(...)`) en laat de banden voor de lucht zorgen. Dit
-/// formulier tekent die banden niet, dus is de marge hier expliciet, en kleiner dan `ROW_GAP` omdat
-/// deze knoppen bij het veld erboven horen en niet naast een andere groep mogen lijken.
-const BUTTON_GAP: f32 = 8.0;
+/// 8 en niet 4, want deze waarde is de **hele** tussenruimte en niet de marge van één cel. In Swing
+/// gelden de ondermarge van de cel erboven en de bovenmarge van deze cel allebei (`Insets(4, ..)` =
+/// 4 + 4), terwijl `add_space` hier de enige ruimte is: 4 pt op een letter van 12-13 pt is één derde
+/// regel, en dat is precies het "plakt tegen elkaar" uit de klacht. 8 pt is de ondergrens van die
+/// meting, en alles wat hier kleiner is dan de origineler, is een verslechtering die niemand vroeg.
+pub const ROW_GAP: f32 = 8.0;
+
+/// De lucht rond een groepskop en tussen de knoppen onder een veld, in pt.
+///
+/// Het dubbele van [`ROW_GAP`], want een kop is geen rij: hij opent een band en moet van de rijen
+/// eronder én erboven te onderscheiden zijn zonder kader of lijn. De origineler bereikt dat met een
+/// `TitledBorder` (`SettingsPanel.kt:143,165`), en diens rand inneemt ook ruimtes in. Dit formulier
+/// tekent geen kader, dus is de lucht het enige verschil tussen "kop van een band" en "nog een rij".
+pub const GROUP_GAP: f32 = 16.0;
 
 /// Eén formulierrij: etiket links, veld rechts, zoals `Form.kt:14-32` het doet.
 ///
@@ -741,13 +809,13 @@ pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<S
     // `LanguageLabel to language` als eerste rij, vóór het endpoint.
     // Eerste rij van het formulier: er hangt niets boven, dus geen lucht.
     language_row(ui, view, 0.0);
-    ui.separator();
+    group_break(ui);
     // Eerste rij van zijn groep, dus ook hier geen lucht boven de etiketrij.
     endpoint_row(ui, view, &mut commands, 0.0);
-    ui.separator();
+    group_break(ui);
     // Groep, dus geen lucht.
     model_row(ui, view, 0.0);
-    ui.separator();
+    group_break(ui);
     // De sampling-rijen staan vóór de redeneer-kiezer, zoals de volgorde van `SettingsPanel.kt:117-119`
     // (temperature en topP tussen de beurtteller en reasoning). De eerste draagt geen lucht boven
     // zich, want hij hangt aan de scheiding erboven.
@@ -757,29 +825,32 @@ pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<S
     tokens_row(ui, view);
     iterations_row(ui, view);
     parallel_row(ui, view);
-    ui.separator();
+    group_break(ui);
     // De zeven vinkjes, als eigen groep direct na de parallelstand — dezelfde plek als in de
     // volgorde van `SettingsPanel.kt:121-128`.
     toggle_rows(ui, view);
     // De systeemprompt sluit de band af, als laatste rij vóór de contextgroepen — de plek die
     // `SettingsPanel.kt:129-130` hem geeft (na de vinkjes, vóór de knoppen).
     system_prompt_row(ui, view);
-    ui.separator();
+    group_break(ui);
+    // Het commandevertrouwen als eigen band, de `commandPanel` van `SettingsPanel.kt:141-159`.
+    command_rows(ui, view, &mut commands);
+    group_break(ui);
     context_rows(ui, view);
-    ui.separator();
+    group_break(ui);
     key_row(ui, view, 0.0);
     if view.blocked {
-        ui.separator();
+        group_break(ui);
         ui.colored_label(palette::DIFF_REMOVED, "Your settings file is unreadable.");
         ui.label(dim("Saving is disabled until it is fixed, so a save can never replace what is still in that file."));
     }
-    ui.separator();
+    group_break(ui);
     save_row(ui, view, &mut commands);
     // Eén status, onderaan: het is de plek waar een listing of een save zijn woorden achterlaat, en
     // de referentie-app zet het datapad daar ook. Leeg is geen regel: dan staat er niets, ook geen
     // lege lijn met een scheiding erboven.
     if !view.status.is_empty() {
-        ui.separator();
+        group_break(ui);
         ui.label(dim(&view.status));
     }
     for command in commands {
@@ -858,7 +929,7 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
             .clicked()
         })
         .inner;
-    ui.add_space(BUTTON_GAP);
+    ui.add_space(ROW_GAP);
     ui.horizontal(|ui| {
         ui.add_sized([LABEL_COLUMN, 20.0], egui::Label::new("").selectable(false));
         // The second question about an address: not which models are on it, but what it answers.
@@ -1025,6 +1096,79 @@ fn toggle_rows(ui: &mut Ui, view: &mut SettingsView) {
             _ => view.honesty_footer = value,
         }
     }
+}
+
+/// De band "commandevertrouwen": twee meerregelige vakken en de drie knoppen eronder.
+///
+/// De titel is geen `form_row`: de origineler groepeert met een `TitledBorder`
+/// (`SettingsPanel.kt:142`), en een kader met een kop is precies wat hier past — de twee vakken
+/// horen bij elkaar en niet bij de rijen erboven of eronder. De breedte van de labelkolom wordt
+/// gemeten (`into_galley`) en niet geraamd: de Nederlandse labels zijn langer dan de Engelse, en
+/// een vaste raming zou in één taal de knoppen en in een andere de vakken laten verspringen.
+///
+/// Het rechtervak is `ui.add_enabled(false, ..)`: de spelden ontstaan uit "altijd" op een
+/// goedkeuringskaart (`AppState.kt:385` in de origineler) en niet uit dit vak, dus tonen mag,
+/// typen niet. De wiskunde van `apply` doet deze rij **niet**: die kent de tekenregels niet en
+/// mag ze niet gaan dupliceren; wat hier gebeurt, is regels splitsen en ze overdragen.
+fn command_rows(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<SettingsCommand>) {
+    let title = Texts::get(Key::CommandManagerTitle);
+    ui.add_space(GROUP_GAP);
+    ui.label(egui::RichText::new(title).weak());
+    ui.add_space(ROW_GAP);
+    form_row_with_gap(ui, 0.0, Texts::get(Key::TrustedPrefixesLabel), |ui| {
+        ui.add_sized(
+            [ui.available_width(), 0.0],
+            egui::TextEdit::multiline(&mut view.trusted_text)
+                .hint_text("mvn\ngit commit")
+                .desired_rows(4)
+                .desired_width(f32::INFINITY),
+        )
+        .on_hover_text(Texts::get(Key::TrustedPrefixesHint));
+    });
+    form_row_with_gap(ui, ROW_GAP, Texts::get(Key::AlwaysAllowLabel), |ui| {
+        ui.add_enabled(
+            false,
+            egui::TextEdit::multiline(&mut view.auto_allow_text).desired_rows(3).desired_width(f32::INFINITY),
+        )
+        .on_hover_text(Texts::get(Key::AlwaysAllowHint));
+    });
+    ui.add_space(ROW_GAP);
+    ui.horizontal(|ui| {
+        let apply =
+            ui.button(Texts::get(Key::ApplyTrustedButton)).on_hover_text(Texts::get(Key::TipApplyTrusted)).clicked();
+        let clear_trusted = ui
+            .small_button(Texts::get(Key::ClearTrustedButton))
+            .on_hover_text(Texts::get(Key::TipClearTrusted))
+            .clicked();
+        let clear_always = ui
+            .small_button(Texts::get(Key::ClearAlwaysButton))
+            .on_hover_text(Texts::get(Key::TipClearAlways))
+            .clicked();
+        // Eerst de knoppen lezen, dan pas de regels snijden: een klik die niets opstuurt omdat het
+        // vak leeg is, is een klik die de lijst ledig maakt, en dat is een beslissing.
+        if apply {
+            commands.push(SettingsCommand::ApplyTrusted(split_trusted_lines(&view.trusted_text)));
+        }
+        if clear_trusted {
+            commands.push(SettingsCommand::ClearTrusted);
+        }
+        if clear_always {
+            commands.push(SettingsCommand::ClearAlways);
+        }
+    });
+}
+
+/// De regels uit het vertrouwde-vak, gesplitst zoals `SettingsPanel.kt:287` ze splitst.
+///
+/// Elke regel wordt getrimd en een ledige valt stil af: die is een lege regel en geen besluit. Hij
+/// telt ook **niet** als afgevallen regel — `TrustedDropped` zegt "verwijderd omdat ze geen veilige
+/// familie noemen", en dat is over een ledige regel onwaar. Wat **niet** hier gebeurt, is beslissen
+/// of een gezin veilig is: die afdwinging kent alleen de tekenlaag (`command_signature` in
+/// `baudet-tool`), en die leeft niet in deze crate. Wat hieruit komt, is daarom gesplitst maar nog
+/// niet gecontroleerd, en zonder telling: het tellen van afgevallen regels hoort bij diezelfde
+/// tekenlaag, want alleen zij weet of een regel een gezin noemt.
+fn split_trusted_lines(text: &str) -> Vec<String> {
+    text.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_string).collect()
 }
 
 /// De systeemprompt als meerregelig vak, de `JTextArea(5, 34)` van `SettingsPanel.kt:52`.
@@ -1257,7 +1401,7 @@ fn key_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
 fn save_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<SettingsCommand>) {
     // De knop staat los van het veld erboven: er sits al een `Separator` boven deze band, en zonder
     // eigen marge plakte de knop tegen zijn eigen scheiding.
-    ui.add_space(BUTTON_GAP);
+    ui.add_space(ROW_GAP);
     let save = ui
         .add_enabled(!view.blocked, egui::Button::new(Texts::get(Key::SaveButton)))
         .on_hover_text(Texts::get(Key::TipSave))
@@ -1283,6 +1427,18 @@ fn dim(text: impl Into<String>) -> egui::WidgetText {
     egui::RichText::new(text.into()).color(palette::DIM).into()
 }
 
+/// De groepscheiding van dit formulier: egui's eigen lijn, met lucht eromheen.
+///
+/// `ui.separator()` is exact deze widget met `spacing` op de stijlstandaard van 6 pt
+/// (`SeparatorStyle::separator_style`: `spacing: 6.0`, stroke = `noninteractive().bg_stroke`), en de
+/// lijn wordt in het midden van die ruimte getekend (`separator.rs:130-140`). Zes pt op een letter van
+/// 12 pt is de helft van een regel: de lijn raakte de tekst erboven en eronder, en dat is het
+/// "plakt"-beeld van de klacht. Dit is daarom dezelfde `Separator` met `spacing(GROUP_GAP)`, en geen
+/// handgetekende `hline` — de lijn, de kleur en de breedte blijven die van het venster.
+fn group_break(ui: &mut Ui) {
+    ui.add(egui::Separator::default().spacing(GROUP_GAP));
+}
+
 /// The datapad, phrased the way the reference app phrases it: a file a person could open.
 fn describe_path(path: &std::path::Path) -> String {
     format!("{}", path.display())
@@ -1295,7 +1451,7 @@ fn describe_path(path: &std::path::Path) -> String {
 /// because it is the reason these are unit tests in the file rather than integration tests beside it.
 #[cfg(test)]
 mod tests {
-    use super::{Language, Reasoning, SettingsCommand, SettingsEvent, SettingsView, ToolMode};
+    use super::{split_trusted_lines, Language, Reasoning, SettingsCommand, SettingsEvent, SettingsView, ToolMode};
     use baudet_settings::{ListingError, Model};
     use std::path::PathBuf;
 
@@ -1396,6 +1552,24 @@ mod tests {
     /// hier telt, is dat `draft` de ledige snaar niet vult met de ingebouwde prompt: het bestand
     /// bewaart de **afwijking**, en `resolved_system_prompt` levert de rest ('t is de enige manier
     /// waarop een latere verandering van die ingebouwde tekst nog ergens doorwerkt).
+
+    /// De twee vertrouwens-knoppen sturen de lijst en geen lege tekst: een ledig vak betekent een
+    /// ledige lijst, en `draft` mag de bestaande lijst niet meenemen van wat er in het vak stond.
+    /// Dat is de scheiding die `SettingsPanel.kt:286-292` tekent tussen bewerking en besluit.
+    #[test]
+    fn een_lijst_knop_neemt_het_besluit_en_nooit_de_halve_tekst() {
+        let mut view = view();
+        // Het vak bevat iets dat nog niet is toegepast; de voorraad draagt de vorige lijst.
+        view.trusted_text = "mvn
+git com"
+            .into();
+        let drafted = view.draft().expect("een half getypt gezin mag het formulier niet breken");
+        assert_eq!(drafted.trusted_commands, view.stored_context.trusted_commands, "opslaan vertrouwt niets nieuw");
+
+        let lines = split_trusted_lines("mvn\n\n  git commit  \n");
+        assert_eq!(lines, vec!["mvn".to_string(), "git commit".to_string()], "elke regel getrimd");
+    }
+
     #[test]
     fn een_ledige_systeemprompt_blijft_ledig_wat_de_ingebouwde_prompt_ook_wil() {
         let mut view = view();

@@ -265,6 +265,7 @@ dependencies = [
  "baudet-projects",
  "baudet-settings",
  "baudet-store",
+ "baudet-tool",
  "eframe",
  "egui",
  "egui_extras",

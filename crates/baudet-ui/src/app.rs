@@ -1496,8 +1496,61 @@ fn settings_worker_loop(commands: mpsc::Receiver<SettingsCommand>, report: mpsc:
                 });
                 let _ = report.send(SettingsEvent::Saved(outcome));
             }
+            // Het vertrouwde-vak toepassen, naar de regel van `AppState.kt:418-432`: elke regel
+            // door `trusted_entry`, wat geen veilig gezin kan noemen valt en telt mee, de rest wordt
+            // zijn gezins-teken en dubbele tekens vallen samen. De **teken**-laag doet dit en niet het
+            // paneel: een second copy van die regel in de UI is hoe een paneel breder gaat
+            // vertrouwen dan de tool die er later op draait.
+            SettingsCommand::ApplyTrusted(lines) => {
+                // Het tellen begint hier en niet in het paneel: alleen `trusted_entry` weet of een
+                // regel een gezin noemt, en `TrustedDropped` gaat over precies die regels
+                // (`AppState.kt:418-432`). Een ledige regel is al weg en telt dus niet mee.
+                let mut kept: Vec<String> = Vec::new();
+                let mut afgevallen = 0usize;
+                for raw in &lines {
+                    match baudet_tool::command_signature::trusted_entry(raw) {
+                        None => afgevallen += 1,
+                        Some(key) => {
+                            if !kept.iter().any(|seen| seen == &key) {
+                                kept.push(key);
+                            }
+                        }
+                    }
+                }
+                mutate_and_save(&|settings| settings.trusted_commands = kept.clone(), afgevallen, &report);
+            }
+            SettingsCommand::ClearTrusted => mutate_and_save(&|settings| settings.trusted_commands.clear(), 0, &report),
+            SettingsCommand::ClearAlways => {
+                mutate_and_save(&|settings| settings.auto_allow_commands.clear(), 0, &report)
+            }
         }
     }
+}
+
+/// Eén vertrouwenslijst veranderen en het bestand herschrijven, met het antwoord voor het paneel.
+///
+/// De instellingen worden opnieuw **gelezen** in plaats van uit het paneel gehaald: deze drie
+/// knoppen veranderen één lijst en mogen dus niets kwijtteren wat ergens anders aan dat bestand
+/// gebeurde, precies zoals `AppState.kt:442-464` sparen en `store.save` aanroept zonder
+/// `onConfigSaved` — een goedkeuringslijst-wissel herbouwt geen panelen.
+fn mutate_and_save(
+    change: &dyn Fn(&mut baudet_settings::Settings),
+    dropped: usize,
+    report: &mpsc::Sender<SettingsEvent>,
+) {
+    let file = baudet_settings::SettingsFile::default_location();
+    let mut settings = file.read().settings().clone();
+    change(&mut settings);
+    let outcome = file.write(&settings);
+    // Het aantal afgevallen regels gaat mee als woorden, niet als stilzwijgen: de persoon die zes
+    // regels typte en er vier ziet staan, moet weten dat er twee vielen en waarom. De lijsten gaan
+    // mee in dezelfde richting, zodat het paneel tekent wat er staat en niet wat iemand typte.
+    let _ = report.send(SettingsEvent::TrustedApplied {
+        trusted: settings.trusted_commands,
+        always: settings.auto_allow_commands,
+        dropped,
+        outcome,
+    });
 }
 
 /// The localhost addresses worth asking, in the order they are asked.

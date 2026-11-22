@@ -245,6 +245,10 @@ mod tests {
             // De eigen systeemprompt is een meerregelige tekst (`AppConfig.kt:140`), dus dit
             // rondreisje bewijst ook dat regeleinden het JSON-bestand doorkomen.
             system_prompt: "Regel een.\nRegel twee.".into(),
+            // De twee vertrouwenslijsten reizen als lijst mee (`AppConfig.kt:104,128`), met twee
+            // entries zodat een afkapping of een samentelling van regels hier zichtbaar wordt.
+            trusted_commands: vec!["git diff".into(), "mvn".into()],
+            auto_allow_commands: vec!["cargo test".into()],
             learned_context_window: 32_768,
             learned_context_key: "http://studio:8000/v1|Qwen3.8-Flash".into(),
             // De verdeelstanden reizen mee door hetzelfde bestand (`AppConfig.kt:152-158`) en hun

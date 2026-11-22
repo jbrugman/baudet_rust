@@ -301,6 +301,27 @@ pub struct Settings {
     /// Hij gaat mee in het Engels, wat de UI-taal ook is (`AppConfig.kt:212-214`): een prompt is
     /// geen interface-onderdeel, en hem stilletjes vertalen verandert hoe het model zich gedraagt.
     pub system_prompt: String,
+    /// Commandofamilies waar de persoon voor koos, één per regel in het paneel.
+    ///
+    /// Poort van `AppConfig.kt:128` (`var trustedCommands: MutableList<String> = mutableListOf()`),
+    /// default ledig = uit. Een entry is een **gezins-teken** zoals
+    /// [`baudet_tool::command_signature::trusted_entry`] het berekent (kaal programma, of git met
+    /// subcommando) en nooit een breder woord: een regel die een shell, een interpreter, een wisser
+    /// of een keten noemt, kan geen teken opleveren en valt daarom af bij het toepassen. Dat is de
+    /// reden waarom deze lijst geen macht krijgt van wat erin staat: een foute regel matcht
+    /// nooit een echte run.
+    ///
+    /// Dit is de opslagkant van de speld die `baudet_tool::ToolContext::trusted_commands_provider`
+    /// uitleest — dezelfde lijst, twee kanten, één teken-definitie.
+    pub trusted_commands: Vec<String>,
+    /// De exacte commando-spelden waarop iemand "altijd" klikte.
+    ///
+    /// Poort van `AppConfig.kt:104` (`var autoAllowCommands: MutableList<String> = mutableListOf()`),
+    /// default ledig. Matching is op de **hele** streng — nooit een voorvoegsel of patroon — zodat
+    /// een ja op `ls` daarna nooit `ls && rm -rf` doorlaat. Een bewezen alleen-lezen commando wordt
+    /// via zijn herbruikbare teken gespeld, alles anders op zijn volledige tekst; beide komen uit
+    /// [`baudet_tool::command_signature::pinned`], dus pinnen en controleren kennen één regel.
+    pub auto_allow_commands: Vec<String>,
     /// Het contextvenster dat een weigering ons leerde, of 0 wanneer nooit geleerd.
     ///
     /// Dit is géén instelling: de persoon typt het nooit. Het bestaat omdat de app een beurt anders
@@ -405,8 +426,12 @@ impl Default for Settings {
             transcript_wrap: true,
             honesty_footer: true,
             // Ledig en niet de ingebouwde tekst: het bestand bewaart wat de persoon afweek, zodat de
-            // ingebouwde prompt one place in de code blijft (`AppConfig.kt:140,217`).
+            // ingebouwde prompt één plek in de code blijft (`AppConfig.kt:140,217`).
             system_prompt: String::new(),
+            // Beide lijsten starten ledig, en ledig is "uit": niets draait zonder een expliciete
+            // entry of een beurt-goedkeuring (`AppConfig.kt:104,128`).
+            trusted_commands: Vec::new(),
+            auto_allow_commands: Vec::new(),
             learned_context_window: 0,
             learned_context_key: String::new(),
             // Drie nullen, geen maten: "er is nog nooit een venster gesloten". De maten zelf leven
@@ -855,6 +880,29 @@ mod tests {
         let read = outcome.settings();
         assert_eq!(read.system_prompt, own, "regeleinden reizen mee");
         assert_eq!(read.resolved_system_prompt(), own);
+    }
+
+    #[test]
+    fn beide_vertrouwenslijsten_starten_ledig_en_reizen_als_lijst() {
+        // Ledig is "uit" (`AppConfig.kt:104,128`): er staat geen enkel commando in dat dan zou
+        // draaien. En een lijst die wel iets draagt, moet élke entry behouden — een-affelde entry
+        // is een ingetrokken goedkeuring die niemand introk.
+        let default = Settings::default();
+        assert!(default.trusted_commands.is_empty(), "ledig betekent uit");
+        assert!(default.auto_allow_commands.is_empty());
+
+        use crate::store::SettingsFile;
+        let file = tempfile::tempdir().unwrap();
+        let store = SettingsFile::at(file.path().join("settings.json"));
+        let filled = Settings {
+            trusted_commands: vec!["git commit".into(), "mvn".into()],
+            auto_allow_commands: vec!["git diff --stat".into()],
+            ..Default::default()
+        };
+        store.write(&filled).unwrap();
+        let outcome = store.read();
+        assert_eq!(outcome.settings().trusted_commands, filled.trusted_commands);
+        assert_eq!(outcome.settings().auto_allow_commands, filled.auto_allow_commands);
     }
 
     #[test]

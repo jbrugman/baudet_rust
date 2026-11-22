@@ -51,4 +51,8 @@ pub use sidebar::{Confirm, NameAsk, Selection, SidebarModel, SidebarOutcome};
 // Het tabbladtype hoort bij de publiek testbare grens: tests/tabs.rs tekent er een na met dezelfde
 // knoppen die een persoon indrukt, en heeft daar zowel de startkeus (`with_tab`) als de lezing van
 // het antwoord (`tab()`) voor nodig.
-pub use settings::{body as settings_body, SettingsCommand, SettingsEvent, SettingsView};
+// De twee marges van het instellingenformulier zijn publiek voor tests/rijlucht.rs: een test die
+// een eigen getal verzint, keurt een smaak goed in plaats van de maat die het formulier zet.
+pub use settings::{
+    body as settings_body, SettingsCommand, SettingsEvent, SettingsView, FIELD_ENDPOINT, GROUP_GAP, ROW_GAP,
+};
