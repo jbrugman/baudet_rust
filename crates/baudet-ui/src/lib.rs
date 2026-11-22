@@ -39,9 +39,9 @@ pub use app::{run, run_from, Startup, TranscriptApp};
 // `.id_salt`-veld adresseert relatief aan zijn ouder-`Ui` en is die keten hier bewust níét: geen
 // enkele root-keten gaf dat adres (gemeten), dus de velden worden niet op adres getest.
 pub use app::{root_ui_id, Tab, TABSTRIP};
-pub use panels::{FOLDER_OPEN, NO_FOLDER, NO_READ, TREE_REFRESH};
+pub use panels::{NO_FOLDER, NO_READ, TREE_REFRESH};
 // De intenties en het adres van de `Add project`-knop: tests/folder_open.rs en tests/project_tree.rs
-// klikken op dat adres, dus het moet van buiten te noemen zijn, zoals `FOLDER_OPEN`.
+// klikken op dat adres, dus het moet van buiten te noemen zijn.
 pub use palette::DiffLine;
 pub use panels::{SidebarIntent, PANEL_TOGGLES, SIDEBAR_ADD};
 pub use layout::{resolve_divider, worth_remembering, Dividers};

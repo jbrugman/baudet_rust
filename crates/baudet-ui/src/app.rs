@@ -157,7 +157,6 @@ pub struct TranscriptApp {
     /// lokaal `let mut draft = String::new();` bij elke paint wist dus elke toetsaanslag vóórdat de
     /// klik op `Open` of de Enter in een volgende frame arrives — dan is de rij leeg en opent er
     /// niets. Eén eigenaar van "wat staat er in het veld", en die overleeft de repaint.
-    folder_draft: String,
     /// The right panel: the paths git reports for that folder.
     changes: Changes,
     /// Which body the middle panel shows. `Some` is a tab a person chose; `None` is the chat, which
@@ -266,7 +265,6 @@ impl TranscriptApp {
             fetch_models_on_start: false,
             shot_send: None,
             workspace: Workspace::default(),
-            folder_draft: String::new(),
             changes: Changes::default(),
             active_tab: None,
             fell_back: None,
@@ -485,7 +483,6 @@ impl TranscriptApp {
             && panels::file_tree(
                 ui,
                 &mut self.workspace,
-                &mut self.folder_draft,
                 &self.changes,
                 &mut self.dividers,
                 right_width,

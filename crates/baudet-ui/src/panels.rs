@@ -232,23 +232,19 @@ impl Changes {
 pub fn file_tree_controls(
     ui: &mut Ui,
     workspace: &mut Workspace,
-    draft: &mut String,
     meta: Option<&GitMeta>,
     changes: &[ChangedFile],
 ) -> bool {
-    // De draft komt van de aanroeper (`TranscriptApp::folder_draft`) en niet uit een lokaal
-    // `String::new()`. Dat laatste was de bug: `singleline(&mut draft)` haalt zijn tekst uit de
-    // meegegeven string (`TextEditState` bewaart alleen cursor/offset), dus een verse lokale lege
-    // string wist elke toetsaanslag vóór de klik in de volgende frame — de rij stond dan leeg en
-    // `requested` werd nooit gezet. Hier blijft `draft` leeg zolang er niets getypt of gekozen is,
-    // maar overleeft hij wél wat er wél getypt is. Het is nog steeds geen tweede display van `cwd`
-    // (daarvoor is de folder-regel hieronder); het is alleen de invoer, en die leeft buiten de paint.
+    // De rechterstrook heeft geen map-invoerveld. De Kotlin `FileTreePanel` laat alleen de boom
+    // en de knoppen `[Refresh] [Hidden files]` zien (`:126-131`) en leest de map uit het project
+    // (`project?.folderPath`, `:213`) — iemand koppelt een map via het rechtermuismenu van de
+    // linkerprojectbalk (`ProjectSidebar.kt:225` `Link folder`). `requested` is dus alleen nog de
+    // ververs-deur: een klik op Refresh met een map open.
     let mut requested: Option<String> = None;
     // Geen eigen `Panel`: de mapkinderen delen de rechterstrook met `changes_body`, zodat egui
     // hier één flank overhoudt, zoals de Kotlin `SplitPane`.
     {
         let root = crate::app::root_ui_id(ui.ctx());
-        ui.strong("Files");
         // De knoppen-rij van de origineler: `[Refresh] [vinkje Hidden files]`
         // (`FileTreePanel.kt:126-131`, met de woorden uit `Key.kt:375` en `:380`).
         // Een eigen rij en niet aangeplakt bij de map-rij hieronder: de checkbox is 18 pt hoog
@@ -277,80 +273,6 @@ pub fn file_tree_controls(
         // verbergen: een adres dat verdwijnt, kan een test niet meer vinden.
         if refresh_clicked && workspace.cwd().is_some() {
             requested = workspace.cwd().map(str::to_string);
-        }
-        // Eén rij: het veld zo breed als overblijft, de knoppen ernaast. Het veld blijft de plek om
-        // te typen — een dialoog die een pad kiest, is een toevoeging en geen vervanging, want een
-        // pad dat iemand uit het hoofd typt, is sneller dan drie klikken door een boom.
-        //
-        // De breedtes worden hierbuiten bepaald en niet door egui verdeeld. Meten eerst (zie
-        // tests/folder_row.rs): `desired_width(f32::INFINITY)` maakt het veld zo breed als de
-        // beschikbare ruimte — in een root-UI 10 000 pt — en `Ui::put` knipt die.rect niet af, dus
-        // elke knop ernaast verdween voorbij de rand: stil, zonder foutmelding, en op een plaatje niet
-        // te onderscheiden van "erbij vergeten". Uitsluitend `add_sized` met een eindige breedte houdt
-        // de rij binnen de rechterstrook, en dan sluit die per constructie aan op de rand.
-        let row_width = ui.available_width();
-        let spacing = ui.spacing().item_spacing.x;
-        // De twee knoppen meten 64,3 en 40,2 pt (gemeten in tests/folder_row.rs); 64,4 en 40,2 is
-        // naar boven afgerond, dus de rest die het veld krijgt is nooit te ruim en de rij nooit te vol.
-        let buttons_width = 64.4 + 40.2 + spacing * 2.0;
-        let field_width = (row_width - buttons_width).max(0.0);
-        let mut field: Option<egui::Response> = None;
-        let mut browse = false;
-        let mut open_clicked = false;
-        // Het veld krijgt een expliciet root-adres (`UiBuilder::id`-wikkel) en niet alleen een
-        // `.id_salt`, omdat `.id_salt` relatief adresseert aan de ouder-`Ui` — en die schuift mee met
-        // de paneel-kolom, dus is het adres van buiten niet te reconstrueren (idem `TABSTRIP`). De
-        // wikkel draagt click-sense, maar de tekst-invoer leeft op het veld erin (Sense::focus), niet
-        // op de wikkel; de wikkel bestaat zodat een test dit veld kan *vinden* om erin te typen.
-        ui.horizontal(|ui| {
-            // `with_main_wrap(false)`: zonder die regel wrapt de tweede knop naar een eigen rij zodra
-            // het veld op 0 staat, en dan valt de rij alsnog buiten de rand (gemeten bij 130 pt).
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(false), |ui| {
-                field = Some(ui.add_sized(
-                    [field_width, 20.0],
-                    egui::TextEdit::singleline(draft).id_salt(FOLDER_FIELD).hint_text("folder path"),
-                ));
-                // De native kiezer van het besturingsselt, niet een eigen boom in een venster: mappen
-                // tonen, snelkoppelingen herkennen en de voorkeur van iemand vinden, is het werk van
-                // de zoeker die er al is.
-                if ui.small_button(BROWSE_LABEL).clicked() {
-                    browse = true;
-                }
-                // `Open` in een expliciet-id wikkel, niet als kale `small_button`: diens auto-adres
-                // is van buiten niet te reconstrueren en de knop verdween daar eerder. De klik leeft
-                // op de wikkel (click-sense), de tekst is alleen het label — exact het patroon van
-                // de tabstrip en de modelknop.
-                open_clicked = ui
-                    .scope_builder(
-                        egui::UiBuilder::new().id(root.with((FOLDER_OPEN, "open"))).sense(egui::Sense::click()),
-                        |ui| {
-                            ui.add(egui::Label::new("Open").selectable(false));
-                        },
-                    )
-                    .response
-                    .clicked();
-            });
-        });
-        if browse {
-            // De kiezer vult de draft, hij opent niet. Daardoor blijft `requested` hieronder de enige
-            // deur naar `Workspace::cwd`, en een gekozen pad doorloopt hetzelfde commit-pad als een
-            // getypt pad — inclusief het verversen van de boom en de git-vraag.
-            if let Some(chosen) = pick_folder() {
-                *draft = chosen;
-            }
-        }
-        // Commit via de knop óf via Enter in het veld. De oude eis `field.lost_focus() && enter` was
-        // de tweede doodsteek: Enter drukt men in *terwijl* het veld focus heeft, en dan is
-        // `lost_focus()` per definitie onwaar — de commitslag kon dus ook via het toetsenbord nooit
-        // vallen. De juiste vraag is "stond er iets in het veld toen de Enter of de knop kwam". Een
-        // leeg veld betekent nog steeds "houd wat open is", dus een dwaal-Enter wist de paneel niet.
-        let enter_in_field =
-            field.is_some_and(|field| field.has_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if (open_clicked || enter_in_field) && !draft.trim().is_empty() {
-            requested = Some(draft.trim().to_string());
-            // Een geopend pad hoeft niet in het veld te blijven staan: de folder-regel hieronder toont
-            // wat er open is, en een lege draft na het openen is geen tweede display van cwd.
-            draft.clear();
         }
         ui.separator();
         let chosen = workspace.cwd().map(|s| s.to_string());
@@ -416,9 +338,9 @@ pub fn file_tree_controls(
 // ---------------------------------------------------------------------------------------------
 
 /// Het zout van de `Add project`-knop. Samen met `root_ui_id` is dat adres van buiten te vinden en
-/// te klikken, zoals `TABSTRIP` en `FOLDER_OPEN`: een kale `small_button` in een `SidePanel`-kolom
-/// adresseert relatief aan die kolom en verdween daar eerder voorbij de rand — dezelfde clase als de
-/// tabstrip en de `Open`-knop al hadden.
+/// te klikken, zoals `TABSTRIP`: een kale `small_button` in een `SidePanel`-kolom adresseert
+/// relatief aan die kolom en verdween daar eerder voorbij de rand — dezelfde clase als de tabstrip
+/// al had.
 ///
 /// Het contextmenu heeft geen vast adres: de items zitten in een popup op de muis en hun handeling
 /// bereikt het model via `MenuAction`, niet via een klik op een bekend id.
@@ -837,21 +759,8 @@ fn menu_item(
     }
 }
 
-/// Het label op de kiezer. Als constante, zodat tests/folder_row.rs dezelfde tekst tekent als de
-/// paneel: de breedtes in die rij zijn erop gemeten, en een label dat ergens stillen verandert,
-/// verandert die maten.
-pub const BROWSE_LABEL: &str = "Browse\u{2026}";
 
-/// Het zout van het mappadveld. Een `.id_salt` met een vaste waarde houdt het veldadres stabiel
-/// binnen de kolom; het is géén van buiten reconstrueerbaar root-adres (het veld zit in de
-/// paneel-kolom). Een test vindt het veld via `root_ui_id` plus deze keten niet — typen gebeurt door
-/// het veld te focusen bij de klik op `Open` of via `InteractRequest`; dit zout bestaat voor de
-/// stabiliteit zélf (geen toevallige auto-id die meeschuift als er bovenin iets bij komt).
-pub const FOLDER_FIELD: &str = "folder-path-field";
 
-/// Het root-adres van de `Open`-knop, als wikkel met click-sense (zie de call site). `root_ui_id`
-/// plus dit zout is wél van buiten te vinden en te klikken, zoals `TABSTRIP`.
-pub const FOLDER_OPEN: &str = "folder-open";
 
 /// Het adres van de `Refresh`-knop in de rechterkop: `Key.FileTreeRefreshButton`
 /// (`Key.kt:375`). Een kale knop in de kolom van het paneel adresseert relatief aan die kolom
@@ -866,7 +775,8 @@ pub const TREE_REFRESH: &str = "file-tree-refresh";
 /// hetzelfde commit-pad als een getypt pad sturen — te lezen is zonder een dialoog te openen.
 ///
 /// An unnamed function rather than a method on `Workspace`, because it changes nothing the panel
-/// owns: the chosen path re-enters as a draft, and `Workspace::cwd` still has exactly one writer.
+/// owns: de gekozen map gaat naar `SidebarModel::link_folder`, en `Workspace::cwd` houdt één
+/// schrijver (het geopende project).
 fn pick_folder() -> Option<String> {
     rfd::FileDialog::new().set_title("Choose a folder").pick_folder().map(|path| path.display().to_string())
 }
@@ -1067,7 +977,6 @@ fn changes_body(ui: &mut Ui, changes: &Changes, chosen: Option<&str>) -> Option<
 pub fn file_tree(
     ui: &mut Ui,
     workspace: &mut Workspace,
-    draft: &mut String,
     changes: &Changes,
     dividers: &mut layout::Dividers,
     width: f32,
@@ -1089,7 +998,7 @@ pub fn file_tree(
     // doen, want de bron laat één klik één popup openen en die sluit bij de volgende.
     let mut copied: Option<String> = None;
     frame.show(ui, |ui| {
-        refresh = Some(file_tree_controls(ui, workspace, draft, changes.meta(), changes.paths()));
+        refresh = Some(file_tree_controls(ui, workspace, changes.meta(), changes.paths()));
         // De verdeeling die de origineler met een `JSplitPane` tekent: boom boven, changes eronder,
         // en tussen die twee een greep die iemand kan pakken (`FileTreePanel.kt:103-113`).
         copied = changes_band(ui, changes, chosen.as_deref(), dividers);
@@ -1231,7 +1140,7 @@ impl FileStatus {
 // ---------------------------------------------------------------------------------------------
 
 /// Het zout van de twee pane-toggles, zodat een test ze op adres terugvindt (idem `SIDEBAR_ADD`,
-/// `TABSTRIP`, `FOLDER_OPEN`): een expliciet id registreert zijn klik op exact dát adres.
+/// `TABSTRIP`): een expliciet id registreert zijn klik op exact dát adres.
 pub const PANEL_TOGGLES: &str = "panel-toggles";
 
 /// De afmeting van een toggle-knop. De kopstrook is één rij hoog en deze knop vult die; de breedte
