@@ -167,7 +167,13 @@ pub fn left(ui: &mut Ui, workspace: &mut Workspace, meta: Option<&GitMeta>) -> b
     let frame = Panel::left("workspace")
         .resizable(true)
         .default_size(220.0)
-        .min_size(150.0)
+        // 146 pt, niet 150: de vloer is een gevolg van de twee knoppen en niet van smaak. De
+        // budgetten in tests/folder_row.rs (64,4 + 40,2 pt) plus hun twee ruimtes zijn 110,6 pt, en
+        // de breedste meting in die test — `Open` op een vloer van 130 pt — eindigt pas voorbij de
+        // rand; 146 pt is de vloer waaronder die rij per constructie wél sluit. `min_size` is de
+        // grens die egui bij een sleep of een klein venster in acht neemt (panel.rs:763 clamped
+        // daartoe terug), dus een smaller venster komt er niet onder.
+        .min_size(146.0)
         .frame(egui::Frame::side_top_panel(ui.style()));
     frame.show(ui, |ui| {
         ui.strong("Workspace");
@@ -175,16 +181,55 @@ pub fn left(ui: &mut Ui, workspace: &mut Workspace, meta: Option<&GitMeta>) -> b
         // folder and never a second display of the current one -- that is what the folder line
         // below is for.
         let mut draft = String::new();
-        let field = ui.add_sized(
-            [ui.available_width(), 20.0],
-            egui::TextEdit::singleline(&mut draft).hint_text("folder path").desired_width(f32::INFINITY),
-        );
-        // Enter or the button commits a typed path; an empty field means "keep what is open", so it
-        // never wipes the panel on a stray Enter.
+        // Eén rij: het veld zo breed als overblijft, de knoppen ernaast. Het veld blijft de plek om
+        // te typen — een dialoog die een pad kiest, is een toevoeging en geen vervanging, want een
+        // pad dat iemand uit het hoofd typt, is sneller dan drie klikken door een boom.
+        //
+        // De breedtes worden hierbuiten bepaald en niet door egui verdeeld. Meten eerst (zie
+        // tests/folder_row.rs): `desired_width(f32::INFINITY)` maakt het veld zo breed als de
+        // beschikbare ruimte — in een root-UI 10 000 pt — en `Ui::put` knipt die.rect niet af, dus
+        // elke knop ernaast verdween voorbij de rand: stil, zonder foutmelding, en op een plaatje niet
+        // te onderscheiden van "erbij vergeten". Uitsluitend `add_sized` met een eindige breedte houdt
+        // de rij binnen de paneel, en dan sluit die per constructie aan op de rand.
+        let row_width = ui.available_width();
+        let spacing = ui.spacing().item_spacing.x;
+        // De twee knoppen meten 64,3 en 40,2 pt (gemeten in tests/folder_row.rs); 64,4 en 40,2 is
+        // naar boven afgerond, dus de rest die het veld krijgt is nooit te ruim en de rij nooit te vol.
+        let buttons_width = 64.4 + 40.2 + spacing * 2.0;
+        let field_width = (row_width - buttons_width).max(0.0);
+        let mut field: Option<egui::Response> = None;
+        let mut browse = false;
+        let mut open_clicked = false;
+        ui.horizontal(|ui| {
+            // `with_main_wrap(false)`: zonder die regel wrapt de tweede knop naar een eigen rij zodra
+            // het veld op 0 staat, en dan valt de rij alsnog buiten de rand (gemeten bij 130 pt).
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(false), |ui| {
+                field = Some(
+                    ui.add_sized([field_width, 20.0], egui::TextEdit::singleline(&mut draft).hint_text("folder path")),
+                );
+                // De native kiezer van het besturingsselt, niet een eigen boom in een venster: mappen
+                // tonen, snelkoppelingen herkennen en de voorkeur van iemand vinden, is het werk van
+                // de zoeker die er al is.
+                if ui.small_button(BROWSE_LABEL).clicked() {
+                    browse = true;
+                }
+                open_clicked = ui.small_button("Open").clicked();
+            });
+        });
+        if browse {
+            // De kiezer vult het veld, hij opent niet. Daardoor blijft `requested` hieronder de enige
+            // deur naar `Workspace::cwd`, en een gekozen pad doorloopt hetzelfde commit-pad als een
+            // getypt pad — inclusief het verversen van de boom en de git-vraag.
+            if let Some(chosen) = pick_folder() {
+                draft = chosen;
+            }
+        }
+        // Enter of de knop schrijft een getypt pad weg; een leeg veld betekent "houd wat open is", dus
+        // een dwaal-Enter wist de paneel nooit. Een gekozen pad staat in hetzelfde veld en volgt dus
+        // dezelfde weg.
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-        let commit = field.lost_focus() && enter;
-        let button = ui.small_button("Open").clicked();
-        if (commit || button) && !draft.trim().is_empty() {
+        let commit = field.is_some_and(|field| field.lost_focus()) && enter;
+        if (commit || open_clicked) && !draft.trim().is_empty() {
             requested = Some(draft.trim().to_string());
         }
         ui.separator();
@@ -231,6 +276,23 @@ pub fn left(ui: &mut Ui, workspace: &mut Workspace, meta: Option<&GitMeta>) -> b
         return true;
     }
     false
+}
+
+/// Het label op de kiezer. Als constante, zodat tests/folder_row.rs dezelfde tekst tekent als de
+/// paneel: de breedtes in die rij zijn erop gemeten, en een label dat ergens stillen verandert,
+/// verandert die maten.
+pub const BROWSE_LABEL: &str = "Browse\u{2026}";
+
+/// Vraag het besturingsselt om een map en geef het gekozen pad terug.
+///
+/// `Option` en geen paniek: iemand die de dialoog wegklikt, heeft niets gekozen, en dat is geen
+/// fout. Losgetrokken van de rij erboven, zodat datgene wat er ná een keuze gebeurt — het pad door
+/// hetzelfde commit-pad als een getypt pad sturen — te lezen is zonder een dialoog te openen.
+///
+/// An unnamed function rather than a method on `Workspace`, because it changes nothing the panel
+/// owns: the chosen path re-enters as a draft, and `Workspace::cwd` still has exactly one writer.
+fn pick_folder() -> Option<String> {
+    rfd::FileDialog::new().set_title("Choose a folder").pick_folder().map(|path| path.display().to_string())
 }
 
 /// Paint one directory level, descending through the headers the user has opened.

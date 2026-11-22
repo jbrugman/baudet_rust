@@ -15,11 +15,29 @@
 //!    channels is both simpler and free of lock ordering.
 
 mod app;
-mod palette;
+mod models;
+// Publiek zodat tests/tabs.rs dat palet tekent en niet een standaard-`Visuals`: de vormen waarmee
+// die test maten vergelijkt, zijn de vormen van dit venster.
+pub mod palette;
 mod panels;
 mod rows;
 mod settings;
 
 pub use app::{run, run_from, Startup, TranscriptApp};
+
+// De adressen die tests/tabs.rs nodig heeft om te vragen "staat díe widget getekend". Alleen widgets
+// met een expliciet id zijn van buiten te vinden — een `UiBuilder::id(..)`-wikkel met click-sense op
+// `root_ui_id(ctx).with(..)`, zoals de tabknoppen (`TABSTRIP`) en de modelknop (`SELECTED_ROW`). Een
+// `.id_salt`-veld adresseert relatief aan zijn ouder-`Ui` en is die keten hier bewust níét: geen
+// enkele root-keten gaf dat adres (gemeten), dus de velden worden niet op adres getest.
+pub use app::{root_ui_id, TABSTRIP};
+pub use models::SELECTED_ROW;
 pub use palette::DiffLine;
 pub use rows::Row;
+
+// Het tabbladtype hoort bij de publiek testbare grens: tests/tabs.rs tekent er een na met dezelfde
+// knoppen die een persoon indrukt, en heeft daar zowel de startkeus (`with_tab`) als de lezing van
+// het antwoord (`tab()`) voor nodig.
+pub use app::Tab;
+pub use models::body as models_body;
+pub use settings::{body as settings_body, SettingsCommand, SettingsEvent, SettingsView};

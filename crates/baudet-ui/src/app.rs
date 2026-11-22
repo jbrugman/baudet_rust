@@ -16,6 +16,7 @@
 //! already protect -- one reader, folded while draining, stops when the stream closes -- and a
 //! frame clock that stops draining would otherwise be a second, subtly different turn loop.
 
+use crate::models::{self};
 use crate::palette;
 use crate::panels::{self, Changes, Workspace};
 use crate::rows::Row;
@@ -29,7 +30,7 @@ use baudet_backend::Backend;
 use baudet_core::{AgentMessageItem, Item, ItemStatus, ThreadEvent};
 use baudet_settings::Provider;
 use eframe::egui;
-use egui::{CentralPanel, ColorImage, Frame, Panel, ScrollArea};
+use egui::{CentralPanel, ColorImage, Frame, Id, Panel, ScrollArea, UiBuilder};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -48,6 +49,35 @@ enum Intent {
         reasoning: Option<String>,
         max_output_tokens: Option<u32>,
     },
+}
+
+/// Which body the middle panel shows.
+///
+/// A three-way choice rather than a boolean for "settings open", because the reference app's middle
+/// is a tabbed pane — `Main.kt:130-134` adds Chat, Modellen and Ingestellingen to one `JTabbedPane` —
+/// and a boolean plus an overlay produced exactly the complaint this replaces: the form floated over
+/// the transcript, and its status line and Save button fell outside the window. One state cannot be
+/// in two tabs, so "is settings showing" and "is chat showing" are one question with three answers
+/// instead of two flags that can both claim the same rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Chat,
+    Models,
+    Settings,
+}
+
+impl Tab {
+    /// The order and the words of the strip. `const` so the tabstrip and a test enumerate the same
+    /// three without either owning a copy of the list.
+    pub const ALL: [Tab; 3] = [Tab::Chat, Tab::Models, Tab::Settings];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Chat => "Chat",
+            Tab::Models => "Models",
+            Tab::Settings => "Settings",
+        }
+    }
 }
 
 /// The app's own state: the last painted snapshot and the buttons' words. No conversation truth
@@ -80,9 +110,9 @@ pub struct TranscriptApp {
     workspace: Workspace,
     /// The right panel: the paths git reports for that folder.
     changes: Changes,
-    /// Whether the settings panel is painted. Owned by the window and toggled from the header, so
-    /// one boolean answers "is it showing" for both the header label and the panel.
-    settings_open: bool,
+    /// Which body the middle panel shows. `Some` is a tab a person chose; `None` is the chat, which
+    /// is what a window shows before anyone picks and is not a fourth state — see [`Tab`].
+    active_tab: Option<Tab>,
     /// Why this window is not talking to a server, when `--live` asked it to. `None` for the normal
     /// scripted start, which is not a fallback and must not read as one.
     fell_back: Option<String>,
@@ -131,7 +161,7 @@ impl TranscriptApp {
             shot_send: None,
             workspace: Workspace::default(),
             changes: Changes::default(),
-            settings_open: false,
+            active_tab: None,
             fell_back: None,
             settings,
             settings_tx,
@@ -165,11 +195,10 @@ impl TranscriptApp {
         TranscriptApp::new(backend)
     }
 
-    /// Open the settings panel on startup. A scripted picture has no clicks, so this is the only way
-    /// to draw a panel whose default is closed; for a person it is the same state the header button
-    /// reaches.
-    pub fn with_settings_open(mut self) -> TranscriptApp {
-        self.settings_open = true;
+    /// Show `tab` on startup. A scripted picture has no clicks, so this is the only way to draw a tab
+    /// whose default is the chat; for a person it is the same state the strip's button reaches.
+    pub fn with_tab(mut self, tab: Tab) -> TranscriptApp {
+        self.active_tab = Some(tab);
         self
     }
 
@@ -209,7 +238,7 @@ impl TranscriptApp {
 
     /// The demo conversation the window ships with, so a first run shows a real transcript: a
     /// streamed answer, a tool row, a plan, and an answer that arrives as raw SSE lines.
-    pub(crate) fn demo_backend() -> Arc<ScriptedBackend> {
+    pub fn demo_backend() -> Arc<ScriptedBackend> {
         let answer = Script::new()
             .event(ThreadEvent::TurnStarted { thread_id: TH.into(), turn_id: T1.into() })
             .event(start(T1, agent(T1, "")))
@@ -257,7 +286,7 @@ impl TranscriptApp {
         Arc::new(ScriptedBackend::new(vec![answer, echo]))
     }
 
-    fn paint(&mut self, ui: &mut egui::Ui) {
+    fn paint_layout(&mut self, ui: &mut egui::Ui) {
         // Side panels first. egui allocates a panel's strip from whatever the enclosing `Ui` still
         // has at the moment of the call, so a central panel painted first would take the whole
         // width and leave the flanks to overlap it.
@@ -306,67 +335,182 @@ impl TranscriptApp {
                 ui.label(self.status.clone());
                 ui.separator();
                 ui.label(format!("{} rows", self.rows.len()));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // The one owner of "is the panel showing": this button and the flag. The panel
-                    // itself never decides its own visibility, so the label can never lie about it.
-                    if ui.selectable_label(self.settings_open, "Settings").clicked() {
-                        self.settings_open = !self.settings_open;
+            });
+        });
+
+        let tab = self.tab();
+        // The composer is part of the chat, not of the window: `ChatPanel` *is* the chat tab in the
+        // reference (`Main.kt:127-131`), so a box that sends a turn has no business standing under the
+        // settings form, where Enter belongs to a field. `Panel::bottom` is still the right strip for
+        // it — a bottom bar is where a person looks to type — it is just only painted for this tab.
+        if tab == Tab::Chat {
+            Panel::bottom("composer").show(ui, |ui| self.composer(ui));
+        }
+
+        CentralPanel::default().show(ui, |ui| {
+            // The strip first, in its own strip rather than as the body's first row: a `JTabbedPane`
+            // puts its tabs on the edge of its content for the same reason — three buttons that vanish
+            // when a long transcript scrolls are not a way to leave a tab.
+            Panel::top("tabs").show(ui, |ui| {
+                // De knoppen ankeren op de wortel-Ui van het venster, niet op deze strook.
+                // `Panel::top` en zijn `Frame` dragen op deze egui-build geen instelbaar adres, en de
+                // `Ui` die ze doorgeven zit in de gemeten keten `wortel·kind·kind·tabs·kind`, dus van
+                // buiten niet te reconstrueren; de wortel-Ui van het venster wél (zie `root_ui_id`).
+                // Een `UiBuilder::id(..)`-wikkel met click-sense registreert zijn klik op exact dat
+                // anker plus zijn zout — gemeten, twee passen later leesbaar — en dát is wat een test
+                // terugvindt zonder de paneel-lay-out na te bouwen. De tekst erin is een kaal label:
+                // de klik leeft op de wikkel, niet op de label.
+                let root = root_ui_id(ui.ctx());
+                ui.horizontal_wrapped(|ui| {
+                    for candidate in Tab::ALL {
+                        let clicked = ui
+                            .scope_builder(
+                                UiBuilder::new()
+                                    .id(root.with((TABSTRIP, candidate.label())))
+                                    .sense(egui::Sense::click()),
+                                |ui| {
+                                    ui.add(egui::Label::new(candidate.label()).selectable(false));
+                                },
+                            )
+                            .response
+                            .clicked();
+                        if clicked {
+                            self.active_tab = Some(candidate);
+                        }
                     }
                 });
             });
-        });
-
-        Panel::bottom("composer").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let response = ui.add(
-                    egui::TextEdit::multiline(&mut self.input)
-                        .hint_text("Ask something…  (Enter sends)")
-                        .desired_rows(2)
-                        .lock_focus(false)
-                        .desired_width(f32::INFINITY),
-                );
-                // Enter sends, Shift+Enter is a newline: the one shortcut the app cannot do
-                // without, because the same box has to grow and submit.
-                let send_requested =
-                    ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift) && response.has_focus();
-                let send_clicked = ui.add_enabled(!self.busy, egui::Button::new("Send")).clicked();
-                if (send_clicked || send_requested) && !self.busy && !self.input.trim().is_empty() {
-                    let text = std::mem::take(&mut self.input);
-                    let _ = self.intents.send(Intent::Submit(text));
-                    self.busy = true;
-                    self.status = "starting".to_string();
-                }
-                if ui.add_enabled(self.busy, egui::Button::new("Stop")).clicked() {
-                    let _ = self.intents.send(Intent::Stop);
-                }
-            });
-        });
-
-        CentralPanel::default().show(ui, |ui| {
-            // The body font is set once, in one place, rather than per row: 24 rows each nudging
-            // the style would make the effective size depend on what was painted last.
-            ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
-                if self.rows.is_empty() {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(40.0);
-                        ui.label("No transcript yet. Type below and press Enter.");
-                    });
-                }
-                for row in &self.rows {
-                    paint_row(ui, row);
-                }
-            });
+            // One scroll area for whichever body is showing. It is what makes the form's own height
+            // a non-question, which is exactly what the overlay could not answer: a 900 pt form in a
+            // 500 pt window scrolls instead of pushing its Save button off screen.
+            let transcript = tab == Tab::Chat;
+            ScrollArea::vertical()
+                .id_salt("center-scroll")
+                .auto_shrink([false, false])
+                // `stick_to_bottom` only for the transcript: it is the body that grows by itself. A
+                // form and a list must stay wherever the person left them when a repaint adds a line
+                // under them, or a keystroke in a token field would jump the view.
+                .stick_to_bottom(transcript)
+                .show(ui, |ui| match tab {
+                    Tab::Chat => self.transcript(ui),
+                    Tab::Models => models::body(ui, &mut self.settings, &self.settings_tx),
+                    Tab::Settings => settings::body(ui, &mut self.settings, &self.settings_tx),
+                });
             ui.output_mut(|o| {
                 o.cursor_icon = if self.busy { egui::CursorIcon::Progress } else { egui::CursorIcon::Default }
             });
         });
+    }
+}
 
-        // The settings panel floats over the transcript, painted last so it sits on top, and only
-        // when open. It clears `settings_open` through the same flag the header button sets, so the
-        // pane's own close button and the header can never disagree about whether it is showing.
-        if self.settings_open {
-            settings::panel(ui, &mut self.settings, &self.settings_tx, &mut self.settings_open);
+impl TranscriptApp {
+    /// Which body the window shows. Public so a test can say which tab it painted; the paint pass
+    /// reads the same field the strip writes, so this can never disagree with the screen.
+    pub fn tab(&self) -> Tab {
+        self.active_tab.unwrap_or(Tab::Chat)
+    }
+
+    /// Frames drawn so far. Public for the same reason as [`TranscriptApp::paint`]: a test driving the
+    /// paint pass has to know whether this is the first frame, which is the only frame the window's
+    /// own repaint request has not made yet.
+    pub fn frames(&self) -> u32 {
+        self.frames
+    }
+
+    /// The window's layout, as a plain paint pass.
+    ///
+    /// A thin public entry on the one layout function `App::ui` already calls, so the pass a test
+    /// drives and the pass a person sees cannot drift apart. `App::ui` itself is not drivable from a
+    /// test: it wants an `&mut eframe::Frame`, which only a running integration owns.
+    pub fn paint(&mut self, ui: &mut egui::Ui) {
+        self.paint_layout(ui);
+    }
+}
+
+/// Het zout van de tabknoppen, en dat van het vraagveld.
+///
+/// De adressen zijn gemeten, niet gekozen op gevoel. Met een losse proef op deze build:
+///  * een widget met `.id_salt("veld")` krijgt `ui.id().with(IdSalt::new("veld"))` — een adres dat
+///    meeschuift zodra de `Ui` zelf verschuift, dus alleen reproduceerbaar vanaf de wortel van het
+///    venster. Dat kan hier: het vraagveld en het endpointveld staan in het middenvlak van een tab en
+///    niet in een verspringende lijst;
+///  * een `push_id(salt, ..)`-wikkel reproduceert dat adres van buitenaf níet — de knop erin erft de
+///    auto-id van de kind-`Ui` (`Id::new(..)` plus een op-teller), en geen enkele combinatie van `salt`
+///    met de wortel gaf hetzelfde adres: gemeten met `Id::new(salt)`, `root.with(salt)`,
+///    `root.with(IdSalt::new(salt))` en `flat.with(salt)`.
+///
+/// De tabknoppen staan daarom in een `UiBuilder::id(..)`-wikkel met click-sense onder de wortel-`Ui`:
+/// die wikkel registreert zijn klik op `root_ui_id(ctx).with((TABSTRIP, label))`, en dát is wat een
+/// test terugvindt zonder de paneel-lay-out na te bouwen. Een label erin is alleen de tekst; de knop
+/// zelf (`egui::Button`, `selectable_label`) zou een eigen auto-adres dragen dat van buiten niet te
+/// reconstruëren is, dus de klik wordt op de wikkel geteld, niet op die knop.
+pub const TABSTRIP: &str = "tabstrip";
+
+/// Het stabiele zout van het vraagveld.
+///
+/// `.id_salt` geeft het veld een vast adres *relatief aan zijn ouder-`Ui`*, dus een toevallige
+/// auto-id die zou meeschuiven zodra er boven in de composer iets bij komt. Het is géén van buiten
+/// reconstrueerbaar root-adres zoals `TABSTRIP`: de composer zit in een `Panel::bottom`, en geen
+/// enkele root-keten gaf dat adres terug (gemeten), dus tests/tabs.rs test de composer niet op adres
+/// maar de tabblokken op klik. Het zout blijft nuttig voor de focusvolgorde binnen het venster.
+pub const COMPOSER_FIELD: &str = "composer-field";
+
+/// De `Ui` waarin deze vensters hun middenvlak tekenen, zoals een test die van buiten benoemt.
+///
+/// `run_ui` maakt hem zelf, met dit adres, en `App::ui` schildert het venster in die `Ui`. Een kaal
+/// `.id_salt("veld")`-veld in het middenvlak eindigt dus op `root_ui_id(ctx).with(..)`, hoe breed of
+/// smal het venster ook is — de keten hangt aan de viewport-id van het venster, niet aan de geometrie
+/// van een paneel. Eén regel hier houdt test en app aan dezelfde keten.
+pub fn root_ui_id(ctx: &egui::Context) -> Id {
+    Id::new((ctx.viewport_id(), "__top_ui"))
+}
+
+impl TranscriptApp {
+    /// The transcript rows.
+    ///
+    /// Split out of the paint pass rather than kept inline, because "which body" is now a choice and
+    /// the choice should be one `match` in one place. Unchanged in every other respect, including
+    /// that it inherits the style it is given: 24 rows each nudging the style would make the
+    /// effective text size depend on what was painted last.
+    fn transcript(&self, ui: &mut egui::Ui) {
+        if self.rows.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.label("No transcript yet. Type below and press Enter.");
+            });
         }
+        for row in &self.rows {
+            paint_row(ui, row);
+        }
+    }
+
+    /// The ask-box, its Send and its Stop. See the call site for why this strip is the chat's.
+    fn composer(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let response = ui.add(
+                egui::TextEdit::multiline(&mut self.input)
+                    // Het veld is het bewijs dat de chat-tab zijn composer heeft: zie `COMPOSER_FIELD`.
+                    .id_salt(COMPOSER_FIELD)
+                    .hint_text("Ask something…  (Enter sends)")
+                    .desired_rows(2)
+                    .lock_focus(false)
+                    .desired_width(f32::INFINITY),
+            );
+            // Enter sends, Shift+Enter is a newline: the one shortcut the app cannot do
+            // without, because the same box has to grow and submit.
+            let send_requested =
+                ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift) && response.has_focus();
+            let send_clicked = ui.add_enabled(!self.busy, egui::Button::new("Send")).clicked();
+            if (send_clicked || send_requested) && !self.busy && !self.input.trim().is_empty() {
+                let text = std::mem::take(&mut self.input);
+                let _ = self.intents.send(Intent::Submit(text));
+                self.busy = true;
+                self.status = "starting".to_string();
+            }
+            if ui.add_enabled(self.busy, egui::Button::new("Stop")).clicked() {
+                let _ = self.intents.send(Intent::Stop);
+            }
+        });
     }
 }
 
@@ -474,7 +618,7 @@ impl eframe::App for TranscriptApp {
         // Row spacing belongs to this Ui, set once before any row is painted. Per-row style
         // nudges would make the effective spacing depend on what was painted last.
         ui.style_mut().spacing.item_spacing.y = 6.0;
-        self.paint(ui);
+        self.paint_layout(ui);
         // A streaming turn must repaint on its own; egui otherwise waits for input and would show
         // a half-finished answer until the user moved the mouse.
         if self.busy {
@@ -1101,7 +1245,7 @@ pub fn run_from(startup: Startup) -> eframe::Result {
                 app = app.with_workspace(path);
             }
             if settings {
-                app = app.with_settings_open();
+                app = app.with_tab(Tab::Settings);
             }
             if let Some(address) = &endpoint {
                 app = app.with_endpoint(&address.to_string_lossy());

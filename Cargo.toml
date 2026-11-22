@@ -32,9 +32,6 @@ tempfile = "3"
 eframe = { version = "=0.36", default-features = false }
 egui = "=0.36"
 egui_extras = { version = "=0.36", default-features = false }
-# SVG icons rasterised at the exact on-screen size, which is the reason `svg` is wanted and why
-# `image` comes along: ArtCraft rasterises Lucide the same way rather than shipping PNGs per dpi.
-resvg = "=0.45"
 # A real backend needs an HTTP client and a blocking pool; declared at the workspace so the GUI
 # and the transport cannot drift apart on TLS backend choice.
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }

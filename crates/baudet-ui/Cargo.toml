@@ -40,6 +40,16 @@ png = "0.18"
 # already depend on this exact `winit`, so it cannot disagree with the one the window is built on.
 # Gated to macOS because that is the only platform whose builder has the method, and because a
 # version bump of eframe on another platform must not look like a breaking change here.
+# De native mapkiezer naast het folder-pad. Bewust een crate en geen eigen boom-browser: het
+# wijzingsverhaal van dit project is dat wat ArtCraft al bouwde niet opnieuw wordt uitgevonden, en
+# een eigen dialoog in egui zou precies dat zijn. De macOS-tak zit in rfd zelf (objc2-app-kit,
+# gemeten in `cargo tree`); de optionele Linux- en Windows-takken staan met `default-features =
+# false` uit, en wat die keus op die platforms met de kiezer doet, is hier niet gemeten — er staat
+# geen cross-target geïnstalleerd, dus dat is een aanname en geen bewering. `tokio`-vriendelijk is
+# het niet: de dialoog blokkeert, dus hij draait niet op een paint-pass (zie de workerregel in dit
+# paneel) maar wordt vanuit de UI-thread aangeroepen, waar hij dat ook doet in elke desktop-app.
+rfd = { version = "0.18", default-features = false }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 winit = "0.30"
 

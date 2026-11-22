@@ -22,7 +22,7 @@
 use crate::palette;
 use baudet_backend::protocol::Protocol;
 use baudet_settings::{ListingError, Model, ReadOutcome, Settings, SettingsFile, WriteError};
-use egui::{ScrollArea, Ui};
+use egui::Ui;
 
 /// A command the panel sends to the settings worker. Kept to two, because those are the only two
 /// things this panel can decide about the outside world: look something up, or remember it.
@@ -345,61 +345,141 @@ impl SettingsView {
     pub fn listing_answered(&self) -> bool {
         self.listing_answered
     }
+
+    /// The endpoint as typed, not as stored: the models tab must name the address it asked, which is
+    /// the address in the box. Trimmed, because that is how every command and status line here spells it.
+    pub fn endpoint(&self) -> String {
+        self.base_url.trim().to_string()
+    }
+
+    /// The listing the model picker is offering. Shared rather than copied so the settings form and
+    /// the models tab cannot show two different answers to "which models are on this server".
+    pub fn models(&self) -> &[Model] {
+        &self.models
+    }
+
+    /// The chosen model id, `None` meaning "whatever the endpoint offers first".
+    pub fn chosen_model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// Point the choice at `id`. Kept here rather than handed out as `&mut`, so the one field that
+    /// decides which model a turn asks cannot be written from outside this file.
+    pub fn choose_model(&mut self, id: &str) {
+        self.model = Some(id.to_string());
+    }
+
+    /// The last thing the panel has to say, for the tab that shares the panel's state.
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    /// Whether a listing is in flight, so a second request cannot stack up behind the first.
+    pub fn is_fetching(&self) -> bool {
+        self.fetching
+    }
+
+    /// In words: what the picker holds for the endpoint in the box. Three states, one sentence each,
+    /// and the empty list says which of the two kinds of empty it is — "never asked" and "asked, and
+    /// this server has none" are different facts and a person needs the right one.
+    ///
+    /// `fetched_for` is the record that an answer arrived for *some* endpoint; `models` is the answer
+    /// the picker still shows. A failed refresh keeps the old list (see `apply_event`), so the list
+    /// alone cannot say whether it is current, and `fetched_for` alone cannot say whether it is empty.
+    pub fn listing_words(&self) -> &'static str {
+        if !self.models.is_empty() {
+            ""
+        } else if self.fetched_for.is_some() {
+            "this endpoint lists none"
+        } else {
+            "not fetched yet"
+        }
+    }
+
+    /// Use the model selected in the models tab: the same choice the picker's row would have stored,
+    /// sent through the same Save the Save button sends.
+    ///
+    /// Deliberately not a second command and not a direct write to the file. Two writers to
+    /// `~/.baudet/settings.json` would disagree the way two boolean owners of one panel did, and the
+    /// store's own refusal of a file it cannot rewrite (`WouldDiscard`) only protects a save that
+    /// goes through it. So a pick lands in the field here, and `draft()` — with its token-field check
+    /// and the store's write — stays the single path to disk. The session hears about it through the
+    /// `Adopted` report a save produces, which the window already forwards.
+    pub fn request_use_selected(&mut self, tx: &std::sync::mpsc::Sender<SettingsCommand>) {
+        if self.blocked {
+            // The panel's own button refuses in this state; a second door must agree with it rather
+            // than discover the store's refusal after a click that looked like a choice.
+            self.status = "Your settings file is unreadable. Saving is disabled until it is fixed.".to_string();
+            return;
+        }
+        match self.draft() {
+            Ok(settings) => {
+                self.status = "saving…".to_string();
+                let _ = tx.send(SettingsCommand::Save(settings));
+            }
+            Err(problem) => self.status = problem,
+        }
+    }
 }
 
-/// The settings panel, as an overlaying window rather than a fourth flank. Three side panels plus a
-/// transcript already fill 1040 points; a fourth strip would leave the transcript nothing, so settings
-/// float over the transcript and can be closed, which a person expects from a panel that is not a
-/// permanent part of the layout.
+/// Het stabiele zout van het endpointveld.
 ///
-/// `open` is the caller's — its header button is the other half of the toggle, and `Window::open` lets
-/// the panel's own close button clear it, so the button and the pane can never disagree. Any button
-/// pressed inside is sent to the worker through `tx` before this returns — at most one fetch and one
-/// save, because those are the only buttons. State moves through `view` only, and commands go out by
-/// value, so a click commits once against the state that produced it.
-pub fn panel(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<SettingsCommand>, open: &mut bool) {
+/// `.id_salt` houdt het adres vast *relatief aan zijn ouder-`Ui`*, zodat een auto-id niet meeschuift
+/// zodra er boven in het formulier iets bij komt. In tegenstelling tot een tabknop (`TABSTRIP`) is dit
+/// géén van buiten reconstrueerbaar root-adres: het formulier zit in de scroll-area van een tab, en
+/// geen enkele root-keten gaf dit adres terug (gemeten). tests/tabs.rs bewijst het settings-tabblad
+/// daarom met een klik op de strip (`app.tab()`), niet met dit adres; het zout blijft nuttig voor de
+/// focusvolgorde en om een repaint het veld niet zijn toetsenbordfocus te laten verliezen.
+pub const FIELD_ENDPOINT: &str = "settings-endpoint-field";
+
+/// Het ingestformulier, getekend in de `Ui` van de aanroeper: het middenvlak van een tab, niet als
+/// venster boven het transcript.
+///
+/// Het was een `egui::Window`, en dat verbergde de klacht "overheengepropt" in plaats van op te
+/// lossen: de statusregel stond keurig in de plaatjes die er van getekend zijn, terwijl de status en
+/// Save van het paneel er zelf buiten vielen en het formulier over de rijen heen lag. De
+/// referentie-app kent geen ingest-venster — `Main.kt:130-134` zet Chat, Modellen en Ingestellingen
+/// als tabs in het middenvlak, en de kop bevat daar alleen de pane-toggles. Deze functie tekent dus
+/// in dezelfde `Ui` waarin de transcript-rijen getekend worden, en de vraag "hoe hoog mag dit
+/// formulier" verdwijnt: het middenvlak rekt mee, en de `ScrollArea` van de tab vangt een te small
+/// venster op.
+///
+/// De breedte blijft 360 pt — wat de velden in het venster ook hadden, dus geen enkel veld wordt
+/// korter — met `available_width` als plafond. Het formulier is een stapel van één kolom; uitrekken
+/// tot 1400 pt zou tekstvelden maken langer dan iemand kan overzien. Elke veldbreedte wordt hier uit
+/// die beschikbare breedte opgemaakt, dus een smaller venster geeft smallere velden en nooit een
+/// afgekapte rij.
+///
+/// Any button pressed inside is sent to the worker through `tx` before this returns — at most one
+/// fetch and one save, because those are the only buttons. State moves through `view` only, and
+/// commands go out by value, so a click commits once against the state that produced it.
+pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<SettingsCommand>) {
     let mut commands: Vec<SettingsCommand> = Vec::new();
-    egui::Window::new("Settings")
-        .id(egui::Id::new("settings-panel"))
-        .open(open)
-        .collapsible(false)
-        // Zonder anker kiest egui een positie, en die zette het paneel hier de helft boven de
-        // venstertop: precies de statusregel ("N models from ...") en het transcript eraf.
-        .default_pos([96.0, 64.0])
-        .default_size([360.0, 340.0])
-        .resizable(true)
-        .frame(egui::Frame::side_top_panel(ui.style()))
-        .show(ui, |ui| {
-            ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                // De status bovenaan: hij staat of naast de Fetch-knop die hem veroorzaakt, of onder
-                // aan het formulier. Hier is hij altijd het eerste wat na een listing te lezen is.
-                if !view.status.is_empty() {
-                    ui.label(dim(&view.status));
-                    ui.separator();
-                }
-                endpoint_row(ui, view, &mut commands);
-                ui.separator();
-                model_row(ui, view);
-                ui.separator();
-                reasoning_row(ui, view);
-                tokens_row(ui, view);
-                ui.separator();
-                key_row(ui, view);
-                if view.blocked {
-                    ui.separator();
-                    ui.colored_label(palette::DIFF_REMOVED, "Your settings file is unreadable.");
-                    ui.label(dim(
-                        "Saving is disabled until it is fixed, so a save can never replace what is still in that file.",
-                    ));
-                }
-                ui.separator();
-                save_row(ui, view, &mut commands);
-                ui.separator();
-                // The status line last: it is where a fetch or save leaves its words, and the reference
-                // app puts the datapad in the same place.
-                ui.label(dim(view.status.clone()));
-            });
-        });
+    // 360 pt: het plafond dat het venster gaf, niet de breedte van het middenvlak. Het formulier is
+    // één kolom, en elke veldbreedte hieronder wordt uit deze breedte opgemaakt.
+    ui.set_width(ui.available_width().min(360.0));
+    endpoint_row(ui, view, &mut commands);
+    ui.separator();
+    model_row(ui, view);
+    ui.separator();
+    reasoning_row(ui, view);
+    tokens_row(ui, view);
+    ui.separator();
+    key_row(ui, view);
+    if view.blocked {
+        ui.separator();
+        ui.colored_label(palette::DIFF_REMOVED, "Your settings file is unreadable.");
+        ui.label(dim("Saving is disabled until it is fixed, so a save can never replace what is still in that file."));
+    }
+    ui.separator();
+    save_row(ui, view, &mut commands);
+    // Eén status, onderaan: het is de plek waar een listing of een save zijn woorden achterlaat, en
+    // de referentie-app zet het datapad daar ook. Leeg is geen regel: dan staat er niets, ook geen
+    // lege lijn met een scheiding erboven.
+    if !view.status.is_empty() {
+        ui.separator();
+        ui.label(dim(&view.status));
+    }
     for command in commands {
         let _ = tx.send(command);
     }
@@ -410,6 +490,10 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
     let response = ui.add_sized(
         [ui.available_width(), 20.0],
         egui::TextEdit::singleline(&mut view.base_url)
+            // Het zout is het adres van tests/tabs.rs: een test telt dit veld mee als bewijs dat het
+            // formulier getekend is. Waarom het adres hier aan de body-`Ui` hangt en niet vlak op de
+            // wortel staat — en wat de test daarvoor moet samenstellen — staat bij `FIELD_ENDPOINT`.
+            .id_salt(FIELD_ENDPOINT)
             .hint_text("http://127.0.0.1:8000/v1")
             .desired_width(f32::INFINITY),
     );
@@ -505,7 +589,7 @@ fn model_row(ui: &mut Ui, view: &mut SettingsView) {
 /// A model that says nothing gets its bare name, so the picker does not grow an "unknown" column:
 /// a server without a window field — measured: LM Studio, which returns no length field at all —
 /// lists models just as well as one that has it.
-fn row_for(model: &Model) -> String {
+pub(crate) fn row_for(model: &Model) -> String {
     match model.window_label() {
         Some(window) => format!("{} · {}", model.display(), window),
         None => model.display().to_string(),
