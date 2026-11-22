@@ -49,4 +49,7 @@ pub use sidebar::{Confirm, NameAsk, Selection, SidebarModel, SidebarOutcome};
 // knoppen die een persoon indrukt, en heeft daar zowel de startkeus (`with_tab`) als de lezing van
 // het antwoord (`tab()`) voor nodig.
 pub use app::Tab;
-pub use settings::{body as settings_body, SettingsCommand, SettingsEvent, SettingsView};
+pub use settings::{
+    body as settings_body, models_body, SettingsCommand, SettingsEvent, SettingsView, MODELS_FETCH,
+    MODELS_USE,
+};
