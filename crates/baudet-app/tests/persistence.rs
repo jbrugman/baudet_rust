@@ -107,7 +107,7 @@ fn een_beurt_overleeft_het_handvat() {
     // De herstart: een leeg handvat op dezelfde map, zonder backend-verleden.
     let id = state.session_id();
     let reopened = AppState::new(Arc::new(ScriptedBackend::new(vec![])) as Arc<dyn Backend>, "systeem")
-        .on_session(&root, &id, "model-van-hier")
+        .on_session(&root, &id, "model-van-hier", None)
         .expect("hetzelfde gesprek, dezelfde map");
 
     let rows = reopened.rows();
@@ -136,7 +136,7 @@ fn een_herstart_leest_niet_het_hele_verleden() {
 
     let id = state.session_id();
     let reopened = AppState::new(Arc::new(ScriptedBackend::new(vec![])) as Arc<dyn Backend>, "systeem")
-        .on_session(&root, &id, "model-van-hier")
+        .on_session(&root, &id, "model-van-hier", None)
         .expect("hetzelfde gesprek, dezelfde map");
 
     assert_eq!(reopened.rows().len() as u64, page::INITIAL as u64, "openen leest de staart, niet het bestand");
@@ -180,6 +180,113 @@ fn opslaan_schrijft_per_beurt_allen_de_staart() {
     let growth = lines_twee - lines_een;
     assert_eq!(growth, 2, "de tweede beurt hangt zijn eigen twee regels aan, niet het hele gesprek: {growth}");
     assert_eq!(mentions_exact(&state, "vraag een"), 1, "het verleden wordt niet opnieuw geschreven");
+}
+
+/// Het project van een gesprek dat via het handvat werd geopend, mag niet verdwijnen.
+///
+/// `on_session` zette `project_id` op `None` omdat de kop het veld niet kende. Na die
+/// reparatie draagt `detail.jsonl` het project, dus een herstart geeft de koppeling terug
+/// zonder dat de catalogus in de buurt hoeft te zijn.
+#[test]
+fn een_herstart_houdt_het_project_van_het_gesprek() {
+    let root = scratch("project");
+    let state = AppState::new(Arc::new(ScriptedBackend::new(vec![])) as Arc<dyn Backend>, "systeem")
+        .on_session(&root, "s-project", "model-van-hier", Some("p-tuis"))
+        .expect("een nieuw gesprek op schijf");
+    // Pas een opslag maakt de kopregel: vóórdat er iets werd geschreven, was er geen kop.
+    if let Some(reason) = state.persist() {
+        panic!("opslaan mislukte: {reason}");
+    }
+
+    let reopened = AppState::new(Arc::new(ScriptedBackend::new(vec![])) as Arc<dyn Backend>, "systeem")
+        .on_session(&root, "s-project", "model-van-hier", None)
+        .expect("hetzelfde gesprek, dezelfde map");
+    assert_eq!(reopened.project().as_deref(), Some("p-tuis"), "de kop draagt het project");
+}
+
+/// De twee bewegingen van een gesprekswissel: lezen mag overal, ruilen alleen als er niemand
+/// schrijft. `open_store` raakt de staat van het handvat niet; `switch_to` is wat het wél doet.
+#[test]
+fn openen_ergens_raakt_de_huidige_staat_niet_aan() {
+    let root = scratch("wissel");
+    let (_, state) = persistent(&root, vec![answer("tu_1", "het eerste antwoord")]);
+    run_turn(&state, "vraag een");
+    let hier = state.session_id();
+
+    // Dezelfde map, een ander gesprek: de lezing mag er niets van merken op het scherm.
+    let (opened, session) = state
+        .open_store(&root, "s-ander", "model-van-hier", Some("p-ander"))
+        .expect("een tweede gesprek op dezelfde map");
+    assert_eq!(state.session_id(), hier, "er is nog niets geruild");
+    assert_eq!(state.rows().len(), 2, "het scherm draagt nog steeds dit gesprek");
+    assert_eq!(session.project_id.as_deref(), Some("p-ander"), "het project komt mee uit de keuze");
+
+    let project = state.switch_to(opened, session);
+    assert_eq!(project.as_deref(), Some("p-ander"), "de ruil geeft het project terug");
+    assert_eq!(state.session_id(), "s-ander", "dit handvat bedient nu dat gesprek");
+    assert!(state.rows().is_empty(), "een leeg gesprek tekent een leeg beeld");
+    assert!(state.persists(), "het handvat ging mee, anders schreef het volgende feit in het oude bestand");
+}
+
+/// Het gesprek waarnaar werd geruild, is het gesprek dat opslaat.
+///
+/// Dit is de fout die de `Clone`-route zou maken: twee handvaten op hetzelfde bestand. Na
+/// `switch_to` mag een beurt in het oude spoor geen regel achterlaten.
+#[test]
+fn na_de_wissel_schrijft_de_beurt_in_het_nieuwe_spoor() {
+    let root = scratch("spoor");
+    let (_backend, state) = persistent(&root, vec![answer("tu_1", "hier"), answer("tu_2", "ginder")]);
+    run_turn(&state, "vraag hier");
+    let hier = state.session_id();
+
+    let (opened, session) = state.open_store(&root, "s-ginder", "model-van-hier", None).expect("open");
+    state.switch_to(opened, session);
+    run_turn(&state, "vraag ginder");
+
+    assert_eq!(count_lines_in(&root, "s-ginder"), 2, "de beurt hangt aan het gesprek dat openstaat");
+    assert_eq!(count_lines_in(&root, &hier), 2, "het vorige gesprek houdt zijn eigen twee regels");
+}
+
+/// Regelentelling in het spoor van één sessie-id, ongeacht welk dagbucket hem draagt.
+fn count_lines_in(root: &std::path::Path, session_id: &str) -> usize {
+    let mut total = 0usize;
+    for day in std::fs::read_dir(root).expect("de data-map") {
+        let dir = day.expect("een bucket").path().join(session_id);
+        let Ok(items) = std::fs::read_to_string(dir.join("items.jsonl")) else { continue };
+        total += items.lines().filter(|line| !line.trim().is_empty()).count();
+    }
+    total
+}
+
+#[test]
+fn de_handvat_telling_is_de_schrijftelling() {
+    // `disk_items` is wat de statusregel met het beeld vergelijkt ("12 of 40 regels"), dus zijn
+    // enige eis is dat hij zegt wat er werkelijk staat: niet het gesprek, niet het model-boek,
+    // de regel. `count_lines` telt die regels onafhankelijk, met een lezing van het bestand zelf,
+    // dus deze test vergelijkt de handvat-telling met de grondwaarheid in plaats van met nog een
+    // telling uit dezelfde bron.
+    let root = scratch("telling");
+    let (_, state) = persistent(&root, vec![answer("tu_1", "het eerste antwoord"), answer("tu_2", "het tweede antwoord")]);
+    assert_eq!(state.disk_items(), Some(0), "een gesprek dat nog niets zei, staat met nul regels op schijf");
+    run_turn(&state, "vraag een");
+    let na_een = count_lines(&root);
+    assert_eq!(state.disk_items(), Some(na_een), "na één beurt: handvat {:#?} tegen schijf {na_een}", state.disk_items());
+    assert!(na_een > 0, "er moet iets op schijf staan, anders meet deze test niets");
+    run_turn(&state, "vraag twee");
+    let na_twee = count_lines(&root);
+    assert_eq!(state.disk_items(), Some(na_twee), "na twee beurten: handvat {:?} tegen schijf {na_twee}", state.disk_items());
+    assert!(na_twee > na_een, "de tweede beurt moet meer regels hebben achtergelaten");
+
+    // Een handvat zonder opslag heeft geen schrijftelling, en liegt dus ook niet over "opgeslagen".
+    let (_, leads) = ledig_handvat();
+    assert_eq!(leads.disk_items(), None, "zonder handvat is er niets te tellen");
+}
+
+/// Een handvat zonder data-map: het venster dat tekent zonder te schrijven.
+fn ledig_handvat() -> (Arc<ScriptedBackend>, Arc<AppState>) {
+    let backend = Arc::new(ScriptedBackend::new(vec![]));
+    let state = AppState::new(Arc::clone(&backend) as Arc<dyn Backend>, "systeem");
+    (backend, Arc::new(state))
 }
 
 /// Regelentelling over het item-spoor van één sessie: `items.jsonl`.

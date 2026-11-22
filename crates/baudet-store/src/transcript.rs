@@ -39,7 +39,7 @@ impl Transcript {
     /// `model`/`cwd` zijn de herkomst-regels voor een *nieuw* bestand en worden genegeerd als het
     /// gesprek er al staat: de identiteitsregel is write-once en mag niet van een tweede opening
     /// afhangen. `create` verzet zich tegen overschrijven van een bestaande sessie, dus deze route
-    /// proberst eerst `open` en valt alleen terug op `create` als er werkelijk niets is.
+    /// probeert eerst `open` en valt alleen terug op `create` als er werkelijk niets is.
     pub fn open_or_create(
         root: &Path,
         session_id: &str,
@@ -79,6 +79,10 @@ impl Transcript {
         session.previous_response_id = detail.as_ref().and_then(|d| d.prev_response_id.clone());
         session.messages = self.rollout.messages()?;
         session.summary = detail.as_ref().and_then(|d| d.summary.clone());
+        // Het project komt uit de kop en niet uit een gok: de catalogus weet tijdens een
+        // vensterleven in welk project een gesprek staat, en deze regel is wat ervan overblijft
+        // nadat dat venster dicht is. Eerder ging die koppeling bij elke herstart verloren.
+        session.project_id = detail.as_ref().and_then(|d| d.project_id.clone());
         let window = self.items_window(page::INITIAL, None)?;
         session.items = window.items;
         session.oldest_loaded_seq = if window.has_more_older { window.older_seq } else { None };
@@ -116,8 +120,17 @@ impl Transcript {
             prev_response_id: session.previous_response_id.clone(),
             seq: session.messages.len() as u64,
             summary: session.summary.clone(),
+            project_id: session.project_id.clone(),
         })?;
         self.rollout.flush()
+    }
+
+    /// Het aantal regels dat de opslag van dit gesprek draagt.
+    ///
+    /// Doorgevraagd naar `Rollout::item_count`, voor de statusregel die beeld en schijf met
+    /// elkaar vergelijkt zonder het gesprek te lezen.
+    pub fn item_count(&self) -> std::io::Result<usize> {
+        self.rollout.item_count()
     }
 
     /// Eén ouder venster, op hetzelfde open gesprek, zonder een tweede descriptor te openen.

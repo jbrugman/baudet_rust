@@ -242,6 +242,24 @@ impl Rollout {
         Ok(out)
     }
 
+    /// Hoeveel regels het spoor op schijf draagt, zonder er één te decoderen.
+    ///
+    /// De statusregel van het venster vraagt "hoeveel van de regels in de opslag staan in het
+    /// beeld" (de origineler telde hetzelfde met `COUNT(*)`, `H2Store.itemCount`), en die vraag
+    /// mag niet de volledige lezing van `items()` kosten: een gesprek van duizend beurten zou dan
+    /// duizend decoderingen betalen om er één getal te horen. `tail_index` telt regeleindes, en
+    /// `rows()` noemt precies die hele regels — dezelfde telling die `item_rows` als reeksnummer
+    /// gebruikt, dus tellen en knippen spreken één taal. Een bestand dat nog niet bestaat, is een
+    /// gesprek dat nog niets schreef: nul, geen fout.
+    pub fn item_count(&self) -> std::io::Result<usize> {
+        let path = self.dir.join(ITEMS_FILE);
+        match tail_index(&path) {
+            Ok(index) => Ok(index.rows() as usize),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Every turn, oldest first, undecodable lines skipped.
     pub fn messages(&self) -> std::io::Result<Vec<Msg>> {
         let mut out = Vec::new();

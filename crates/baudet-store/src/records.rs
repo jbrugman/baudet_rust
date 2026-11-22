@@ -130,6 +130,14 @@ pub struct SessionDetail {
     /// context for good.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Het project waaraan dit gesprek is gekoppeld; `None` is de Unassigned-bak.
+    ///
+    /// Het veld bestond niet, dus `AppState::on_session` moest het op `None` zetten en wist een
+    /// bewuste koppeling weg bij elke herstart — de kopregel was de enige plaats waar het had
+    /// kunnen staan. `serde(default)` houdt een bestand van toen-diens leesbaar: een ontbrekend
+    /// veld is "in de bak", niet "kapot", en dat is precies wat het betekende.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -137,7 +145,14 @@ mod tests {
     #[test]
     fn a_detail_line_omits_what_was_never_said() {
         let detail =
-            SessionDetail { session_id: "s-x".into(), model: None, prev_response_id: None, seq: 0, summary: None };
+            SessionDetail {
+                session_id: "s-x".into(),
+                model: None,
+                prev_response_id: None,
+                seq: 0,
+                summary: None,
+                project_id: None,
+            };
         let json = serde_json::to_string(&Record::SessionDetail(detail)).unwrap();
         // `seq` is a count and so always present; the three optional fields are absent rather
         // than null, which is the file-shape rule of this crate.
@@ -152,6 +167,7 @@ mod tests {
             prev_response_id: Some("resp-9".into()),
             seq: 12,
             summary: Some("samenvatting".into()),
+            project_id: Some("p-1".into()),
         };
         let mut value = serde_json::to_value(Record::SessionDetail(detail.clone())).unwrap();
         value["payload"]["a_field_from_next_week"] = serde_json::json!(true);
@@ -168,6 +184,7 @@ mod tests {
         assert_eq!(detail.seq, 3);
         assert_eq!(detail.summary, None);
         assert_eq!(detail.prev_response_id, None);
+        assert_eq!(detail.project_id, None);
     }
 
     use super::*;

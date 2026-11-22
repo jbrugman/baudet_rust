@@ -49,6 +49,45 @@ enum Intent {
         reasoning: Option<String>,
         max_output_tokens: Option<u32>,
     },
+    /// De sidebar koos een bestaand gesprek. De lading leest de worker, niet de paint-pass: in de
+    /// origineler is dat dezelfde regel (`ChatPanel.loadSession` stuurt `buildSession` naar zijn
+    /// `loadExecutor` en laat `adoptSession` op de EDT zien, ChatPanel.kt:457-478), om dezelfde
+    /// reden — een lang gesprek mag het venster niet bevriezen, en een lezing mag nooit door de
+    /// schrijfbewegingen van een beurt heen lopen.
+    LoadSession { id: String, project: Option<String> },
+    /// "Begin hier een nieuw gesprek" (`None` is de inbox). Zet alleen klaar: de origineler
+    /// persisteert bewust niets (`AppState.startSessionIn`), want anders laat elke klik door de
+    /// projectenboom een leeg gesprek achter. De rollout en de catalogusregel komen pas op de
+    /// eerste vraag.
+    NewSession(Option<String>),
+    /// De lezer heeft de bovenrand van het gesprek bereikt en wil één ouder blok.
+    LoadOlder,
+}
+
+/// Wat de worker over het gesprek meldt: wat er staat, en wat ermee bezig is.
+///
+/// Eén bundel in plaats van `(rijen, bezig)` met een losse vlag ernaast, omdat die drie statussen
+/// in de origineler (`busy`, `loading`, en de statusregel die ze vertelt) anders uit twee bronnen
+/// zouden moeten samenkomen: het venster tekent wat de werker zegt, en de werker is de enige die
+/// weet of hij nog leest. `rows` is leeg bij een `reason` zonder lading — de rijen van toen blijven
+/// dan op het scherm staan, precies zoals `loadSession` het vorige gesprek laat zien tot het nieuwe
+/// er is ("no blank frame", ChatPanel.kt:453-455).
+struct Snapshot {
+    rows: Vec<Row>,
+    /// Een beurt van dit gesprek heeft de sessie.
+    busy: bool,
+    /// De worker is een gesprek aan het lezen of ouder aan het halen.
+    loading: bool,
+    /// Dit gesprek wordt op schijf gezet.
+    stored: bool,
+    /// Wat er op schijf staat en wat er in het beeld staat, in die volgorde.
+    turns: (usize, usize),
+    /// Of de opslag van dit gesprek nog oudere regels houdt dan het beeld kent. Deze vlag is de
+    /// reden dat het venster überhaupt om ouder mag vragen; zonder hem zou elk radwiel naar boven
+    /// een lezing vragen van een gesprek dat helemaal aan het begin staat.
+    has_more_older: bool,
+    /// Een storing die de persoon mag lezen; `None` is "er is niets aan de hand".
+    reason: Option<String>,
 }
 
 /// Which body the middle panel shows.
@@ -90,7 +129,7 @@ pub struct TranscriptApp {
     busy: bool,
     status: String,
     intents: mpsc::Sender<Intent>,
-    snapshots: ampcc::UnboundedReceiver<(Vec<Row>, bool)>,
+    snapshots: ampcc::UnboundedReceiver<Snapshot>,
     worker: Option<std::thread::JoinHandle<()>>,
     /// Where `--screenshot` must write its picture. `None` for a normal start.
     shot: Option<std::path::PathBuf>,
@@ -140,8 +179,26 @@ pub struct TranscriptApp {
     /// maar dit veld is wat de *rest* van het venster volgt — zo blijft de sidebar de schrijver en de
     /// bestandsboom de lezer, in één richting.
     current_project: Option<String>,
-    /// Het sessie-id dat de sidebar het laatst koos. Item D zet hier de lading op.
+    /// Het sessie-id dat de sidebar het laatst koos.
     current_session: Option<String>,
+    /// De data-map waarin gesprekken leven, of `None` als deze run puur in het geheugen tekent.
+    ///
+    /// `baudet_store::data_dir()` is de bron en de constructor leest hem één keer: wat een venster
+    /// opent, is precies wat het opschrijft, en een paints-pass die de variabele opnieuw zou
+    /// vragen, kon halverwege een run van map veranderen. `None` is geen fout maar de demo en de
+    /// test-hygiëne — `new` heeft geen backend die antwoorden van disk hoefde te halen.
+    data_root: Option<std::path::PathBuf>,
+    /// Er is een lading onderweg. De worker kent deze vlag en de vensterkant leest hem via de
+    /// statusregel; zolang hij staat, zijn `LoadSession` en `LoadOlder` afwijzend, want de
+    /// origineler houdt precies één lezing tegelijk open (`loading`, ChatPanel.kt:461,494).
+    loading: bool,
+    /// Of de opslag nog oudere regels houdt dan het beeld kent. Komt mee met elke melding van
+    /// de worker, want de werker is de enige die de opslag mag vragen.
+    more_older: bool,
+    /// Of het beeld onder aan het gesprek kleefde. Wordt gezet vóórdat een verzoek voor ouder
+    /// werk uitgaat, zodat de terugsprong die een voorzet van above-the-fold-rijen maakt, het
+    /// beeld niet naar beneden trekt.
+    stick: bool,
     /// Of het linkervenster (projecten) staat getekend. De toggle in de kop zet dit om; een
     /// verborgen venster tekent zich gewoon niet, en `PanelState` onthoudt zijn breedte, dus hij
     /// keert op dezelfde breedte terug -- de herinnerde-breedte-bewaarnis van `sidebarToggle` in
@@ -158,7 +215,13 @@ impl TranscriptApp {
         let (intent_tx, intent_rx) = mpsc::channel::<Intent>();
         let (snap_tx, snap_rx) = ampcc::unbounded_channel();
         let state = Arc::new(AppState::new(backend, "You are Baudet's Rust rewrite."));
-        let worker = std::thread::spawn(move || worker_loop(state, intent_rx, snap_tx));
+        // De data-map wordt hier gekozen en niet in de paint-pass: één keer vragen wat de
+        // omgeving zegt, en dat hele vensterleven lang dezelfde map blijven dragen. Zonder map
+        // (`BAUDET_HOME` wees op iets onbruikbaars, of een test die geen schijf wil) tekent het
+        // venster zoals het altijd tekende — in het geheugen.
+        let root = Some(baudet_store::data_dir());
+        let worker_root = root.clone();
+        let worker = std::thread::spawn(move || worker_loop(state, worker_root, intent_rx, snap_tx));
         // The settings worker owns the blocking calls — the listing and the file write — so a paint
         // never waits on a socket or a disk. It is a second, simpler copy of the conversation worker's
         // shape on purpose: one command channel in, one report channel out, a thread that drains.
@@ -195,6 +258,10 @@ impl TranscriptApp {
             sidebar: SidebarModel::open_default(),
             current_project: None,
             current_session: None,
+            data_root: root,
+            loading: false,
+            more_older: false,
+            stick: true,
             show_sidebar: true,
             show_filetree: true,
         }
@@ -360,12 +427,26 @@ impl TranscriptApp {
         while let Ok(snapshot) = self.snapshots.try_recv() {
             newest = Some(snapshot);
         }
-        if let Some((rows, busy)) = newest {
-            self.rows = rows;
-            self.busy = busy;
-            self.status = match (&self.fell_back, busy) {
-                (Some(reason), false) => reason.clone(),
-                (_, busy) => if busy { "streaming" } else { "idle" }.to_string(),
+        if let Some(report) = newest {
+            // Een melding zonder lading draagt alleen een reden: het gesprek van toen blijft op
+            // het scherm staan, want "kan dit niet openen" is geen reden om iets te laten zien dat
+            // er niet is.
+            // Een melding die zegt dat er niets meer ouder is, maakt de pager stil, ook als de
+            // rijen van toen blijven staan: de vraag "kun ik nog verder" mag niet aan een
+            // gesprek-id blijven kleven dat al is gewisseld.
+            self.more_older = report.has_more_older;
+            if !report.rows.is_empty() || report.reason.is_none() {
+                self.rows = report.rows;
+                self.busy = report.busy;
+                self.loading = report.loading;
+                self.more_older = report.has_more_older;
+            }
+            self.status = match (&report.reason, &self.fell_back, report.busy, report.loading) {
+                (Some(reason), _, _, _) => reason.clone(),
+                (None, Some(reason), false, false) => reason.clone(),
+                (None, _, true, _) => "streaming".to_string(),
+                (None, _, _, true) => "loading session".to_string(),
+                (None, _, _, false) => self.status_line(report.stored, report.turns),
             };
         }
 
@@ -452,11 +533,18 @@ impl TranscriptApp {
                 // `stick_to_bottom` only for the transcript: it is the body that grows by itself. A
                 // form and a list must stay wherever the person left them when a repaint adds a line
                 // under them, or a keystroke in a token field would jump the view.
-                .stick_to_bottom(transcript)
+                // `stick_to_bottom` only for the transcript, and only while the reader left it
+                // there: a page of older rows added above the fold would otherwise yank the view
+                // back to the newest row, which is exactly the jump the reference app holds steady
+                // (`olderReady` re-adds the height it inserted, TranscriptView.kt:300-312).
+                .stick_to_bottom(transcript && self.stick)
                 .show(ui, |ui| match tab {
                     Tab::Chat => self.transcript(ui),
                     Tab::Settings => settings::body(ui, &mut self.settings, &self.settings_tx),
                 });
+            if transcript {
+                self.ask_for_older(ui);
+            }
             ui.output_mut(|o| {
                 o.cursor_icon = if self.busy { egui::CursorIcon::Progress } else { egui::CursorIcon::Default }
             });
@@ -471,11 +559,39 @@ impl TranscriptApp {
         self.active_tab.unwrap_or(Tab::Chat)
     }
 
+    /// De statusregel van het gesprek: hoeveel regels er staan en of ze op schijf staan.
+    ///
+    /// Drie zinnen op één bron, want de origineler telt dezelfde twee getallen ook
+    /// (`statusLine`, ChatPanel.kt:540): "not stored" wanneer er geen handvat onder zit,
+    /// "scroll up for older" wanneer de opslag nog meer inhoudt dan het beeld, en "saved"
+    /// wanneer beeld en schijf gelijk zijn. `turns` is (op schijf, in beeld) — de volgorde
+    /// die `Snapshot::turns` draagt.
+    fn status_line(&self, stored: bool, turns: (usize, usize)) -> String {
+        let (on_disk, on_screen) = turns;
+        if !stored {
+            return format!("{} rules, not stored", on_screen);
+        }
+        if on_disk > on_screen {
+            return format!("{} of {} rules — scroll up for older", on_screen, on_disk);
+        }
+        format!("{} rules, saved", on_screen)
+    }
+
     /// Frames drawn so far. Public for the same reason as [`TranscriptApp::paint`]: a test driving the
     /// paint pass has to know whether this is the first frame, which is the only frame the window's
     /// own repaint request has not made yet.
     pub fn frames(&self) -> u32 {
         self.frames
+    }
+
+    /// De data-map die dit venster draagt, of `None` als het puur in het geheugen tekent.
+    ///
+    /// Een lezer op het veld dat de constructor één keer vulde, zodat "op welke schijf schrijft
+    /// dit venster" een vraag is die een test en een latere `--home`-UI kunnen stellen zonder de
+    /// map opnieuw aan de omgeving te vragen — wat een ander antwoord zou geven zodra iemand
+    /// `BAUDET_HOME` onder het venster verandert.
+    pub fn data_root(&self) -> Option<&std::path::Path> {
+        self.data_root.as_deref()
     }
 
     /// De map die het workspace-pane op dat moment toont, of `None` als er nog geen gekozen is.
@@ -497,15 +613,39 @@ impl TranscriptApp {
     fn apply_sidebar_intents(&mut self, intents: Vec<SidebarIntent>) {
         for intent in intents {
             match intent {
-                SidebarIntent::OpenSession(id) => self.current_session = Some(id),
+                SidebarIntent::OpenSession(id) => {
+                    if self.busy || self.loading {
+                        // Een beurt of een lezing houdt het gesprek vast: de klik is gezien en
+                        // geweigerd, niet genegeerd. `ChatPanel.loadSession` doet precies dat
+                        // (`if (busy) return`), want laden door de schrijfbewegingen van een
+                        // beurt heen is het spoor dat achteraf niet klopt.
+                        self.status = "busy — finish the turn first".to_string();
+                        continue;
+                    }
+                    self.current_session = Some(id.clone());
+                    let project = self.current_project.clone();
+                    let _ = self.intents.send(Intent::LoadSession { id, project });
+                    self.loading = true;
+                    self.status = "loading session".to_string();
+                }
                 SidebarIntent::StartChat(project) => {
+                    if self.busy {
+                        self.status = "busy — finish the turn first".to_string();
+                        continue;
+                    }
                     self.current_session = None;
-                    self.current_project = project;
+                    self.current_project = project.clone();
+                    let _ = self.intents.send(Intent::NewSession(project));
+                    self.status = "new conversation".to_string();
                 }
                 SidebarIntent::Deleted => {
-                    // Wat er in het midden stond, is weg; de rijen zijn nog die van toen. De chat
-                    // van item D weet hiermee wat hij moet laten vallen; nu blijft alleen de eerlijke
-                    // statusregel over.
+                    // Wat er in het midden stond, is weg uit de catalogus. De rijen van toen
+                    // laten staan zou betekenen dat er iets openstaat dat niemand meer kan
+                    // terugvinden, dus het beeld leegt en er begint een leeg gesprek — zonder
+                    // niets op schijf verwijderen: `delete_session` haalt de indexregel weg, de
+                    // rollout blijft, en dat is een besluit dat hier niet thuishoort.
+                    self.current_session = None;
+                    let _ = self.intents.send(Intent::NewSession(self.current_project.clone()));
                     self.status = "removed from the catalogue".to_string();
                 }
             }
@@ -613,7 +753,53 @@ impl TranscriptApp {
         }
     }
 
-    /// The ask-box, its Send and its Stop. See the call site for why this strip is the chat's.
+    /// Vraag om één ouder blok zodra de lezer bij de bovenrand van het gesprek rust.
+    ///
+    /// De trigger is een beweging naar boven, niet een positie: een radwiel omhoog of een sleep
+    /// aan de balk. De origineler wachtte op rust bij de bovenrand (`value <= NEAR_TOP`,
+    /// TranscriptView.kt:308); in een scroll area die door `stick_to_bottom` altijd onderaan
+    /// begint, is een positie-drempel onbereikbaar zódat iemand actief omhoog beweegt, en dát is
+    /// precies het moment waarop de vraag gesteld mag worden. De drempel zelf vervalt daarmee:
+    /// `has_more_older` en één-lezing-tegelijk doen het werk dat `NEAR_TOP` deed.
+    ///
+    /// Drie dingen maken dit veilig: `has_more_older` komt uit het gesprek en zegt dat de opslag
+    /// nog meer inhoudt (een vers geopend gesprek aan de staart raakt hier nooit), `loading`
+    /// houdt er één onderweg — de `awaitingOlder`-vlag van de origineler, hier dezelfde vlag die
+    /// de worker draagt — en `busy` want een beurt die schrijft, is niet het moment om van gesprek
+    /// te wisselen. `stick` gaat uit vóórdat het verzoek gaat, zodat de voorzet het beeld niet
+    /// naar beneden trekt.
+    fn ask_for_older(&mut self, ui: &mut egui::Ui) {
+        if self.busy || self.loading {
+            return;
+        }
+        // Waartoe bewogen: het radwiel naar boven. Bewust een input-meting en geen
+        // `Ui::interact` met `Sense::drag()` op het paneel: zo'n wikkel doet mee aan de
+        // hit-test en legt zich over de tabstrip heen, waardoor een klik op Settings de
+        // scroll-pagina vroeg en het tabblad nooit zette (gemeten: `tabs.rs` faalde erop).
+        // een sleep op de balk zelf raakt damit buiten beeld; het radwiel en het trackpad
+        // zijn op macOS de manier waarop iemand in een gesprek omhoog gaat.
+        let scrolled_up = ui.input(|input| input.smooth_scroll_delta.y) > 0.0;
+        if !scrolled_up {
+            return;
+        }
+        if !self.has_more_older() {
+            return;
+        }
+        self.stick = false;
+        self.loading = true;
+        let _ = self.intents.send(Intent::LoadOlder);
+    }
+
+    /// Of de opslag van dit gesprek nog regels houdt die het beeld niet kent.
+    ///
+    /// Gevraagd aan de handvatlaag via een snapshot in de origineler (`hasMoreOlder`, gezet door
+    /// de gastheer); hier staat het antwoord in het venster omdat de werker het bij elke melding
+    /// meedeelt, en een paint-pass mag nooit op de schijf kijken.
+    fn has_more_older(&self) -> bool {
+        self.more_older
+    }
+
+
     fn composer(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let response = ui.add(
@@ -778,26 +964,57 @@ impl Drop for TranscriptApp {
 /// The worker: owns the conversation, folds its events, publishes snapshots.
 fn worker_loop(
     state: Arc<AppState>,
+    root: Option<std::path::PathBuf>,
     intents: mpsc::Receiver<Intent>,
-    snapshots: ampcc::UnboundedSender<(Vec<Row>, bool)>,
+    snapshots: ampcc::UnboundedSender<Snapshot>,
 ) {
-    let publish = |state: &AppState, busy: bool| {
+    // Eén lezing tegelijk. De wachtrij van deze worker is het antwoord op de generatie-teller
+    // van de origineler (`loadGeneration`, ChatPanel.kt:459/467): daar bracht een tweede draad
+    // het resultaat terug op de UI-draad en moest een teller zeggen welk gesprek er intussen
+    // openhoorde. Hier leest één draad de wachtrij op volgorde, dus een ouder antwoord bestaat
+    // niet — de derde klik opent het derde gesprek, ná de tweede en vóór niets.
+    let loading = Arc::new(AtomicBool::new(false));
+    // Wat de schijf van dit gesprek draagt. Gelezen op de momenten waarop de schijf veranderde —
+    // bij een opening, een pagina ouder en een afgeronde beurt — en niet in elke melding: het
+    // getal vraagt een tellende lezing, en een stream die per delta meldt, zou die lezing
+    // duizend keer voor hetzelfde antwoord vragen. `None` is "dit gesprek staat niet op schijf".
+    let mut disk: Option<usize> = None;
+    // De catalogus die de sidebar ook tekent, hier in handen van de werker: die is de enige die
+    // weet wat er in een gesprek staat, en een indexregel die tijdens een paint-pass wordt
+    // bijgewerkt, leest halverwege een beurt. `None` is een catalogus die niet schrijfbaar is —
+    // dezelfde eerlijke terugval als `SidebarModel::open_default` al kiest.
+    let catalog = baudet_projects::Catalog::open(&baudet_store::data_dir()).ok();
+    let publish = |state: &AppState, busy: bool, disk: Option<usize>| {
         let rows = state.rows().iter().map(Row::from).collect::<Vec<_>>();
-        let _ = snapshots.send((rows, busy));
+        let on_screen = rows.len();
+        let _ = snapshots.send(Snapshot {
+            rows,
+            busy,
+            loading: loading.load(Ordering::SeqCst),
+            stored: state.persists(),
+            // De screen-telling komt uit de rijen die er nu staan, niet uit `Session::items`:
+            // een venster dat ouder voorzet, groeit vóórdat het gesprek zelf iets doet.
+            turns: (disk.unwrap_or(0), on_screen),
+            has_more_older: state.paging().0,
+            reason: None,
+        });
     };
-    publish(&state, false);
+    publish(&state, false, None);
     let draining = Arc::new(AtomicBool::new(false));
     while let Ok(intent) = intents.recv() {
+        if matches!(intent, Intent::LoadSession { .. }) {
+            loading.store(true, Ordering::SeqCst);
+        }
         match intent {
             Intent::Quit => break,
             Intent::Submit(text) => {
                 let Ok(sent) = state.send(&text) else {
-                    publish(&state, state.live_turns() > 0);
+                    publish(&state, state.live_turns() > 0, disk);
                     continue;
                 };
-                publish(&state, true);
+                publish(&state, true, disk);
                 let Some(handle) = sent.take_reader() else {
-                    publish(&state, true);
+                    publish(&state, true, disk);
                     continue;
                 };
                 // Exactly one pump per turn: `take_reader` hands the stream over once, so a
@@ -817,7 +1034,7 @@ fn worker_loop(
                 // publishing while the drain thread works. Quit is the one intent that must not
                 // be skipped, so it waits for the drain instead of racing it.
                 while watched.load(Ordering::SeqCst) {
-                    publish(&state, true);
+                    publish(&state, true, disk);
                     match intents.recv_timeout(std::time::Duration::from_millis(32)) {
                         Ok(Intent::Stop) => state.cancel_turn(),
                         Ok(Intent::Submit(_)) => {
@@ -826,17 +1043,28 @@ fn worker_loop(
                         Ok(Intent::Quit) => {
                             state.cancel_turn();
                             drain.join().ok();
-                            publish(&state, false);
+                            publish(&state, false, disk);
                             return;
                         }
                         Ok(Intent::Configure { .. }) => {
                             // Te laat voor de turn die loopt, en er is niets tussen wachend:
-                            // de wachtlus hierboven pakt het op zodra deze drain ended is.
+                            // de wachtlus hierboven pakt het op zodra deze drain is afgelopen.
+                        }
+                        Ok(Intent::LoadSession { .. } | Intent::NewSession(_) | Intent::LoadOlder) => {
+                            // Een lopende beurt houdt het gesprek vast, dus deze drie zijn hier
+                            // geweigerd in plaats van genegeerd — dezelfde regel die het venster
+                            // al toepast vóórdat het ze stuurt (`if (busy) return`,
+                            // ChatPanel.kt:461). Het intent is gezien; de worker boven deze lus
+                            // handelt het af zodra de drain is afgelopen.
                         }
                         Err(_) => {}
                     }
                 }
                 drain.join().ok();
+                // De beurt is pas af als hij op schijf staat, in dezelfde volgorde als de
+                // origineler (`persistTo` na de drain, `AppState.kt:1122-1144`). Zonder deze
+                // zet zou een venster dat uit de opslag opent, er nooit iets in vinden.
+                disk = after_turn(&state, &catalog, &snapshots);
             }
             Intent::Stop => state.cancel_turn(),
             // Stamped before the next Submit can read them; a turn already running keeps the
@@ -844,8 +1072,161 @@ fn worker_loop(
             Intent::Configure { model, reasoning, max_output_tokens } => {
                 state.set_request_choices(model, reasoning, max_output_tokens)
             }
+            Intent::LoadSession { id, project } => {
+                if !load_session(&state, root.as_deref(), &id, project.as_deref(), &loading, &snapshots) {
+                    publish(&state, state.live_turns() > 0, disk);
+                    continue;
+                }
+                disk = state.disk_items();
+                publish(&state, state.live_turns() > 0, disk);
+            }
+            Intent::NewSession(project) => {
+                // Een id van dezelfde fabrikant als sidebar en catalogus gebruiken, plus een
+                // handvat op de data-map: `newSession` in de origineler deed precies die twee
+                // dingen én schreef de indexregel (`SessionIds.new()` + `upsertSession`,
+                // `AppState.kt:294-298`). De inhoud van gesprek en index blijft leeg tot de
+                // eerste beurt ze vult — wat hier komt is de plek, niet de tekst.
+                state.switch_project(project.clone());
+                match root.as_deref() {
+                    Some(root) => {
+                        // `on_session` is een bouwer voor een handvat dat er nog niet is; dit
+                        // handvat bestaat al en leeft in een `Arc`, dus de opening gaat via het
+                        // paar dat voor die volgorde bestaat: lezen (`open_store`) en dan ruilen
+                        // (`switch_to`). Met een leeg bestand is dat precies hetzelfde gesprek als
+                        // een verse session, en het project blijft zoals de sidebar het aanwees.
+                        let id = baudet_projects::new_session_id();
+                        let model = state.model();
+                        let opened = state.open_store(root, &id, &model, project.as_deref());
+                        let _ = state.session_id();
+                        if let Err(reason) = opened.map(|(transcript, session)| {
+                            state.switch_to(transcript, session);
+                        }) {
+                            // Geen handvat betekent geen opslag onder dit gesprek; het scherm
+                            // blijft zoals het was en de reden zegt waarom.
+                            let _ = snapshots.send(Snapshot {
+                                rows: Vec::new(),
+                                busy: false,
+                                loading: false,
+                                stored: false,
+                                turns: (0, 0),
+                                has_more_older: state.paging().0,
+                                reason: Some(reason),
+                            });
+                            continue;
+                        }
+                        if let Some(catalog) = catalog.as_ref() {
+                            catalog.upsert_session(&id, Some(&model), project.as_deref(), 0).ok();
+                        }
+                    }
+                    // Zonder data-map tekent dit venster alleen in het geheugen: hetzelfde lege
+                    // gesprek, geen id en geen index, want er is geen schijf voor.
+                    None => state.adopt(baudet_store::session::Session::new("", &state.model())),
+                }
+                disk = state.disk_items();
+            }
+            Intent::LoadOlder => {
+                let (has_more_older, cursor, _) = state.paging();
+                if has_more_older {
+                    if let Some(before) = cursor {
+                        // Een fout hier is geen melding waard die het gesprek overstelpt: de
+                        // lezer staat boven en krijgt dezelfde bovenkant. `load_older` geeft het
+                        // aantal rijen terug, en nul of een error is "er is niets nieuws".
+                        // De schijf veranderde hier niet — alleen het beeld — dus `disk`
+                        // blijft zoals het was; de statusregel ziet daardoor meer regels "van
+                        // ouder" in beeld komen zonder dat er iets bij is geschreven.
+                        state.load_older(before).ok();
+                    }
+                }
+            }
         }
-        publish(&state, state.live_turns() > 0);
+        publish(&state, state.live_turns() > 0, disk);
+    }
+}
+
+/// Sluit een beurt af op schijf en zeg wat de schijf daarna draagt.
+///
+/// Drie zetten, in deze volgorde, omdat de index een gevolg van de inhoud is: eerst het gesprek
+/// (`Transcript::persist`: alleen de staart die deze beurt toevoegde), dan de indexregel die zijn
+/// getal noemt, dan de telling voor de statusregel. De origineler deed dezelfde drie in één
+/// methode (`persistTo`: `appendMessages`, `appendItems`, `upsertSession`, `AppState.kt:1122-1145`).
+///
+/// Een schrijffout is een status en geen stilstand: het gesprek blijft op het scherm, de
+/// schrijfranden (`persisted_messages`, `persisted_items_tail_id`) zijn alleen opgeschoven voor
+/// wat de schijf echt heeft, en de volgende beurt probeert de stap opnieuw. De opbrengst is wat
+/// de schijf draagt — `None` als er geen handvat onder zit, want dan is er niets te tellen.
+fn after_turn(
+    state: &AppState,
+    catalog: &Option<baudet_projects::Catalog>,
+    report: &ampcc::UnboundedSender<Snapshot>,
+) -> Option<usize> {
+    let id = state.session_id();
+    if let Some(reason) = state.persist() {
+        let _ = report.send(Snapshot {
+            rows: Vec::new(),
+            busy: false,
+            loading: false,
+            stored: state.persists(),
+            turns: (state.disk_items().unwrap_or(0), 0),
+            has_more_older: state.paging().0,
+            reason: Some(reason),
+        });
+    }
+    if let (Some(catalog), false) = (catalog.as_ref(), id.is_empty()) {
+        // `last_seq` is het aantal beurten, niet het aantal regels: de titel van een rij in de
+        // sidebar is "N beurten", en `transcript_len` geeft beide tellingen in die volgorde.
+        let (_, turns) = state.transcript_len();
+        catalog
+            .upsert_session(&id, Some(&state.model()), state.project().as_deref(), turns as i32)
+            .ok();
+    }
+    state.disk_items()
+}
+
+
+///
+/// De lezing en de ruil zitten in één move omdat deze worker de enige eigenaar van `state` is:
+/// de origineler moest ze splitsen (`buildSession` op de `loadExecutor`, `adoptSession` op de EDT)
+/// omdat daar twee draden dezelfde gedeelde staat aanraakten. Hier is het splitsen wél nuttig
+/// gebleven — `open_store` en `switch_to` zijn twee methodes — maar de volgorde is triviaal, en
+/// wat telt is dat er niemand schrijft: `Submit` pompt zijn beurt af en roept `finish` vóórdat
+/// deze lus het volgende intent leest, en `persist` is dan al gedaan.
+///
+/// Zonder `root` is er niets te openen. Dat antwoordt met `false` en laat het beeld staan, want
+/// "er is geen opslag" is een feit over de run, niet over het gesprek.
+fn load_session(
+    state: &AppState,
+    root: Option<&std::path::Path>,
+    id: &str,
+    project: Option<&str>,
+    loading: &Arc<AtomicBool>,
+    report: &ampcc::UnboundedSender<Snapshot>,
+) -> bool {
+    let Some(root) = root else {
+        loading.store(false, Ordering::SeqCst);
+        return false;
+    };
+    let model = state.model();
+    let opened = state.open_store(root, id, &model, project);
+    loading.store(false, Ordering::SeqCst);
+    match opened {
+        Ok((transcript, session)) => {
+            state.switch_to(transcript, session);
+            true
+        }
+        // De reden gaat mee naar de statusregel: "kan niet openen" zonder oorzaak is precies de
+        // stilte die een persoon laat raden of het gesprek weg is of de schijf.
+        Err(reason) => {
+            let _ = report.send(Snapshot {
+                rows: Vec::new(),
+                busy: false,
+                loading: false,
+                stored: state.persists(),
+                turns: state.transcript_len(),
+                has_more_older: state.paging().0,
+                reason: Some(reason),
+            });
+            false
+        }
     }
 }
 

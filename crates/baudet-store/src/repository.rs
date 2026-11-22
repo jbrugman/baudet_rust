@@ -117,6 +117,7 @@ impl Repository {
             prev_response_id: session.previous_response_id.clone(),
             seq: session.messages.len() as u64,
             summary: session.summary.clone(),
+            project_id: session.project_id.clone(),
         })?;
         // One flush at the end of a persist is the moment worth paying for: everything before it
         // becomes durable, and a streamed delta costs no disk round-trip.

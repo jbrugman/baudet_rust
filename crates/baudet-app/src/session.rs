@@ -73,6 +73,11 @@ pub struct AppState {
     active: Mutex<Session>,
     live_turns: AtomicUsize,
     turn_counter: AtomicUsize,
+    /// Het project waar dit handvat in werkt, de waard van `adoptSession`'s `currentProjectId`.
+    ///
+    /// Achter een slot omdat de sidebar tekent en kiest en de worker het leest wanneer hij een
+    /// nieuw gesprek of een catalogusregel maakt; de levensduur van het slot is één kopie.
+    project: Mutex<Option<String>>,
     live: Mutex<Option<Arc<Mutex<TurnHandle>>>>,
 }
 
@@ -183,6 +188,7 @@ impl AppState {
             live_turns: AtomicUsize::new(0),
             turn_counter: AtomicUsize::new(0),
             live: Mutex::new(None),
+            project: Mutex::new(None),
         }
     }
 
@@ -498,7 +504,97 @@ impl AppState {
         if session.model.trim().is_empty() {
             session.model = self.model();
         }
+        // Het project dat de kop draagt, is het antwoord; een gesprek zonder koppeling valt
+        // terug op het project waarin dit venster werkt. De origineler haalde het project uit
+        // één plaats (`AppState.buildSession`: `s.projectId = store.projectOfSession(id)`, een
+        // databankrij), deze opslag bindt het áán het gesprek en de variabele van het handvat is
+        // wat de sidebar zojust aanwees. Wie een project opende en daarna een los gesprek koos,
+        // staat daarom niet buiten elk project.
+        if session.project_id.is_none() {
+            session.project_id = self.project.lock().unwrap().clone();
+        }
         Ok(session)
+    }
+
+    /// Open het opslaghandvat van één gesprek, zonder de staat van dit handvat aan te raken.
+    ///
+    /// De scheiding die [`Self::build_session`] en [`Self::switch_to`] al toepassen, naar buiten
+    /// getrokken: de worker mag lezen en mag een handvat openen, maar mag gedeelde staat alleen
+    /// ruilen als er niemand schrijft. `Clone` van dit handvat is géén antwoord op die vraag - het
+    /// dupliceren van `transcript` geeft twee append-handvaten op hetzelfde `items.jsonl`, en twee
+    /// schrijvers op één append-bestand is precies het interleaving dat de origineler met zijn
+    /// ene lange aanraking op de schijf wil voorkomen.
+    ///
+    /// `project_id` komt mee als argument en niet uit een catalogus: een nieuw gesprek krijgt
+    /// zijn project pas op de eerste beurt een regel in de index (`ChatPanel.startProjectChat`
+    /// persisteert bewust niets), dus de persoon die kiest, is hier de waarheid. Een gesprek dat
+    /// al op schijf staat en zelf geen koppeling draagt, erft het project van dit handvat.
+    pub fn open_store(
+        &self,
+        root: &std::path::Path,
+        session_id: &str,
+        model: &str,
+        project_id: Option<&str>,
+    ) -> Result<(Transcript, Session), String> {
+        let opened = Transcript::open_or_create(root, session_id, Some(model), None)
+            .map_err(|error| error.to_string())?;
+        let mut session = match opened.build(model) {
+            Ok(session) => session,
+            Err(_) => Session::new(session_id, model),
+        };
+        if session.model.trim().is_empty() {
+            session.model = model.to_owned();
+        }
+        if session.project_id.is_none() {
+            session.project_id = project_id.map(str::to_owned);
+        }
+        Ok((opened, session))
+    }
+
+    /// Maak een zojust gelezen gesprek het gesprek van dit handvat.
+    ///
+    /// De ruil zelf, zonder leeswerk, en daarom klein genoeg om te bewijzen dat hij niemand
+    /// verliest: het handvat gaat mee, anders zou het volgende feit in het oude bestand schrijven.
+    /// De opbrengst is het project dat bij dit gesprek hoort, zodat de sidebar zijn selectie kan
+    /// volgen - precies wat `adoptSession` deed (`session = s; currentProjectId = s.projectId`).
+    ///
+    /// Veilig uitsluitend als er geen beurt draait. Deze methode gooit de rijen van het vorige
+    /// gesprek weg en schuift de nieuwe; de beurt die bezig is, schrijft in `transcript` en in
+    /// `active`, en een beurt-einde is pas af als `persist` achter de rug is.
+    pub fn switch_to(&self, transcript: Transcript, mut session: Session) -> Option<String> {
+        // Een gesprek zonder eigen project valt terug op wat dit handvat onthoudt: de persoon
+        // die een project opende en daarna een gesprek zonder koppeling koos, staat niet
+        // opeens buiten elk project. `adoptSession` in de origineler nam de waard over zoals hij
+        // was (`currentProjectId = s.projectId`); het verschil hier is dat het veld op het
+        // handvat ook ná de ruil iets betekent, omdat de worker het later nog nodig heeft.
+        if session.project_id.is_none() {
+            session.project_id = self.project.lock().unwrap().clone();
+        }
+        let project = session.project_id.clone();
+        *self.project.lock().unwrap() = project.clone();
+        let items = session.items.clone();
+        *self.transcript.lock().unwrap() = Some(transcript);
+        *self.active.lock().unwrap() = session;
+        self.draw(&items);
+        project
+    }
+
+    /// Het project waarin het volgende gesprek thuishoort.
+    ///
+    /// `adoptSession` in de origineler zette bij elke ruil dezelfde variabele
+    /// (`currentProjectId = s.projectId`), want "in welk project ben ik" is geen eigenschap van
+    /// het scherm maar van wat er openstaat. Hier leeft die waarde in het handvat, want de worker
+    /// die een nieuw gesprek maakt, moet hem kunnen lezen zonder het scherm te vragen.
+    pub fn project(&self) -> Option<String> {
+        self.project.lock().unwrap().clone()
+    }
+
+    /// Kies het project voor het volgende gesprek, of leg het vast (`None` is de Unassigned-bak).
+    ///
+    /// Een setter op het handvat en niet een argument bij `send`: de sidebar kiest tijdens het
+    /// tekenen, de beurt bouwt later, en de twee mogen elkaar niet nodig hebben.
+    pub fn switch_project(&self, project_id: Option<String>) {
+        *self.project.lock().unwrap() = project_id;
     }
 
     /// Het model dat de volgende aanvraag noemt, voor de titel van een laden-dialoog.
@@ -510,6 +606,18 @@ impl AppState {
     /// "welk gesprek staat er open". Een lege snaar betekent dat er geen opslag onder zit.
     pub fn session_id(&self) -> String {
         self.active.lock().unwrap().session_id.clone()
+    }
+
+    /// Hoeveel regels de opslag van dit gesprek draagt, of `None` als er geen handvat onder zit.
+    ///
+    /// De statusregel vergelijkt dit getal met wat het beeld draagt ("12 of 40 regels"), en de
+    /// vensterlezer heeft het nodig om te weten of een opening iets heeft teruggegeven. Een
+    /// mislukte lezing is hier geen fout maar "ik weet het niet": `Ok(None)` laat de aanroeper
+    /// zijn beeldwoorden kiezen in plaats van een gesprek te laten lijken op een leeg.
+    pub fn disk_items(&self) -> Option<usize> {
+        let transcript = self.transcript.lock().unwrap();
+        let transcript = transcript.as_ref()?;
+        transcript.item_count().ok()
     }
 
     /// Of dit handvat op schijf schrijft. Een statusregel die "opgeslagen" zegt zonder dat er een
@@ -562,7 +670,7 @@ impl AppState {
     /// en de statusregel draagt het feit - niet de paniek - net als de niet-beschrijfbare
     /// catalogus die `open_default` ook accepteert.
     pub fn with_persistence(self, root: &std::path::Path, model: &str) -> Result<AppState, String> {
-        self.on_session(root, &baudet_projects::new_session_id(), model)
+        self.on_session(root, &baudet_projects::new_session_id(), model, None)
     }
 
     /// Sluit aan op één bepaalde sessie-id: hetzelfde handvat, geen nieuw gesprek.
@@ -582,6 +690,7 @@ impl AppState {
         root: &std::path::Path,
         session_id: &str,
         model: &str,
+        project_id: Option<&str>,
     ) -> Result<AppState, String> {
         let opened = Transcript::open_or_create(root, session_id, Some(model), None)
             .map_err(|error| error.to_string())?;
@@ -590,7 +699,13 @@ impl AppState {
             Ok(session) => session,
             Err(_) => Session::new(session_id, model),
         };
-        active.project_id = None;
+        active.project_id = project_id.map(str::to_owned).or(active.project_id);
+        // Het handvat onthoudt wat het gesprek draagt, want `project()` is wat de sidebar en de
+        // worker later lezen: een herstart die het project wél uit de kop haalde maar het
+        // handvat op `None` liet staan, zou dat project in de volgende zin weer verliezen.
+        // `adoptSession` deed precies deze twee zetten bij elkaar (`session = s` en
+        // `currentProjectId = s.projectId`).
+        *state.project.lock().unwrap() = active.project_id.clone();
         let items = active.items.clone();
         *state.transcript.lock().unwrap() = Some(opened);
         *state.active.lock().unwrap() = active;
