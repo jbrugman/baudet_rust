@@ -67,14 +67,8 @@ mod tests {
         // De twee gevallen van `displayPath` én het geval ervóór: een pad buiten de map kan niet
         // relatief en blijft dus staan zoals het heet, net als `root.relativize` faalt-terugval.
         assert_eq!(display_path(Some(root), Some(root)), ".");
-        assert_eq!(
-            display_path(Some(root), Some(Path::new("/projects/baudet/src/main.rs"))),
-            "src/main.rs"
-        );
-        assert_eq!(
-            display_path(Some(root), Some(Path::new("/other/thing.txt"))),
-            "/other/thing.txt"
-        );
+        assert_eq!(display_path(Some(root), Some(Path::new("/projects/baudet/src/main.rs"))), "src/main.rs");
+        assert_eq!(display_path(Some(root), Some(Path::new("/other/thing.txt"))), "/other/thing.txt");
     }
 
     #[test]

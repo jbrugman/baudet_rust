@@ -203,10 +203,13 @@ pub fn install(ctx: &Context) {
     // hier een hoekig blok op een afgerond scherm. Eén zet hier, voor élke widgetstatus, want de
     // statussen delen in deze functie al één eigenaar.
     ctx.global_style_mut(|style| {
-        for widget in [&mut style.visuals.widgets.noninteractive, &mut style.visuals.widgets.inactive,
-                       &mut style.visuals.widgets.hovered, &mut style.visuals.widgets.active,
-                       &mut style.visuals.widgets.open]
-        {
+        for widget in [
+            &mut style.visuals.widgets.noninteractive,
+            &mut style.visuals.widgets.inactive,
+            &mut style.visuals.widgets.hovered,
+            &mut style.visuals.widgets.active,
+            &mut style.visuals.widgets.open,
+        ] {
             widget.corner_radius = CornerRadius::same(8);
         }
     });
@@ -354,7 +357,11 @@ mod tests {
     fn linear_luma(c: Color32) -> f32 {
         fn channel(v: u8) -> f32 {
             let v = f32::from(v) / 255.0;
-            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
         }
         let [r, g, b, _] = c.to_srgba_unmultiplied();
         0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)

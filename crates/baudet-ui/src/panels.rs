@@ -16,12 +16,12 @@
 //! The consequence is stated rather than hidden: edit a file outside the app and the list stays as
 //! it was until the folder is chosen again.
 
+use crate::app::root_ui_id;
 use crate::layout::{self};
 use crate::palette;
 use crate::sidebar::{Confirm, NameAsk, PermissionState, Selection, SidebarModel, UNASSIGNED};
-use crate::app::root_ui_id;
-use baudet_i18n::{Key, Texts};
 use baudet_core::{probe_changes, probe_git, ChangeKind, ChangedFile, GitMeta};
+use baudet_i18n::{Key, Texts};
 use egui::{Color32, Panel, ScrollArea, Ui};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -259,9 +259,7 @@ pub fn file_tree_controls(
         // `(TREE_REFRESH, "refresh")` blijft, zodat tests/folder_open.rs het vindt.
         let refresh_clicked = ui
             .scope_builder(
-                egui::UiBuilder::new()
-                    .id(root.with((TREE_REFRESH, "refresh")))
-                    .sense(egui::Sense::click()),
+                egui::UiBuilder::new().id(root.with((TREE_REFRESH, "refresh"))).sense(egui::Sense::click()),
                 |ui| {
                     // Zelfde regel als bij `Add project`: de origineler geeft elke knop zijn
                     // tooltiptekst mee (`ProjectSidebar.kt:122-123`), en die was hier weggelaten.
@@ -415,9 +413,7 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
         // root-adres `(SIDEBAR_ADD, "add")` dat tests/tabs.rs en tests/project_tree.rs treffen.
         if ui
             .scope_builder(
-                egui::UiBuilder::new()
-                    .id(root.with((SIDEBAR_ADD, "add")))
-                    .sense(egui::Sense::click()),
+                egui::UiBuilder::new().id(root.with((SIDEBAR_ADD, "add"))).sense(egui::Sense::click()),
                 |ui| {
                     // De tekst van de origineler erbij, niet een eigen verzonnen: `button(Key.
                     // AddProjectButton, Key.TipAdd)` (`ProjectSidebar.kt:67`) geeft diens knop
@@ -455,7 +451,6 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
                         }
                         // Geen "no conversations"-riem: `ProjectSidebar.kt:137` voegt alleen
                         // de bestaande sessies toe, dus een project zonder gesprek is daar leeg.
-
                     });
                 if response.header_response.clicked() {
                     model.select_project(Some(&project.id));
@@ -479,7 +474,6 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
                         session_row(ui, model, None, session, &mut intents);
                     }
                     // Idem de inbox: `ProjectSidebar.kt:144-145` kent geen lege-riem.
-
                 });
             if response.header_response.clicked() {
                 model.select_project(None);
@@ -519,7 +513,6 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
                 });
             }
         }
-
     });
     intents
 }
@@ -575,11 +568,9 @@ fn permission_boxes(ui: &mut Ui, state: &PermissionState, model: &mut SidebarMod
         // van vóór de wijziging, dus terugzetten is precies ongedaan maken.
         let previous = ui.style().visuals.widgets.clone();
         let style = ui.style_mut();
-        for widget in [
-            &mut style.visuals.widgets.inactive,
-            &mut style.visuals.widgets.hovered,
-            &mut style.visuals.widgets.active,
-        ] {
+        for widget in
+            [&mut style.visuals.widgets.inactive, &mut style.visuals.widgets.hovered, &mut style.visuals.widgets.active]
+        {
             widget.bg_fill = palette::CHECK;
             widget.weak_bg_fill = palette::CHECK;
         }
@@ -667,7 +658,6 @@ fn ask_title(model: &SidebarModel) -> Key {
     }
 }
 
-
 /// De hoek en de raming van het vraag-venster, gecentreerd op de strook tussen de twee balken.
 ///
 /// De vraag mag niet over de projectbalk links of de bestandsboom rechts vallen; `PANEL_MIN` is de
@@ -725,21 +715,16 @@ fn ask_and_confirm(ui: &mut Ui, model: &mut SidebarModel, intents: &mut Vec<Side
         // verdween de vraag uit het oog en zonk de bevestigingsknop naar de paneelrand.
         ui.horizontal_wrapped(|ui| {
             ui.label(ask.prompt());
-            let field = ui
-                .add(
-                    egui::TextEdit::singleline(&mut model.name_entry)
-                        .hint_text("naam")
-                        .desired_width(VRAAG_VELD_BREEDTE),
-                );
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut model.name_entry).hint_text("naam").desired_width(VRAAG_VELD_BREEDTE),
+            );
             // Wie om een naam vraagt, wil er een typen: het veld krijgt de foyer mee, zodat Enter
             // direct bevestigt in plaats van eerst een klik te vereisen.
             field.request_focus();
             let submitted = field.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let ok = ui
                 .scope_builder(
-                    egui::UiBuilder::new()
-                        .id(root_ui_id(ui.ctx()).with((ASK_OK, "ok")))
-                        .sense(egui::Sense::click()),
+                    egui::UiBuilder::new().id(root_ui_id(ui.ctx()).with((ASK_OK, "ok"))).sense(egui::Sense::click()),
                     |ui| {
                         ui.add(egui::Button::new(Texts::get(Key::Yes)).sense(egui::Sense::hover()));
                     },
@@ -908,12 +893,7 @@ enum MenuAction {
 ///
 /// Bewust zonder `model`-argument: de sluiting die dit aanroept, leent het sidebar-model al voor de
 /// boom eromheen. Wat hier staat, is pure keuze — geen enkele handeling, geen enkel schrijven.
-fn menu_item(
-    ui: &mut Ui,
-    model: &SidebarModel,
-    project: Option<&str>,
-    session: Option<&str>,
-) -> Option<MenuAction> {
+fn menu_item(ui: &mut Ui, model: &SidebarModel, project: Option<&str>, session: Option<&str>) -> Option<MenuAction> {
     match (project, session) {
         (Some(project), None) => {
             if ui.button(Texts::get(Key::NewSessionButton)).clicked() {
@@ -925,8 +905,8 @@ fn menu_item(
             // Twee woorden, geen derde bedacht: `Key.kt:296/297` kiest archiveer- of
             // dearchiveer-woorden naargelang de staat, precies zoals `ProjectSidebar.kt:222`.
             let archived = model.project_archived(project).unwrap_or(false);
-            let archive_label = if archived { Texts::get(Key::UnarchiveProjectButton) }
-                else { Texts::get(Key::ArchiveProjectButton) };
+            let archive_label =
+                if archived { Texts::get(Key::UnarchiveProjectButton) } else { Texts::get(Key::ArchiveProjectButton) };
             if ui.button(archive_label).clicked() {
                 return Some(MenuAction::ToggleArchive);
             }
@@ -964,9 +944,6 @@ fn menu_item(
         }
     }
 }
-
-
-
 
 /// Het adres van de `Refresh`-knop in de rechterkop: `Key.FileTreeRefreshButton`
 /// (`Key.kt:375`). Een kale knop in de kolom van het paneel adresseert relatief aan die kolom
@@ -1081,8 +1058,7 @@ fn file_row(ui: &mut Ui, path: &Path, change: Option<ChangeKind>, root: Option<&
     ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::hover()), |ui| {
         ui.horizontal(|ui| {
             ui.add(
-                egui::Label::new(egui::RichText::new(truncate_head(&name, KEEP_TAIL)).color(colour))
-                    .selectable(false),
+                egui::Label::new(egui::RichText::new(truncate_head(&name, KEEP_TAIL)).color(colour)).selectable(false),
             )
             .on_hover_text(path.display().to_string());
         });
@@ -1260,9 +1236,9 @@ fn change_row(ui: &mut Ui, file: &ChangedFile, root: Option<&Path>) -> Option<St
                 });
             }
         });
-    // Zelfde volle-breedte-regel als de boom, en dezelfde `displayPath`: git noemt een
-    // repository-relatief pad, dus de riem toont het relatieve en kopiéért het relatieve
-    // (`maybePopupRows` lost `row.relPath` op in `rootPath`, `FileTreePanel.kt:525-527`).
+        // Zelfde volle-breedte-regel als de boom, en dezelfde `displayPath`: git noemt een
+        // repository-relatief pad, dus de riem toont het relatieve en kopiéért het relatieve
+        // (`maybePopupRows` lost `row.relPath` op in `rootPath`, `FileTreePanel.kt:525-527`).
         let git_path = root.map(|root| root.join(&file.path));
         let row = ui.interact(ui.max_rect(), ui.id().with(("change-row", &file.path)), egui::Sense::hover());
         if let Some(text) = copy_path_menu(&row, root, git_path.as_deref()) {
@@ -1388,7 +1364,11 @@ pub const TOGGLE_ICON: egui::Vec2 = egui::vec2(20.0, 18.0);
 /// (`0.66` rechts, `0.34` links): "the rail marks the panel it toggles". Puur rekenwerk, dus apart
 /// te testen.
 pub fn toggle_rail_fraction(right_side: bool) -> f32 {
-    if right_side { 0.66 } else { 0.34 }
+    if right_side {
+        0.66
+    } else {
+        0.34
+    }
 }
 
 /// Het vierkant van het icoon binnen de knop: `JButton` centreert zijn `Icon`, dus dit doet dat ook.
@@ -1438,21 +1418,16 @@ impl egui::Widget for Toggle {
         // hover-wikkel was de zwakkere variant en liet het `PANEL_TOGGLES`-adres zwijgen.
         let right_side = self.right_side;
         let response = ui
-            .scope_builder(
-                egui::UiBuilder::new().id(self.id).sense(egui::Sense::click()),
-                |ui| {
-                    // `frame(true)`, niet `.frame(false)`: de origineler is hier een `JButton`
-                    // (`Main.kt:255`), en FlatLaf tekent een `JButton` altijd met zijn
-                    // `Button.background` en zijn 8 pt hoek (`Main.kt:60`). Zonder frame hing er alleen
-                    // een icoon-stroke in de kop en was er niets dat "klikbaar" said -- na de
-                    // `weak_bg_fill`-fix in `palette` was dit het tweede deel van dezelfde klacht.
-                    ui.add(
-                        egui::Button::new("")
-                            .min_size(egui::vec2(TOGGLE_WIDTH, TOGGLE_SIZE))
-                            .sense(egui::Sense::hover()),
-                    );
-                },
-            )
+            .scope_builder(egui::UiBuilder::new().id(self.id).sense(egui::Sense::click()), |ui| {
+                // `frame(true)`, niet `.frame(false)`: de origineler is hier een `JButton`
+                // (`Main.kt:255`), en FlatLaf tekent een `JButton` altijd met zijn
+                // `Button.background` en zijn 8 pt hoek (`Main.kt:60`). Zonder frame hing er alleen
+                // een icoon-stroke in de kop en was er niets dat "klikbaar" said -- na de
+                // `weak_bg_fill`-fix in `palette` was dit het tweede deel van dezelfde klacht.
+                ui.add(
+                    egui::Button::new("").min_size(egui::vec2(TOGGLE_WIDTH, TOGGLE_SIZE)).sense(egui::Sense::hover()),
+                );
+            })
             .response;
         // Het icoon overheen, gecentreerd op de gemeten rect van de knop — niet op de wikkel, want
         // wikkel en knop zijn pas na meten even breed. `response.rect` is die gemeten rect.
@@ -1497,12 +1472,8 @@ fn paint_toggle_icon(ui: &Ui, icon: egui::Rect, right_side: bool) {
     let box_rect = egui::Rect::from_min_max(min, min + egui::vec2(icon.width() - 2.0, icon.height() - 2.0));
     painter.rect_stroke(box_rect, 3.0, line, egui::StrokeKind::Inside);
     let rail_x = box_rect.min.x + (box_rect.width() * toggle_rail_fraction(right_side)).trunc();
-    painter.line_segment(
-        [egui::pos2(rail_x, box_rect.min.y), egui::pos2(rail_x, box_rect.max.y)],
-        line,
-    );
+    painter.line_segment([egui::pos2(rail_x, box_rect.min.y), egui::pos2(rail_x, box_rect.max.y)], line);
 }
-
 
 fn dim(text: impl Into<String>) -> egui::WidgetText {
     egui::RichText::new(text.into()).color(palette::DIM).into()
@@ -1814,8 +1785,15 @@ mod tests {
         // Aan: de punt-namen komen erbij, `target` blijft buiten de boot.
         workspace.set_show_hidden(true);
         let open = workspace.tree_at(dir.path());
-        assert_eq!(open.files.iter().map(|p| name_of(p)).collect::<Vec<_>>(), vec![".env".to_string(), "main.rs".to_string()]);
-        assert_eq!(open.dirs.iter().map(|p| name_of(p)).collect::<Vec<_>>(), vec![".github".to_string()], "`target` is geen verborgen naam, maar bouw-uitgang");
+        assert_eq!(
+            open.files.iter().map(|p| name_of(p)).collect::<Vec<_>>(),
+            vec![".env".to_string(), "main.rs".to_string()]
+        );
+        assert_eq!(
+            open.dirs.iter().map(|p| name_of(p)).collect::<Vec<_>>(),
+            vec![".github".to_string()],
+            "`target` is geen verborgen naam, maar bouw-uitgang"
+        );
     }
     #[test]
     fn folders_are_listed_before_files() {

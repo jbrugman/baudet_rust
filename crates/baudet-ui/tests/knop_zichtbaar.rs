@@ -33,7 +33,11 @@ fn paint_shapes(ctx: &egui::Context, app: &mut TranscriptApp) -> Vec<egui::Shape
 fn contrast(a: egui::Color32, b: egui::Color32) -> f32 {
     fn linear(channel: u8) -> f32 {
         let u = f32::from(channel) / 255.0;
-        if u <= 0.03928 { u / 12.92 } else { ((u + 0.055) / 1.055).powf(2.4) }
+        if u <= 0.03928 {
+            u / 12.92
+        } else {
+            ((u + 0.055) / 1.055).powf(2.4)
+        }
     }
     fn luma(c: egui::Color32) -> f32 {
         0.2126 * linear(c.r()) + 0.7152 * linear(c.g()) + 0.0722 * linear(c.b())

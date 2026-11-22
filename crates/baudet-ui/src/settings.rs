@@ -300,13 +300,9 @@ impl SettingsView {
         // lus is wél een fout en mag niet stil op 8 terugvallen.
         let max_tool_iterations = match self.tool_mode {
             ToolMode::Off => self.stored_max_tool_iterations,
-            _ => self
-                .max_tool_iterations
-                .trim()
-                .parse::<u32>()
-                .ok()
-                .filter(|n| *n > 0)
-                .ok_or_else(|| format!("max tool iterations is not a positive number: {}", self.max_tool_iterations.trim()))?,
+            _ => self.max_tool_iterations.trim().parse::<u32>().ok().filter(|n| *n > 0).ok_or_else(|| {
+                format!("max tool iterations is not a positive number: {}", self.max_tool_iterations.trim())
+            })?,
         };
         Ok(Settings {
             max_tool_iterations,
@@ -559,7 +555,6 @@ impl SettingsView {
             "not fetched yet"
         }
     }
-
 }
 
 /// Het stabiele zout van het endpointveld.
@@ -592,6 +587,60 @@ pub const FIELD_ENDPOINT: &str = "settings-endpoint-field";
 ///
 /// Any button pressed inside is sent to the worker through `tx` before this returns — at most one
 /// fetch and one save, because those are the only buttons. State moves through `view` only, and
+/// De breedte van de etiketkolom van het formulier.
+///
+/// `Form.kt:14-32` zet het etiket in kolom 0 en het veld in kolom 1 van een `GridBagLayout`, dus het
+/// veld begint waar het langste etiket eindigt en al het overige gaat naar het veld (`weightx = 1.0`,
+/// `fill = HORIZONTAL`). Dit formulier is smaller dan dat van de origineler — 360 pt tegenover diens
+/// 34 tekens — dus de kolom is uit de eigen teksten opgemaakt: het langste etiket dat hier voorkomt is
+/// het Nederlandse "system-prompt (leeg = ingebouwd)". Past een tekst toch niet in de kolom, dan valt
+/// [`form_row`] terug op etiket-boven-veld in plaats van het etiket te kappen.
+const LABEL_COLUMN: f32 = 168.0;
+
+/// Eén formulierrij: etiket links, veld rechts, zoals `Form.kt:14-32` het doet.
+///
+/// De kolombreedte wordt hier bepaald en niet binnen `build`, want `build` roept
+/// `add_sized([ui.available_width(), ..])` en mag dus alleen de veldkolom zien. Wat dit herstelt, is de
+/// stapeling: het veld opeiste de volledige formularbreedte en het etiket verdween erbovenheen. Past
+/// het etiket niet naast het veld, dan valt hij terug op etiket boven veld — maar de veldkolom blijft
+/// waar hij is, op `LABEL_COLUMN`. Een lang etiket kost dan hoogte, kapt nooit zijn woorden af, en het
+/// formulier zakt niet naar de linker rand: de kolom die bij de andere rijen gilt, geldt ook hier.
+/// (Gemeten aan "max output tokens (0 = server)": dat etiket is breder dan de kolom en zijn veld
+/// belandde vóór de velden erboven in plaats van onder ze.)
+fn form_row(ui: &mut Ui, label: impl Into<String>, build: impl FnOnce(&mut Ui)) {
+    let text = dim(label);
+    let taken = ui.available_size_before_wrap();
+    // Meten in plaats van gokken op een tekenbreedte. `into_galley` is de weg die de label zelf ook
+    // gaat: hij lost de letter op zoals de stijl die voorschrijft (`widget_text.rs:742`) en een
+    // oneindige breedte breekt niets, dus `size()` is de echte breedte van het etiket. Zo is de maat
+    // die meet ook de maat die tekent.
+    let inkling = text.clone().into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body);
+    if inkling.size().x + ui.spacing().item_spacing.x <= LABEL_COLUMN {
+        ui.horizontal(|ui| {
+            ui.add_sized([LABEL_COLUMN, 20.0], egui::Label::new(text).selectable(false));
+            build(ui);
+        });
+        // `ui.horizontal` krompt de rij tot zijn inhoud; deze zet houdt het formulier op zijn breedte,
+        // zodat elke rij eindigt waar de vorige eindigde en het schuifvlak niet per rij verspringt.
+        ui.set_min_width(taken.x);
+    } else {
+        // Eén rij met een smal dak en daaronder de gebruikelijke veldkolom. `ui.with` tekent de
+        // kaders op dezelfde plek en in dezelfde volgorde, dus het etiket blijft boven het veld.
+        ui.horizontal(|ui| {
+            // `with_layout` en niet `with`: deze egui-build kent alleen de eerste (`ui.rs:2470`).
+            ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+                ui.set_width(LABEL_COLUMN - ui.spacing().item_spacing.x);
+                ui.label(text);
+            });
+            ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+                ui.set_width((taken.x - LABEL_COLUMN).max(0.0));
+                build(ui);
+            });
+        });
+        ui.set_min_width(taken.x);
+    }
+}
+
 /// commands go out by value, so a click commits once against the state that produced it.
 pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<SettingsCommand>) {
     let mut commands: Vec<SettingsCommand> = Vec::new();
@@ -643,46 +692,66 @@ pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<S
 /// De kiezer toont dus wat er op slot staat en niet wat er nu op screen staat; dat verschil is
 /// precies wat het verschil tussen "kies" en "pas toe" zichtbaar maakt.
 fn language_row(ui: &mut Ui, view: &mut SettingsView) {
-    ui.label(dim(Texts::get(Key::LanguageLabel)));
-    let mut current = view.language;
-    let picker = egui::ComboBox::from_id_salt("settings-language")
-        .selected_text(view.language.native_name())
-        .show_ui(ui, |ui| {
-            for option in Language::ALL {
-                ui.selectable_value(&mut current, option, option.native_name());
-            }
-        })
-        .response;
-    picker.on_hover_text(Texts::get(Key::TipLanguage));
-    view.language = current;
+    form_row(ui, Texts::get(Key::LanguageLabel), |ui| {
+        let mut current = view.language;
+        let picker = egui::ComboBox::from_id_salt("settings-language")
+            .selected_text(view.language.native_name())
+            .show_ui(ui, |ui| {
+                for option in Language::ALL {
+                    ui.selectable_value(&mut current, option, option.native_name());
+                }
+            })
+            .response;
+        picker.on_hover_text(Texts::get(Key::TipLanguage));
+        view.language = current;
+    });
 }
 
 fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<SettingsCommand>) {
-    ui.label(dim(Texts::get(Key::BaseUrlLabel)));
-    let response = ui.add_sized(
-        [ui.available_width(), 20.0],
-        egui::TextEdit::singleline(&mut view.base_url)
-            // Het zout is het adres van tests/tabs.rs: een test telt dit veld mee als bewijs dat het
-            // formulier getekend is. Waarom het adres hier aan de body-`Ui` hangt en niet vlak op de
-            // wortel staat — en wat de test daarvoor moet samenstellen — staat bij `FIELD_ENDPOINT`.
-            .id_salt(FIELD_ENDPOINT)
-            .hint_text("http://127.0.0.1:8000/v1")
-            .desired_width(f32::INFINITY),
-    )
-    .on_hover_text(Texts::get(Key::TipBaseUrl));
-    // Retyping the endpoint invalidates the picker: models belong to the endpoint that listed them.
-    if response.changed() {
-        view.fetched_for = None;
-    }
+    // Het adres is één rij met zijn etiket; de knoppen eronder zijn geen veld maar een bediening,
+    // en die houden hun eigen regel — `SettingsPanel.kt` kent die knoppen niet eens, ze zijn hier
+    // het antwoord op "welke server spreekt dit".
+    // Of het adres de focus draagt, is nodig buiten de rij: Enter hieronder mag alleen gelden voor
+    // dit veld, anders zou een Enter in welk veld dan ook een listing afvuren. Daarom staat de lezing
+    // hier en niet in de sluiting, want `form_row` geeft die waar niet terug.
+    let mut focused = false;
+    // De breedte die het formulier hier bezet, gelezen vóördat de knoppen eronder hem kunnen verlagen:
+    // `ui.horizontal` krompt een rij tot zijn inhoud, en zonder deze zet springt het schuifvlak per rij.
+    let rij_breed = ui.available_size_before_wrap().x;
+    form_row(ui, Texts::get(Key::BaseUrlLabel), |ui| {
+        let response = ui
+            .add_sized(
+                [ui.available_width(), 20.0],
+                egui::TextEdit::singleline(&mut view.base_url)
+                    // Het zout is het adres van tests/tabs.rs: een test telt dit veld mee als bewijs dat het
+                    // formulier getekend is. Waarom het adres hier aan de body-`Ui` hangt en niet vlak op de
+                    // wortel staat — en wat de test daarvoor moet samenstellen — staat bij `FIELD_ENDPOINT`.
+                    .id_salt(FIELD_ENDPOINT)
+                    .hint_text("http://127.0.0.1:8000/v1")
+                    .desired_width(f32::INFINITY),
+            )
+            .on_hover_text(Texts::get(Key::TipBaseUrl));
+        // Retyping the endpoint invalidates the picker: models belong to the endpoint that listed them.
+        if response.changed() {
+            view.fetched_for = None;
+        }
+        focused = response.has_focus();
+    });
+    // De knoppen zijn geen veld maar een bediening, en daarom zijn ze geen etiket-rij: ze staan op de
+    // veldkolom, direct onder het adres, met een leeg etiketslot erlinks. Daarvoor stond de "Fetch
+    // (GET /models)" plat tegen de linker rand, los van de kolom van het veld waarop hij hoort.
     let fetch_now = ui
-        .add_enabled(
-            !view.fetching,
-            egui::Button::new(
-                if view.fetching { Texts::get(Key::Fetching) } else { Texts::get(Key::FetchModels) },
-            ),
-        )
-        .clicked();
+        .horizontal(|ui| {
+            ui.add_sized([LABEL_COLUMN, 20.0], egui::Label::new("").selectable(false));
+            ui.add_enabled(
+                !view.fetching,
+                egui::Button::new(if view.fetching { Texts::get(Key::Fetching) } else { Texts::get(Key::FetchModels) }),
+            )
+            .clicked()
+        })
+        .inner;
     ui.horizontal(|ui| {
+        ui.add_sized([LABEL_COLUMN, 20.0], egui::Label::new("").selectable(false));
         // The second question about an address: not which models are on it, but what it answers.
         // Deliberately its own button rather than part of Fetch, because a probe names a model, and
         // naming one a machine has to page in displaces the one it is keeping warm.
@@ -704,9 +773,10 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
             ui.label(dim(format!("protocol: {word}")));
         }
     });
+    ui.set_min_width(rij_breed);
     // Enter in the endpoint field fetches, because the first thing a person does after typing an
     // address is ask what is on it.
-    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter)) && response.has_focus();
+    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter)) && focused;
     if (fetch_now || enter) && !view.fetching {
         view.fetching = true;
         view.status = format!("asking {}…", view.base_url.trim());
@@ -718,48 +788,56 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
 }
 
 fn model_row(ui: &mut Ui, view: &mut SettingsView) {
-    ui.label(dim(Texts::get(Key::ModelLabel)));
+    // Het woord van de rij is de vraag, het veld erachter is het antwoord; een los woord boven een
+    // keuzelijst was het uiterlijk van een koptekst, niet van een veld (`Form.kt:14-32`).
     if view.models.is_empty() {
-        ui.label(dim(if view.fetched_for.is_some() { "this endpoint lists none" } else { "not fetched yet" }));
+        // De rij blijft staan met wat er ontbreekt, want een verdwenen veld laat iemand zoeken naar
+        // een instelling die er wél is. De vroege `return` staat hier en niet in de sluiting, want
+        // die sluiting hoort bij `form_row` en niet bij deze functie.
+        form_row(ui, Texts::get(Key::ModelLabel), |ui| {
+            ui.label(dim(if view.fetched_for.is_some() { "this endpoint lists none" } else { "not fetched yet" }));
+        });
         return;
     }
-    // A combo box over the *fetched* ids, so the panel cannot name a model the endpoint lacks. The
-    // row is what a person reads and the id is what gets stored: `row_for` adds the window to the
-    // name, and the choice below is carried as the id, so a suffix can never reach the settings file.
-    let row_labels: Vec<String> = view.models.iter().map(row_for).collect();
-    let current = view.model.clone().unwrap_or_default();
-    let mut labels: Vec<String> = row_labels.clone();
-    // Offer "keep current" when a saved model is not in the list (an offline endpoint), so opening
-    // the panel never silently drops a working choice.
-    if let Some(saved) = view.model.as_ref().filter(|s| !view.models.iter().any(|m| &m.id == *s)) {
-        labels.insert(0, format!("{saved}  (not listed)"));
-    }
-    // The choice is carried as the id and only *drawn* as a row. Matching the stored id against the
-    // label instead would find nothing once a row reads "Qwen … · 256k", and the picker would open
-    // as "choose…" above a model that is still selected.
-    let mut chosen = current.clone();
-    // The "(not listed)" entry is the one label equal to a bare id, so it is found by this lookup
-    // and every listed model by its row: the field shows exactly what its row shows.
-    let selected = view
-        .models
-        .iter()
-        .find(|m| m.id == current)
-        .map(row_for)
-        .or_else(|| labels.iter().find(|l| *l == &current).cloned())
-        .unwrap_or_else(|| "choose…".to_string());
-    egui::ComboBox::from_id_salt("settings-model")
-        .selected_text(selected)
-        .show_ui(ui, |ui| {
-            for (model, label) in view.models.iter().zip(row_labels.iter()) {
-                ui.selectable_value(&mut chosen, model.id.clone(), label.as_str());
-            }
-        })
-        .response
-        .on_hover_text(Texts::get(Key::TipModel));
-    // Only a listed id is stored; "choose…" and the "(not listed)" entry leave the choice untouched.
-    if chosen != current && view.models.iter().any(|m| m.id == chosen) {
-        view.model = Some(chosen);
-    }
+    form_row(ui, Texts::get(Key::ModelLabel), |ui| {
+        // A combo box over the *fetched* ids, so the panel cannot name a model the endpoint lacks. The
+        // row is what a person reads and the id is what gets stored: `row_for` adds the window to the
+        // name, and the choice below is carried as the id, so a suffix can never reach the settings file.
+        let row_labels: Vec<String> = view.models.iter().map(row_for).collect();
+        let current = view.model.clone().unwrap_or_default();
+        let mut labels: Vec<String> = row_labels.clone();
+        // Offer "keep current" when a saved model is not in the list (an offline endpoint), so opening
+        // the panel never silently drops a working choice.
+        if let Some(saved) = view.model.as_ref().filter(|s| !view.models.iter().any(|m| &m.id == *s)) {
+            labels.insert(0, format!("{saved}  (not listed)"));
+        }
+        // The choice is carried as the id and only *drawn* as a row. Matching the stored id against the
+        // label instead would find nothing once a row reads "Qwen … · 256k", and the picker would open
+        // as "choose…" above a model that is still selected.
+        let mut chosen = current.clone();
+        // The "(not listed)" entry is the one label equal to a bare id, so it is found by this lookup
+        // and every listed model by its row: the field shows exactly what its row shows.
+        let selected = view
+            .models
+            .iter()
+            .find(|m| m.id == current)
+            .map(row_for)
+            .or_else(|| labels.iter().find(|l| *l == &current).cloned())
+            .unwrap_or_else(|| "choose…".to_string());
+        egui::ComboBox::from_id_salt("settings-model")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                for (model, label) in view.models.iter().zip(row_labels.iter()) {
+                    ui.selectable_value(&mut chosen, model.id.clone(), label.as_str());
+                }
+            })
+            .response
+            .on_hover_text(Texts::get(Key::TipModel));
+        // Only a listed id is stored; "choose…" and the "(not listed)" entry leave the choice untouched.
+        if chosen != current && view.models.iter().any(|m| m.id == chosen) {
+            view.model = Some(chosen);
+        }
+    });
 }
 
 /// A picker row: the name the server prefers, and its window when the server said one.
@@ -779,27 +857,29 @@ pub(crate) fn row_for(model: &Model) -> String {
 }
 
 fn reasoning_row(ui: &mut Ui, view: &mut SettingsView) {
-    ui.label(dim(Texts::get(Key::ReasoningEffortLabel)));
-    let mut current = view.reasoning;
-    let reasoning = egui::ComboBox::from_id_salt("settings-reasoning")
-        .selected_text(view.reasoning.label())
-        .show_ui(ui, |ui| {
-            for option in Reasoning::ALL {
-                ui.selectable_value(&mut current, option, option.label());
-            }
-        })
-        .response;
-    reasoning.on_hover_text(Texts::get(Key::TipReasoning));
-    view.reasoning = current;
+    form_row(ui, Texts::get(Key::ReasoningEffortLabel), |ui| {
+        let mut current = view.reasoning;
+        let reasoning = egui::ComboBox::from_id_salt("settings-reasoning")
+            .selected_text(view.reasoning.label())
+            .show_ui(ui, |ui| {
+                for option in Reasoning::ALL {
+                    ui.selectable_value(&mut current, option, option.label());
+                }
+            })
+            .response;
+        reasoning.on_hover_text(Texts::get(Key::TipReasoning));
+        view.reasoning = current;
+    });
 }
 
 fn tokens_row(ui: &mut Ui, view: &mut SettingsView) {
-    ui.label(dim(Texts::get(Key::MaxTokensLabel)));
-    ui.add_sized(
-        [ui.available_width(), 20.0],
-        egui::TextEdit::singleline(&mut view.max_output_tokens).hint_text("e.g. 4096").desired_width(f32::INFINITY),
-    )
-    .on_hover_text(Texts::get(Key::TipMaxTokens));
+    form_row(ui, Texts::get(Key::MaxTokensLabel), |ui| {
+        ui.add_sized(
+            [ui.available_width(), 20.0],
+            egui::TextEdit::singleline(&mut view.max_output_tokens).hint_text("e.g. 4096").desired_width(f32::INFINITY),
+        )
+        .on_hover_text(Texts::get(Key::TipMaxTokens));
+    });
 }
 
 /// De deksel op de tool-lus, naast de keuzelijst die er later boven komt.
@@ -808,37 +888,42 @@ fn tokens_row(ui: &mut Ui, view: &mut SettingsView) {
 /// een bewerkbaar vakje zou een limiet beloven dat niets aangaat. `draft` laat bij `Off` het
 /// opgeslagen limiet staan, dus wat hier niet te bereiken is, wordt ook niet stilletjes gewijzigd.
 fn iterations_row(ui: &mut Ui, view: &mut SettingsView) {
-    ui.label(dim(Texts::get(Key::MaxToolIterationsLabel)));
-    // `add_enabled` zoals `save_row` dat voor een onleesbaar bestand doet; de breedte volgt uit het
-    // formulier, dus het vakje hoeft er niet apart een te krijgen.
-    ui.add_enabled(
-        view.tool_mode != ToolMode::Off,
-        egui::TextEdit::singleline(&mut view.max_tool_iterations).hint_text("e.g. 8").desired_width(ui.available_width()),
-    )
-    .on_hover_text(Texts::get(Key::TipMaxIterations));
+    form_row(ui, Texts::get(Key::MaxToolIterationsLabel), |ui| {
+        // `add_enabled` zoals `save_row` dat voor een onleesbaar bestand doet; de breedte volgt uit het
+        // formulier, dus het vakje hoeft er niet apart een te krijgen.
+        ui.add_enabled(
+            view.tool_mode != ToolMode::Off,
+            egui::TextEdit::singleline(&mut view.max_tool_iterations)
+                .hint_text("e.g. 8")
+                .desired_width(ui.available_width()),
+        )
+        .on_hover_text(Texts::get(Key::TipMaxIterations));
+    });
 }
 
 fn key_row(ui: &mut Ui, view: &mut SettingsView) {
-    ui.label(dim(Texts::get(Key::ApiKeyLabel)));
-    ui.horizontal(|ui| {
+    form_row(ui, Texts::get(Key::ApiKeyLabel), |ui| {
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [ui.available_width(), 20.0],
+                egui::TextEdit::singleline(&mut view.api_key).password(!view.reveal_key),
+            )
+            .on_hover_text(Texts::get(Key::TipApiKey));
+            let toggle = if view.reveal_key { "hide" } else { "show" };
+            if ui.small_button(toggle).clicked() {
+                view.reveal_key = !view.reveal_key;
+            }
+        });
+    });
+    form_row(ui, Texts::get(Key::OrEnvVar), |ui| {
         ui.add_sized(
             [ui.available_width(), 20.0],
-            egui::TextEdit::singleline(&mut view.api_key).password(!view.reveal_key),
+            egui::TextEdit::singleline(&mut view.api_key_env_var)
+                .hint_text(baudet_settings::DEFAULT_KEY_ENV_VAR)
+                .desired_width(f32::INFINITY),
         )
-        .on_hover_text(Texts::get(Key::TipApiKey));
-        let toggle = if view.reveal_key { "hide" } else { "show" };
-        if ui.small_button(toggle).clicked() {
-            view.reveal_key = !view.reveal_key;
-        }
+        .on_hover_text(Texts::get(Key::TipEnvVar));
     });
-    ui.label(dim(Texts::get(Key::OrEnvVar)));
-    ui.add_sized(
-        [ui.available_width(), 20.0],
-        egui::TextEdit::singleline(&mut view.api_key_env_var)
-            .hint_text(baudet_settings::DEFAULT_KEY_ENV_VAR)
-            .desired_width(f32::INFINITY),
-    )
-    .on_hover_text(Texts::get(Key::TipEnvVar));
 }
 
 fn save_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<SettingsCommand>) {
@@ -871,7 +956,6 @@ fn dim(text: impl Into<String>) -> egui::WidgetText {
 fn describe_path(path: &std::path::Path) -> String {
     format!("{}", path.display())
 }
-
 
 /// The two rules this panel exists to enforce, tested where they are actually decided.
 ///
@@ -1036,7 +1120,10 @@ mod tests {
             let mut panel = view();
             panel.max_tool_iterations = tekst.into();
             let problem = panel.draft().unwrap_err();
-            assert!(problem.contains("not a positive number"), "witruimte en onzin moeten benoemd worden, niet gerepareerd: {problem}");
+            assert!(
+                problem.contains("not a positive number"),
+                "witruimte en onzin moeten benoemd worden, niet gerepareerd: {problem}"
+            );
         }
     }
 

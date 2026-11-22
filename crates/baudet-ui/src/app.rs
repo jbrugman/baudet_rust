@@ -24,12 +24,12 @@ use crate::settings::{self, SettingsCommand, SettingsEvent, SettingsView};
 use crate::sidebar::SidebarModel;
 use baudet_app::session::pump;
 use baudet_app::AppState;
-use baudet_i18n::{Key, Texts};
 use baudet_backend::protocol::Protocol;
 use baudet_backend::scripted::{Script, ScriptedBackend};
 use baudet_backend::transport::{Endpoint, ResponsesBackend};
 use baudet_backend::Backend;
 use baudet_core::{AgentMessageItem, Item, ItemStatus, ThreadEvent};
+use baudet_i18n::{Key, Texts};
 use baudet_settings::Provider;
 use eframe::egui;
 use egui::{CentralPanel, ColorImage, Frame, Id, Panel, ScrollArea, UiBuilder};
@@ -56,7 +56,10 @@ enum Intent {
     /// `loadExecutor` en laat `adoptSession` op de EDT zien, ChatPanel.kt:457-478), om dezelfde
     /// reden — een lang gesprek mag het venster niet bevriezen, en een lezing mag nooit door de
     /// schrijfbewegingen van een beurt heen lopen.
-    LoadSession { id: String, project: Option<String> },
+    LoadSession {
+        id: String,
+        project: Option<String>,
+    },
     /// "Begin hier een nieuw gesprek" (`None` is de inbox). Zet alleen klaar: de origineler
     /// persisteert bewust niets (`AppState.startSessionIn`), want anders laat elke klik door de
     /// projectenboom een leeg gesprek achter. De rollout en de catalogusregel komen pas op de
@@ -465,11 +468,8 @@ impl TranscriptApp {
         // herbouwen uit de `JSplitPane` die er nog staat — niet uit het bestand.
         let previous_left = self.live_width(ui.ctx(), "projects");
         let left_width = resolve_divider(previous_left, self.dividers.left, layout::LEFT_WIDTH);
-        let mut intents = if self.show_sidebar {
-            panels::project_sidebar(ui, &mut self.sidebar, left_width)
-        } else {
-            Vec::new()
-        };
+        let mut intents =
+            if self.show_sidebar { panels::project_sidebar(ui, &mut self.sidebar, left_width) } else { Vec::new() };
         // De intenties eerst verwerken en dan pas tekenen wat ernaast staat: de bestandsboom hoort
         // het project van de zojuist gemaakte keuze, niet dat van de vorige pass.
         // De vraag en de bevestiging bellen na de sidebar, op hun eigen laag, en hun intenties
@@ -491,13 +491,7 @@ impl TranscriptApp {
         let left_extent = resolve_divider(previous_right, self.dividers.right, layout::CENTER_WIDTH);
         let right_width = (ui.available_width() - left_extent).max(layout::PANEL_MIN);
         if self.show_filetree
-            && panels::file_tree(
-                ui,
-                &mut self.workspace,
-                &self.changes,
-                &mut self.dividers,
-                right_width,
-            )
+            && panels::file_tree(ui, &mut self.workspace, &self.changes, &mut self.dividers, right_width)
         {
             self.changes.refresh(self.workspace.cwd());
         }
@@ -557,17 +551,11 @@ impl TranscriptApp {
                 let band = ui.available_rect_before_wrap();
                 let root = root_ui_id(ui.ctx());
                 let west = root.with((panels::PANEL_TOGGLES, "sidebar"));
-                if ui
-                    .put(panels::toggle_rect(band, false), panels::Toggle::new(west, false))
-                    .clicked()
-                {
+                if ui.put(panels::toggle_rect(band, false), panels::Toggle::new(west, false)).clicked() {
                     self.show_sidebar = !self.show_sidebar;
                 }
                 let east = root.with((panels::PANEL_TOGGLES, "filetree"));
-                if ui
-                    .put(panels::toggle_rect(band, true), panels::Toggle::new(east, true))
-                    .clicked()
-                {
+                if ui.put(panels::toggle_rect(band, true), panels::Toggle::new(east, true)).clicked() {
                     self.show_filetree = !self.show_filetree;
                 }
                 ui.heading("Baudet");
@@ -596,24 +584,100 @@ impl TranscriptApp {
                 // `Panel::top` en zijn `Frame` dragen op deze egui-build geen instelbaar adres, en de
                 // `Ui` die ze doorgeven zit in de gemeten keten `wortel·kind·kind·tabs·kind`, dus van
                 // buiten niet te reconstrueren; de wortel-Ui van het venster wél (zie `root_ui_id`).
-                // Een `UiBuilder::id(..)`-wikkel met click-sense registreert zijn klik op exact dat
-                // anker plus zijn zout — gemeten, twee passen later leesbaar — en dát is wat een test
-                // terugvindt zonder de paneel-lay-out na te bouwen. De tekst erin is een kaal label:
-                // de klik leeft op de wikkel, niet op de label.
+                // Een wikkel met expliciet id registreert zijn response op exact dat adres — gemeten,
+                // twee passen later leesbaar — en dát is wat tests/tabs.rs terugvindt zonder de
+                // paneel-lay-out na te bouwen. De wikkel draagt géén click-sense: de knop erin is
+                // clickable en schrijft op diens eigen adres, dus er zijn twee klikvlakken en de test
+                // leest het anker, terwijl de klik zelf via de knop binnenkomt.
+                //
+                // Een `Button::selectable` en geen kaal `Label`: een kaal label tekent geen vlak en geen
+                // rand, dus de strip toonde losse woorden boven het middenvlak en niemand kon zien dat
+                // het een keuze was, noch welke keuze gold — de klacht "de tabs zien er niet uit als tab".
+                // De selecteerbare knop tekent zijn vlak uit `weak_bg_fill` met de hoek van het palet, en
+                // voor de actieve tab geldt `SELECTED_CLASS`, waarvan `button_style` vlak én rand op
+                // `visuals.selection` zet (`widget_style.rs:149-153`): de actieve tab draagt dus het
+                // gemeten selectievlak, de andere is een gewone knop. Waarom `frame_when_inactive` erbij
+                // moet, staat bij de knop zelf. Dat is wat de origineler een `JTabbedPane` laat doen
+                // (`Main.kt:131-134`).
+                //
+                // De bak die de knop tekenen mag, wordt hier opgemaakt en niet aan de knop overgelaten,
+                // want de maat van de knop was precies wat twee keer misging. De lay-out van de strook
+                // sloop door `UiBuilder::new()` heen door (`ui.rs:228`) en `Layout::horizontal()` is
+                // `main_wrap: true` (`layout.rs:435`), dus een bak breder dan de strook wikkelt naar een
+                // tweede rij en de twee tabbladen verdwenen onder elkaar — gemeten aan de rects: "Chat"
+                // op y 52..76 en "Settings" op y 59..83, en de test klikte toen naast de knop. En de knop
+                // zelf (`AtomLayout::allocate` neemt `ui.available_size()`, `atom_layout.rs:435`) sneed
+                // uit naar de hele strook, want die is breder dan één tab. Daarom: `top_down` als lay-out
+                // van de wikkel, geen `main_wrap` dus geen vouw, en `put` tekenen-op-een-plaats in een
+                // bak van eigen maat. Binnen die bak vult `add_sized` de knop (`ui.rs:1535-1546`), zodat
+                // het getekende vlak binnen de klikbare rect blijft en de rect die een test klikt, de
+                // rect is die tekent.
                 let root = root_ui_id(ui.ctx());
-                ui.horizontal_wrapped(|ui| {
+                // Maat uit het eigen lettertype, niet uit een raden, en gelijk voor beide knoppen:
+                // woorden van verschillende breedte oogden als tekst, niet als knoppen. De breedte is
+                // het langste tabwoord dat hier voorkomt — in het Duits "Einstellungen" — met de vulling
+                // van de knop eromheen; de hoogte is een aanwijsbare rij.
+                let tab_size = {
+                    let pad = ui.spacing().button_padding;
+                    let widest = Tab::ALL
+                        .iter()
+                        .map(|candidate| {
+                            egui::WidgetText::from(candidate.label()).into_galley(
+                                ui,
+                                Some(egui::TextWrapMode::Extend),
+                                f32::INFINITY,
+                                egui::TextStyle::Button,
+                            )
+                        })
+                        .fold(0.0_f32, |w, galley| w.max(galley.size().x));
+                    egui::vec2(widest + 2.0 * pad.x + 8.0, ui.spacing().interact_size.y.max(24.0))
+                };
+                // De strook erft zijn uitlijning van het `Panel::top`-kader, en dat is `RightTop`
+                // gemeten: de Woord-schakelaar en het Baudet-woord staan er ook in. Voor een rij
+                // knoppen betekent die uitlijning dat de hoogste het dak bepaalt en de andere mee naar
+                // beneden zakt — gemeten: "Chat" op y 52..76 en "Settings" op y 59..83, dus twee
+                // knoppen van verschillende hoogte en één die losser hing. `LeftTop` is wat de
+                // origineler doet: zijn `JTabbedPane`-tabs staan links en boven, en elk tabblad vult
+                // zijn eigen slot (`Main.kt:131-134`).
+                ui.horizontal_top(|ui| {
+                    // `horizontal_top` en niet `horizontal_wrapped`: beide tabbladen passen in elke breedte
+                    // die dit venster haalt, en een strip die omvouwt, verbergt de weg terug uit een tab.
                     for candidate in Tab::ALL {
+                        // De plek die de rij de volgende knop aanbiedt, vóórdat de knop hem opeist.
+                        let slot = egui::Rect::from_min_size(ui.next_widget_position(), tab_size);
                         let clicked = ui
                             .scope_builder(
                                 UiBuilder::new()
                                     .id(root.with((TABSTRIP, candidate.label())))
-                                    .sense(egui::Sense::click()),
+                                    .max_rect(slot)
+                                    .layout(egui::Layout::top_down(egui::Align::Center)),
                                 |ui| {
-                                    ui.add(egui::Label::new(candidate.label()).selectable(false));
+                                    // De bak is de maat, en de knop vult hem: `add_sized` centreert en
+                                    // vult (`ui.rs:1535-1546`), zodat het getekende vlak binnen de
+                                    // klikbare rect blijft in plaats van er met de omkeringen bovenuit
+                                    // te steken.
+                                    // `selected` is de enige knop die het selectievlak draagt — het
+                                    // woord "active" was hier te weinig: de andere drie tabbladen
+                                    // verdwenen dan uit de strip. `frame_when_inactive` is de *andere*
+                                    // helft, en die was het gemeten gebrek. `Button::selectable` zet hem
+                                    // op `!selected` (`button.rs:78-83`), en `atom_ui` tekent het frame
+                                    // alleen bij `state != Inactive || frame_when_inactive`
+                                    // (`button.rs:358-362`). Na een klik blijft de aangeklikte knop de
+                                    // hele pass `Inactive`, want de klik leeft op de knop zelf en de
+                                    // muis staat er nog — dus de tab die er net is, tekende koepel, en
+                                    // de overige twee tekenden in het geheel geen vlak: platte woorden,
+                                    // precies de klacht. Met `true` tekenen allebei hun bak en blijft
+                                    // het selectievlak het enige verschil tussen "hier" en "ergens
+                                    // anders". `selected` drukt uit wat er geldt, niet wat er geklikt is.
+                                    ui.add_sized(
+                                        tab_size,
+                                        egui::Button::selectable(tab == candidate, candidate.label())
+                                            .frame_when_inactive(true),
+                                    )
+                                    .clicked()
                                 },
                             )
-                            .response
-                            .clicked();
+                            .inner;
                         if clicked {
                             self.active_tab = Some(candidate);
                         }
@@ -840,7 +904,6 @@ impl TranscriptApp {
 /// reconstruëren is, dus de klik wordt op de wikkel geteld, niet op die knop.
 pub const TABSTRIP: &str = "tabstrip";
 
-
 /// Het stabiele zout van het vraagveld.
 ///
 /// `.id_salt` geeft het veld een vast adres *relatief aan zijn ouder-`Ui`*, dus een toevallige
@@ -924,7 +987,6 @@ impl TranscriptApp {
     fn has_more_older(&self) -> bool {
         self.more_older
     }
-
 
     fn composer(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -1065,10 +1127,7 @@ impl eframe::App for TranscriptApp {
         // origineler doet exact hetzelfde op de sluitgebeurtenis (`Main.kt:96-105`), met dezelfde
         // drie waarden in één aanroep. Een screenshot-run schrijft niets: die heeft niemand
         // gevraagd iets te onthouden, en een test-beeld mag het bestand van de persoon niet aanraken.
-        if self.shot.is_none()
-            && !self.geometry_saved
-            && ctx.input(|input| input.viewport().close_requested())
-        {
+        if self.shot.is_none() && !self.geometry_saved && ctx.input(|input| input.viewport().close_requested()) {
             self.geometry_saved = true;
             self.save_geometry(&ctx);
         }
@@ -1314,13 +1373,10 @@ fn after_turn(
         // `last_seq` is het aantal beurten, niet het aantal regels: de titel van een rij in de
         // sidebar is "N beurten", en `transcript_len` geeft beide tellingen in die volgorde.
         let (_, turns) = state.transcript_len();
-        catalog
-            .upsert_session(&id, Some(&state.model()), state.project().as_deref(), turns as i32)
-            .ok();
+        catalog.upsert_session(&id, Some(&state.model()), state.project().as_deref(), turns as i32).ok();
     }
     state.disk_items()
 }
-
 
 ///
 /// De lezing en de ruil zitten in één move omdat deze worker de enige eigenaar van `state` is:

@@ -17,8 +17,8 @@
 mod app;
 // Publiek zodat tests/tabs.rs dat palet tekent en niet een standaard-`Visuals`: de vormen waarmee
 // die test maten vergelijkt, zijn de vormen van dit venster.
-pub mod palette;
 pub mod clipboard;
+pub mod palette;
 // Publiek zodat tests/folder_open.rs het commit-pad (Workspace::open) buiten de lay-out
 // kan meten: het mappadveld zit in een SidePanel-kolom en is niet root-adresseerbaar om in te
 // typen, dus het commit-pad wordt hier rechtstreeks aangesproken.
@@ -42,9 +42,9 @@ pub use app::{root_ui_id, Tab, TABSTRIP};
 pub use panels::{NO_FOLDER, NO_READ, TREE_REFRESH};
 // De intenties en het adres van de `Add project`-knop: tests/folder_open.rs en tests/project_tree.rs
 // klikken op dat adres, dus het moet van buiten te noemen zijn.
+pub use layout::{resolve_divider, worth_remembering, Dividers};
 pub use palette::DiffLine;
 pub use panels::{SidebarIntent, ASK_OK, CONFIRM_YES, PANEL_TOGGLES, SIDEBAR_ADD};
-pub use layout::{resolve_divider, worth_remembering, Dividers};
 pub use rows::Row;
 pub use sidebar::{Confirm, NameAsk, Selection, SidebarModel, SidebarOutcome};
 
