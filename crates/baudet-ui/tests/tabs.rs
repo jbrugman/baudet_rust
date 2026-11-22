@@ -16,7 +16,7 @@
 //!    uitglijden, precies zoals `App::ui` hem voor een persoon doet. `app.tab()` is de lezing van het
 //!    antwoord: hetzelfde veld dat de strip schrijft en de paint-pass leest.
 
-use baudet_ui::{root_ui_id, TranscriptApp, Tab, TABSTRIP};
+use baudet_ui::{root_ui_id, Tab, TranscriptApp, TABSTRIP};
 use eframe::egui;
 
 const SCREEN: [f32; 2] = [1200.0, 800.0];
@@ -113,4 +113,3 @@ fn een_klik_op_een_tabknop_wisselt_het_tabblad() {
         assert_eq!(app.tab(), target, "klik op {} zette niet dat tabblad", target.label());
     }
 }
-

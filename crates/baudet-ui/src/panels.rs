@@ -14,6 +14,7 @@
 //! it was until the folder is chosen again.
 
 use crate::palette;
+use crate::sidebar::{Confirm, NameAsk, PermissionState, Selection, SidebarModel, UNASSIGNED};
 use baudet_core::{probe_changes, probe_git, ChangeKind, ChangedFile, GitMeta};
 use egui::{Color32, Panel, ScrollArea, Ui};
 use std::path::{Path, PathBuf};
@@ -211,14 +212,10 @@ pub fn left(ui: &mut Ui, workspace: &mut Workspace, draft: &mut String, meta: Op
             // `with_main_wrap(false)`: zonder die regel wrapt de tweede knop naar een eigen rij zodra
             // het veld op 0 staat, en dan valt de rij alsnog buiten de rand (gemeten bij 130 pt).
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(false), |ui| {
-                field = Some(
-                    ui.add_sized(
-                        [field_width, 20.0],
-                        egui::TextEdit::singleline(draft)
-                            .id_salt(FOLDER_FIELD)
-                            .hint_text("folder path"),
-                    ),
-                );
+                field = Some(ui.add_sized(
+                    [field_width, 20.0],
+                    egui::TextEdit::singleline(draft).id_salt(FOLDER_FIELD).hint_text("folder path"),
+                ));
                 // De native kiezer van het besturingsselt, niet een eigen boom in een venster: mappen
                 // tonen, snelkoppelingen herkennen en de voorkeur van iemand vinden, is het werk van
                 // de zoeker die er al is.
@@ -253,7 +250,8 @@ pub fn left(ui: &mut Ui, workspace: &mut Workspace, draft: &mut String, meta: Op
         // `lost_focus()` per definitie onwaar — de commitslag kon dus ook via het toetsenbord nooit
         // vallen. De juiste vraag is "stond er iets in het veld toen de Enter of de knop kwam". Een
         // leeg veld betekent nog steeds "houd wat open is", dus een dwaal-Enter wist de paneel niet.
-        let enter_in_field = field.is_some_and(|field| field.has_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let enter_in_field =
+            field.is_some_and(|field| field.has_focus()) && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if (open_clicked || enter_in_field) && !draft.trim().is_empty() {
             requested = Some(draft.trim().to_string());
             // Een geopend pad hoeft niet in het veld te blijven staan: de folder-regel hieronder toont
@@ -304,6 +302,400 @@ pub fn left(ui: &mut Ui, workspace: &mut Workspace, draft: &mut String, meta: Op
         return true;
     }
     false
+}
+
+// ---------------------------------------------------------------------------------------------
+// De linkersidebar: projecten, hun sessies en de maprechten van wat is gekozen.
+// ---------------------------------------------------------------------------------------------
+
+/// Het zout van de `Add project`-knop. Samen met `root_ui_id` is dat adres van buiten te vinden en
+/// te klikken, zoals `TABSTRIP` en `FOLDER_OPEN`: een kale `small_button` in een `SidePanel`-kolom
+/// adresseert relatief aan die kolom en verdween daar eerder voorbij de rand — dezelfde clase als de
+/// tabstrip en de `Open`-knop al hadden.
+///
+/// Het contextmenu heeft geen vast adres: de items zitten in een popup op de muis en hun handeling
+/// bereikt het model via `MenuAction`, niet via een klik op een bekend id.
+pub const SIDEBAR_ADD: &str = "sidebar-add-project";
+
+/// Wat er na een Paint te doen is. De sidebar is de enige die deze intenties *verzint*; wie ze
+/// uitvoert, beslist de aanroeper. zo blijft de UI-knoop klein en wordt de sessie-lading uit item D
+/// later één plaats in de lay-out, niet een zoektocht door de paint-pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidebarIntent {
+    /// Er is een sessie gekozen of aangemaakt. Item D maakt hier van het id een geladen gesprek; nu
+    /// is het alleen de deur die openstaat — de sidebar doet niet alsof er al iets achter ligt.
+    OpenSession(String),
+    /// De chat moet een nieuw gesprek in dit project beginnen (`None` = de inbox).
+    StartChat(Option<String>),
+    /// Er is iets weggehaald; wat er in het midden stond, is mogelijk niet meer waar.
+    Deleted,
+}
+
+/// De linkersidebar. Geeft de intenties terug die deze pass heeft opgeleverd. De catalogus zelf is
+/// dan al bijgeschreven door `SidebarModel`, dus een intentie is nooit een verzoek om op te slaan.
+pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel) -> Vec<SidebarIntent> {
+    let mut intents = Vec::new();
+    let frame = Panel::left("projects")
+        .resizable(true)
+        .default_size(280.0)
+        // 190 pt, niet een rond getal: de vloer volgt de breedste riem van het paneel. Het
+        // rechtenvakje met zijn titel plus de drie woorden van de disk-rij — in dezelfde stijl
+        // getekend als hieronder — zijn samen ~165 pt, plus de margering van de `Frame`.
+        .min_size(190.0)
+        .frame(egui::Frame::side_top_panel(ui.style()));
+    frame.show(ui, |ui| {
+        // --- bovenrij: één knop, één handeling per klik. ---
+        let root = crate::app::root_ui_id(ui.ctx());
+        if ui
+            .scope_builder(
+                egui::UiBuilder::new().id(root.with((SIDEBAR_ADD, "add"))).sense(egui::Sense::click()),
+                |ui| {
+                    ui.add(egui::Label::new("Add project").selectable(false));
+                },
+            )
+            .response
+            .clicked()
+        {
+            // De vraag verschijnt in het paneel zelf, niet in een zwevend modaal venster: de
+            // origineler gebruikt `JOptionPane`, maar een los venster boven de sidebar zou precies
+            // de klacht terughalen die de settings-overlay hier al had.
+            model.cancel_confirm();
+            model.start_name(NameAsk::NewProject, None);
+        }
+
+        ui.separator();
+
+        // --- de boom: projecten met hun sessies, dan de inbox. ---
+        ScrollArea::vertical().id_salt("project-tree").auto_shrink([false, false]).show(ui, |ui| {
+            let projects = model.catalog().list_projects();
+            for project in &projects {
+                let sessions = model.catalog().sessions_in(Some(&project.id));
+                let response = egui::CollapsingHeader::new(project_label(&project.name, project.archived))
+                    .id_salt(project.id.clone())
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        for session in &sessions {
+                            session_row(ui, model, Some(project.id.clone()), session, &mut intents);
+                        }
+                        if sessions.is_empty() {
+                            ui.label(dim("no conversations"));
+                        }
+                    });
+                if response.header_response.clicked() {
+                    model.select_project(Some(&project.id));
+                    intents.push(SidebarIntent::StartChat(Some(project.id.clone())));
+                }
+                row_menu(ui, &response.header_response, model, Some(project.id.clone()), None, &mut intents);
+            }
+
+            let inbox = model.catalog().sessions_in(None);
+            // `.selected(..)` bestaat op `CollapsingHeader` niet in deze egui-versie (0.36), dus de
+            // inbox-markering steekt in een dik lettertype: het is een markeerstijl, geen nabouwsel
+            // van een selectie-api die er niet is.
+            let inbox_label = if model.selection() == Some(&Selection::Unassigned) {
+                egui::RichText::new(UNASSIGNED).strong()
+            } else {
+                egui::RichText::new(UNASSIGNED)
+            };
+            let response =
+                egui::CollapsingHeader::new(inbox_label).id_salt(UNASSIGNED).default_open(true).show(ui, |ui| {
+                    for session in &inbox {
+                        session_row(ui, model, None, session, &mut intents);
+                    }
+                    if inbox.is_empty() {
+                        ui.label(dim("nothing unassigned"));
+                    }
+                });
+            if response.header_response.clicked() {
+                model.select_project(None);
+                intents.push(SidebarIntent::StartChat(None));
+            }
+            row_menu(ui, &response.header_response, model, None, None, &mut intents);
+        });
+
+        ui.separator();
+
+        // --- onderaan: de map van het gekozen project en wat de schijf ervan toestaat. ---
+        match model.permission_state() {
+            None => {
+                ui.label(dim("folder: no project selected"));
+            }
+            Some(state) => {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.strong("Folder permissions");
+                    ui.label(format!(
+                        "folder: {}",
+                        state.folder.clone().unwrap_or_else(|| "no folder linked".to_string())
+                    ));
+                    if let Some(capability) = &state.disk_capability {
+                        ui.label(dim(capability.clone()));
+                    }
+                    permission_boxes(ui, &state, model);
+                });
+            }
+        }
+
+        // --- de tekst-riem en de bevestiging: een incident, geen vast onderdeel van de lay-out. ---
+        ask_and_confirm(ui, model, &mut intents);
+    });
+    intents
+}
+
+/// Eén sessie-riem. Een klik kiest en vraagt om opening; het menu vraagt om handelen.
+fn session_row(
+    ui: &mut Ui,
+    model: &mut SidebarModel,
+    project: Option<String>,
+    session: &baudet_projects::SessionSummary,
+    intents: &mut Vec<SidebarIntent>,
+) {
+    let selected = model.selected_session_id() == Some(session.id.as_str());
+    // `SelectableLabel` bestaat in deze egui-build niet meer; `Button::selected` is wat erover is
+    // gegaan (widgets/button.rs:270) en doet hetzelfde: een riem met de selectie-inkt. `frame(false)`
+    // houdt het een lijst-riem in plaats van een knop, want dit is een keuze uit een boom en geen
+    // handeling op zichzelf.
+    // `push_id` en niet `.id_salt`: een `Button` heeft in deze build geen id-zout (alleen
+    // `CollapsingHeader` en `TextEdit` dragen die), dus het adres komt van de wikkel eromheen —
+    // dezelfde techniek als de tabstrip, alleen nu binnen de boom. `push_id` neemt in 0.36 de
+    // sluiting direct aan en draagt het antwoord ervan terug in een `InnerResponse`.
+    let row = ui
+        .push_id(session.id.clone(), |ui| {
+            let row =
+                ui.add(egui::Button::new(truncate_head(&session.title, KEEP_TAIL)).frame(false).selected(selected));
+            row.on_hover_text(session.title.clone())
+        })
+        .inner;
+    if row.clicked() {
+        model.select_session(&session.id);
+        intents.push(SidebarIntent::OpenSession(session.id.clone()));
+    }
+    row_menu(ui, &row, model, project, Some(session.id.clone()), intents);
+}
+
+/// De drie vakjes. Ze zijn alleen aanraakbaar als er een map is: `add_enabled_ui(false)` tekent ze
+/// in de inactieve inkt en maakt ze onklikbaar, dus "er is geen map" is aan de widgets zelf te zien
+/// en niet alleen aan het label erboven.
+fn permission_boxes(ui: &mut Ui, state: &PermissionState, model: &mut SidebarModel) {
+    let mut read = state.read;
+    let mut write = state.write;
+    let mut execute = state.execute;
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(state.checkbox_enabled, |ui| {
+            ui.checkbox(&mut read, "Read");
+            ui.checkbox(&mut write, "Write");
+            ui.checkbox(&mut execute, "Execute");
+        });
+    });
+    if (read, write, execute) != (state.read, state.write, state.execute) {
+        // Alleen bijschrijven als er iets veranderde: de catalogus schrijft per oproep weg, en een
+        // vinkje dat niets verrandert, mag geen schijf-aktie zijn.
+        let _ = model.set_permissions(read, write, execute);
+    }
+}
+
+/// De vraag-om-naam-riem en de bevestigingsriem, onder alles. Beide zijn dezelfde riem-vorm: een
+/// regel tekst, een of twee knoppen, en het paneel weet wat er stond.
+fn ask_and_confirm(ui: &mut Ui, model: &mut SidebarModel, intents: &mut Vec<SidebarIntent>) {
+    if let Some(ask) = model.ask_name.clone() {
+        ui.separator();
+        ui.label(ask.prompt());
+        let field = ui.add(egui::TextEdit::singleline(&mut model.name_entry).hint_text("naam").desired_width(140.0));
+        let submit = field.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        ui.horizontal(|ui| {
+            if (ui.button("OK").clicked() || submit) && model.answer_name().is_some() {
+                // De intentie gaat alleen uit als de vraag iets opleverde: een lege naam bij een nieuw
+                // project is geen wijziging, dus het middenpaneel hoeft dan niets te laten vallen.
+                intents.push(SidebarIntent::Deleted);
+            }
+            if ui.button("Annuleer").clicked() {
+                model.cancel_name();
+            }
+        });
+        return;
+    }
+    if let Some(confirm) = model.confirm.clone() {
+        ui.separator();
+        ui.label(confirm.prompt(model));
+        ui.horizontal(|ui| {
+            if ui.button("Verwijder").clicked() && model.answer_confirm(true).is_some() {
+                intents.push(SidebarIntent::Deleted);
+            }
+            if ui.button("Annuleer").clicked() {
+                model.cancel_confirm();
+            }
+        });
+    }
+}
+
+/// Een projectriem met hetzelfde archief-achtervoegsel als `ProjectNode.toString()` in de
+/// origineler, zodat een gearchiveerd project niet voor een actief project doorgaat.
+fn project_label(name: &str, archived: bool) -> String {
+    if archived {
+        format!("{name} (archived)")
+    } else {
+        name.to_string()
+    }
+}
+
+/// Het contextmenu van één riem: rechtermuisklik zet het op de muis, zoals `maybePopup` in de
+/// origineler het op de klikplaats neerzet.
+///
+/// De klik kiest de riem *zacht*: de selectie volgt mee, maar er gaat geen intentie uit. Iemand die
+/// een knoop rechts aanklikt om erover te handelen, vraagt niet om erheen te reizen. Dat is de
+/// `refreshing`-wacht uit de origineler, alleen nu in types.
+///
+/// Twee egui-eigenschappen dragen die wacht mee: `context_menu(..)` sluit het menu zelf zodra de
+/// riem links wordt geklikt (containers/popup.rs:248), en `show` vraagt een `FnOnce`, dus de
+/// handeling mag hier niet plaatsvinden terwijl het model al door de boom-lus in bruikleen is. Daarom
+/// verzamelt de sluiting slechts één handeling en voert die ná de pass uit, als de lezing van de catalogus
+/// vrij is.
+fn row_menu(
+    _ui: &mut Ui,
+    row: &egui::Response,
+    model: &mut SidebarModel,
+    project: Option<String>,
+    session: Option<String>,
+    intents: &mut Vec<SidebarIntent>,
+) {
+    // Eén lezing van het menu, dan één handeling. `Popup::show` vraagt een `FnOnce` en mag het model
+    // niet muteren zolang de rijen eromheen het lezen, dus de sluiting geeft terug wat er gekozen is.
+    // Eén handeling per pass. `Popup::show` vraagt een `FnOnce` en de rijen van de boom lenen het
+    // model al, dus de sluiting is pure keuze (`menu_item` raakt het model niet) en de handeling
+    // gebeurt hieronder, ná de pass. De popup geeft zijn antwoord in een `Option<InnerResponse>`
+    // terug, dus `and_then` plukt de keuze uit de wikkel; een lokaal `picked`-variabel zou de
+    // sluiting een tweede mutabele leen geven.
+    //
+    // De aanroep staat in élke pass, niet alleen bij de secundaire klik, en die volgorde is geen
+    // bijzaak: `context_menu` produceert per pass het commando voor dit popup-state (popup.rs:248-258)
+    // — `Bool(true)` bij een secundaire klik, `Bool(false)` bij een linkerklik — en `show` is de
+    // enige plek waar dat commando wordt uitgevoerd (popup.rs:517-529). Sla je die aanroep over bij
+    // een linkerklik, dan sluit het menu niet. Verder telt één knoop per viewport
+    // (memory/mod.rs:1112-1115): een secundaire klik op een andere riem vervangt het menu, en een
+    // pass waarin geen enkele riem het state levend houdt, ruimt de pop-up weg
+    // (`open_this_frame` is dan niet meer gezet, memory/mod.rs:806-819).
+    let picked = egui::Popup::context_menu(row)
+        .show(|ui: &mut Ui| menu_item(ui, project.as_deref(), session.as_deref()))
+        .and_then(|response| response.inner);
+    match (&project, &session) {
+        (Some(project), None) => model.select_project(Some(project)),
+        (_, Some(session)) => model.select_session(session),
+        (None, None) => model.select_project(None),
+    }
+    match picked {
+        Some(MenuAction::NewSession) => {
+            if let Ok(created) = model.add_session(project.as_deref()) {
+                intents.push(SidebarIntent::OpenSession(created.id));
+            }
+        }
+        Some(MenuAction::Open) => {
+            if let Some(session) = &session {
+                model.select_session(session);
+                intents.push(SidebarIntent::OpenSession(session.clone()));
+            }
+        }
+        Some(MenuAction::Rename) => match (&project, &session) {
+            (_, Some(session)) => {
+                let title = model.session_title(session);
+                model.start_name(NameAsk::RenameSession(title), Some(session.clone()));
+            }
+            (Some(project), None) => {
+                let name = model.project_name(project).unwrap_or_default();
+                model.start_name(NameAsk::RenameProject(name), Some(project.clone()));
+            }
+            (None, None) => {}
+        },
+        Some(MenuAction::ToggleArchive) => {
+            if let Some(project) = &project {
+                let archived = model.project_archived(project).unwrap_or(false);
+                let _ = model.set_archived(project, !archived);
+            }
+        }
+        Some(MenuAction::LinkFolder) => {
+            if let (Some(project), Some(chosen)) = (&project, pick_folder()) {
+                let _ = model.link_folder(project, Some(&chosen));
+            }
+        }
+        Some(MenuAction::UnlinkFolder) => {
+            if let Some(project) = &project {
+                let _ = model.link_folder(project, None);
+            }
+        }
+        Some(MenuAction::DeleteProject) => {
+            if let Some(project) = &project {
+                let count = model.session_count(project);
+                model.start_confirm(Confirm::DeleteProject(project.clone(), count));
+            }
+        }
+        Some(MenuAction::DeleteSession) => {
+            if let Some(session) = &session {
+                model.start_confirm(Confirm::DeleteSession(session.clone()));
+            }
+        }
+        None => {}
+    }
+}
+
+/// Wat er in het menu stond. Eén handeling per pass: een menu dat twee dingen tegelijk zou doen,
+/// zou in dezelfde pass het model wijzigen dat de rijen eromheen net lazen.
+enum MenuAction {
+    NewSession,
+    Open,
+    Rename,
+    ToggleArchive,
+    LinkFolder,
+    UnlinkFolder,
+    DeleteProject,
+    DeleteSession,
+}
+
+/// Het menu van één riem, teruggevend wat er gekozen is. De drie knoopvormen — project, sessie,
+/// inbox — vragen om verschillende handelingen, dus die splitsing staat hier en niet in de rijen.
+///
+/// Bewust zonder `model`-argument: de sluiting die dit aanroept, leent het sidebar-model al voor de
+/// boom eromheen. Wat hier staat, is pure keuze — geen enkele handeling, geen enkel schrijven.
+fn menu_item(ui: &mut Ui, project: Option<&str>, session: Option<&str>) -> Option<MenuAction> {
+    match (project, session) {
+        (Some(_), None) => {
+            if ui.button("New session").clicked() {
+                return Some(MenuAction::NewSession);
+            }
+            if ui.button("Rename").clicked() {
+                return Some(MenuAction::Rename);
+            }
+            if ui.button("Toggle archive").clicked() {
+                return Some(MenuAction::ToggleArchive);
+            }
+            if ui.button("Link folder\u{2026}").clicked() {
+                return Some(MenuAction::LinkFolder);
+            }
+            if ui.button("Unlink folder").clicked() {
+                return Some(MenuAction::UnlinkFolder);
+            }
+            ui.separator();
+            if ui.button("Delete project").clicked() {
+                return Some(MenuAction::DeleteProject);
+            }
+            None
+        }
+        (_, Some(_)) => {
+            if ui.button("Open").clicked() {
+                return Some(MenuAction::Open);
+            }
+            if ui.button("Rename").clicked() {
+                return Some(MenuAction::Rename);
+            }
+            if ui.button("Delete conversation").clicked() {
+                return Some(MenuAction::DeleteSession);
+            }
+            None
+        }
+        (None, None) => {
+            if ui.button("New session").clicked() {
+                return Some(MenuAction::NewSession);
+            }
+            None
+        }
+    }
 }
 
 /// Het label op de kiezer. Als constante, zodat tests/folder_row.rs dezelfde tekst tekent als de
