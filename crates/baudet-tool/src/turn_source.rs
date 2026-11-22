@@ -34,8 +34,17 @@ pub struct TurnRequest<'a> {
     /// backend vanaf hun eigen taak schrijven; `Send` is wat de loop nodig heeft om erop te kunnen wachten.
     /// De implementatie moet het hele verzoek overnemen (`mut request`) om ze aan te roepen, want een
     /// `FnMut` leent niet: `&mut TurnRequest` zou elke bron dwingen zijn eigen `on_delta`-kopie te maken.
-    pub on_delta: Box<dyn FnMut(&str) + Send>,
-    pub on_reasoning: Box<dyn FnMut(&str) + Send>,
+    ///
+    /// Het leven is `'a` en niet het `'static` dat `Box<dyn FnMut(&str) + Send>` zou krijgen, want de
+    /// loop geeft de callbacks van de aanroeper zélf door nadat hij ze met de sink heeft samengevoegd.
+    /// Gemeten in een wegwerpcrate: met `'static` faalt die samenvoeging met "coercion requires that
+    /// `'1` must outlive `'static`", en met een lening aan `'a` plus een `Sync`-sink compileert hij. De
+    /// sink is hier `Sync` (`ItemSink: Send + Sync`), dus de sluiting die beide leent, mag `Send` heten.
+    /// Bij een `Fn-`-type staan de bounds zonder haakjes om de dyn-clausel (`Box<dyn FnMut(&str) + Send +
+    /// 'a>`); een `Box<dyn (…)>` wijst de compiler aan als incorrecte parentheses. Het leven moet hier een
+    /// naam krijgen: `'_` is gereserveerd en mag niet in een typedef van een veld.
+    pub on_delta: Box<dyn FnMut(&str) + Send + 'a>,
+    pub on_reasoning: Box<dyn FnMut(&str) + Send + 'a>,
     /// Een beeld gaat mee op de eerste beurt van een beurt-reeks; latere iteraties spelen tekst.
     pub image: Option<&'a str>,
 }

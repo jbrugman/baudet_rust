@@ -24,4 +24,5 @@ pub mod process_runner;
 pub mod read_file;
 pub mod safe_commands;
 pub mod tool;
+pub mod tool_loop;
 pub mod turn_source;
