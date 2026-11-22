@@ -394,7 +394,7 @@ pub fn file_tree_controls(
                     egui::CollapsingHeader::new(folder_name(cwd))
                         .id_salt(cwd.clone())
                         .default_open(true)
-                        .show(ui, |ui| tree(ui, workspace, &root, 1, &status));
+                        .show(ui, |ui| tree(ui, workspace, &root, 1, &status, Some(&root)));
                 });
             }
         }
@@ -871,11 +871,51 @@ fn pick_folder() -> Option<String> {
     rfd::FileDialog::new().set_title("Choose a folder").pick_folder().map(|path| path.display().to_string())
 }
 
+/// Het "Copy path"-menu dat de origineler op élke riem van beide lijsten zet.
+///
+/// `FileTreePanel.kt:510-539`: `maybePopup` voor een boomknoop en `maybePopupRows` voor een
+/// git-rij monden allebei uit in `copyPathPopup` — één popup, één item, en dat item draagt
+/// `Texts[Key.CopyPath]` (`Key.kt:390`). Twee regels uit die bron zijn hier overgenomen en niet
+/// verzonnen: `item.isEnabled = path != null` ("it copies nothing rather than an empty string
+/// when there is no path", `:532`) en de tekst is `displayPath(path)`, dus relatief aan de
+/// projectmap (`:540-544`, de map zelf als `"."`).
+///
+/// De handeling gebeurt buiten de sluiting: `Popup::show` vraagt een `FnOnce` en de rijen die het
+/// menu dragen, lenen intussen `workspace` en `changes`. Daarom geeft dit alleen terug wat er
+/// werd gekozen — dezelfde wacht als `row_menu` in de linkersidebar.
+fn copy_path_menu(row: &egui::Response, root: Option<&Path>, path: Option<&Path>) -> Option<String> {
+    let text = crate::clipboard::display_path(root, path);
+    let enabled = crate::clipboard::copyable(path);
+    let chosen = egui::Popup::context_menu(row)
+        .show(|ui: &mut Ui| {
+            let item =
+                ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(crate::clipboard::COPY_PATH).weak()));
+            item.clicked().then_some(())
+        })
+        .and_then(|response| response.inner);
+    chosen.map(|()| text)
+}
+
 /// Paint one directory level, descending through the headers the user has opened.
-fn tree(ui: &mut Ui, workspace: &mut Workspace, dir: &Path, depth: usize, status: &FileStatus) {
+///
+/// De retourwaarde is nieuw ten opzichte van de origineler en verandert niets aan wat er staat:
+/// een `JTree` deelt zijn klik met het menu via een listener, maar in onmiddellijke modus moet de
+/// tekening zelf zeggen wat er geklik is. Alleen de klik van deze niveau's bestandsrijen komt
+/// terug; een geopende map geeft de aanvraag van zijn eigen rijen door.
+fn tree(
+    ui: &mut Ui,
+    workspace: &mut Workspace,
+    dir: &Path,
+    depth: usize,
+    status: &FileStatus,
+    root: Option<&Path>,
+) -> Option<String> {
     let listing = workspace.tree_at(dir);
+    let mut copied = None;
     for path in &listing.files {
-        file_row(ui, path, status.get(path));
+        if let Some(text) = file_row(ui, path, status.get(path), root) {
+            copied = Some(text);
+        }
     }
     // Said by the level that was cut, so the claim and the rows it describes are one unit: a folder
     // that fits never inherits another folder's warning.
@@ -890,7 +930,9 @@ fn tree(ui: &mut Ui, workspace: &mut Workspace, dir: &Path, depth: usize, status
                 if depth >= MAX_DEPTH {
                     ui.label(dim("…"));
                 } else {
-                    tree(ui, workspace, path, depth + 1, status);
+                    if let Some(text) = tree(ui, workspace, path, depth + 1, status, root) {
+                        copied = Some(text);
+                    }
                 }
             },
         );
@@ -900,17 +942,37 @@ fn tree(ui: &mut Ui, workspace: &mut Workspace, dir: &Path, depth: usize, status
         // kind-riem mee zodat een map als dicht- en niet als leeg-lerend hoeft te lezen.
         ui.label(dim("empty folder"));
     }
+    copied
 }
 
 /// One file in the tree. A path git named wears git's colour -- the same three values as the changed
 /// list on the right, so a modified, added or new file reads identically on both sides -- while a
 /// path git left alone stays the panel's own dim. Dirs are never coloured here, as in the original:
 /// git reports states for files, and a coloured folder would claim a change it cannot name.
-fn file_row(ui: &mut Ui, path: &Path, change: Option<ChangeKind>) {
+fn file_row(ui: &mut Ui, path: &Path, change: Option<ChangeKind>, root: Option<&Path>) -> Option<String> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let colour = change.map_or(palette::DIM, ink_for);
-    ui.add(egui::Label::new(egui::RichText::new(truncate_head(&name, KEEP_TAIL)).color(colour)).selectable(false))
-        .on_hover_text(path.display().to_string());
+    // De wikkel is de volle breedte, zoals `BaudetTree.getScrollableTracksViewportWidth` de bron
+    // zijn rijen laat volgen (`FileTreePanel.kt:554`): een rechtermuisklik naast de naam opent bij
+    // de origineler óók het menu, en een klik die alleen op de letters telt, zou dat verliezen.
+    let mut copied = None;
+    ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::hover()), |ui| {
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::Label::new(egui::RichText::new(truncate_head(&name, KEEP_TAIL)).color(colour))
+                    .selectable(false),
+            )
+            .on_hover_text(path.display().to_string());
+        });
+        // Het vierkant van de wikkel is de rij, niet de letters: `ui.max_rect()` is de volle
+        // breedte die de wikkel inneemt, en geeft zo de klikplaats die `JTree` heeft omdat zijn
+        // rijen de viewport-breedte volgen (`getScrollableTracksViewportWidth`, `FileTreePanel.kt:554`).
+        let row = ui.interact(ui.max_rect(), ui.id().with(("file-row", path)), egui::Sense::hover());
+        if let Some(text) = copy_path_menu(&row, root, Some(path)) {
+            copied = Some(text);
+        }
+    });
+    copied
 }
 
 /// De strook die de changes-lijst onder de boom krijgt: de hoogte van de greep erboven plus de
@@ -920,7 +982,12 @@ fn file_row(ui: &mut Ui, path: &Path, change: Option<ChangeKind>) {
 /// één kolom duwde: de band had toen een hoogte die niemand kon veranderen. De maten zijn niet
 /// eigen — `CHANGES_HEIGHT` en `CHANGES_MIN` komen uit `FileTreePanel.kt:629`, en wat hier staat
 /// is only the strip's own reach, die de bron niet laat zien omdat een screenshot geen greep is.
-fn changes_band(ui: &mut Ui, changes: &Changes, chosen: Option<&str>, dividers: &mut layout::Dividers) {
+fn changes_band(
+    ui: &mut Ui,
+    changes: &Changes,
+    chosen: Option<&str>,
+    dividers: &mut layout::Dividers,
+) -> Option<String> {
     let column = ui.available_height();
     let stored = if dividers.files > 0 { dividers.files as f32 } else { layout::CHANGES_HEIGHT };
     // De vloer van de origineler, met de kop van de lijst erbij: `MIN_FILES_VISIBLE` is wat er van
@@ -947,18 +1014,20 @@ fn changes_band(ui: &mut Ui, changes: &Changes, chosen: Option<&str>, dividers: 
     // eigen vierkant binnen dezelfde flank, zodat de kolom één paneel blijft — de bron heeft ook
     // één `SplitPane` in de rechterhelft en geen derde paneel naast de boom.
     let height = layout::band_height(column, band);
+    let mut copied = None;
     ui.allocate_ui_with_layout(
         egui::vec2(ui.available_width(), height),
         egui::Layout::top_down(egui::Align::Min),
         |ui| {
             ui.set_max_height(height);
-            changes_body(ui, changes, chosen);
+            copied = changes_body(ui, changes, chosen);
         },
     );
+    copied
 }
 
 /// Het achterantwoord van de rechterfiletree: git-wijzigingen onder de mappenboom.
-fn changes_body(ui: &mut Ui, changes: &Changes, chosen: Option<&str>) {
+fn changes_body(ui: &mut Ui, changes: &Changes, chosen: Option<&str>) -> Option<String> {
     ui.separator();
     // De kop-rij van de origineler is één regel met één zin, geen kop plus een los aantal:
     // `FileTreePanel.kt:272-276` zet `changesHeader.text` op de notitie van git, het
@@ -977,14 +1046,21 @@ fn changes_body(ui: &mut Ui, changes: &Changes, chosen: Option<&str>) {
     } else {
         format!("changes ({})", changes.paths.len())
     });
+    let mut copied = None;
+    // `chosen` is hier de projectmap: `maybePopupRows` relativizeert tegen `rootPath` en lost het
+    // git-pad daar binnen op (`FileTreePanel.kt:525-527`), precies wat `display_path` doet.
+    let root = chosen.map(Path::new);
     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         if chosen.is_none() || changes.unavailable || changes.meta.is_none() || changes.paths.is_empty() {
             return;
         }
         for file in &changes.paths {
-            change_row(ui, file);
+            if let Some(text) = change_row(ui, file, root) {
+                copied = Some(text);
+            }
         }
     });
+    copied
 }
 
 /// De rechterflank zoals `Main.kt:170` hem aan het venster vraagt: eerst de map, dan de wijzigingen.
@@ -1009,48 +1085,70 @@ pub fn file_tree(
         .frame(egui::Frame::side_top_panel(ui.style()));
     let chosen = workspace.cwd().map(|s| s.to_string());
     let mut refresh: Option<bool> = None;
+    // De boom en de lijst kunnen allebei een kopieeractie opleveren; één pass hoeft er maar één te
+    // doen, want de bron laat één klik één popup openen en die sluit bij de volgende.
+    let mut copied: Option<String> = None;
     frame.show(ui, |ui| {
         refresh = Some(file_tree_controls(ui, workspace, draft, changes.meta(), changes.paths()));
         // De verdeeling die de origineler met een `JSplitPane` tekent: boom boven, changes eronder,
         // en tussen die twee een greep die iemand kan pakken (`FileTreePanel.kt:103-113`).
-        changes_band(ui, changes, chosen.as_deref(), dividers);
+        copied = changes_band(ui, changes, chosen.as_deref(), dividers);
     });
+    // De kopie zelf is het gevolg: `copyPathPopup` zet het klembord en zegt niets (`:533-538`), en
+    // er is in de origineler geen statusregel voor. Een "copied …"-tekst zou gedrag zijn dat de
+    // bron niet heeft, dus een mislukt klembord blijft hier ook stil — het pad staat immers wél
+    // in de popup-tekst die iemand al zag. Wat wél blijft, is dat de poging plaatsvindt.
+    if let Some(text) = copied {
+        let _ = crate::clipboard::copy(&text);
+    }
     refresh.unwrap_or(false)
 }
 
 /// One path git reports: its state, its name, and git's own counts.
-fn change_row(ui: &mut Ui, file: &ChangedFile) {
+fn change_row(ui: &mut Ui, file: &ChangedFile, root: Option<&Path>) -> Option<String> {
     let ink = ink_for(file.change);
     let body_ink = if file.change.exists_on_disk() { palette::TEXT } else { palette::DIM };
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::Label::new(egui::RichText::new(format!("{:4}", file.change.word())).color(ink).size(11.0))
-                .selectable(false),
-        )
-        .on_hover_text(&file.path);
-        ui.add(
-            egui::Label::new(egui::RichText::new(truncate_head(&file.name(), KEEP_TAIL)).color(body_ink).strong())
-                .selectable(false),
-        )
-        .on_hover_text(&file.path);
-        if let Some(old) = &file.old_path {
-            let old =
-                Path::new(old).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| old.clone());
-            ui.label(dim(truncate_head(&format!("← {old}"), KEEP_TAIL)));
-        }
-        // Git's numbers or nothing. A path without counts shows no figures, because `+0 −0` would
-        // claim a measured zero on a binary path or in a repository without a commit.
-        if let (Some(a), Some(d)) = (file.additions, file.deletions) {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if d > 0 {
-                    ui.label(egui::RichText::new(format!("−{d}")).color(palette::DIFF_REMOVED).size(11.0));
-                }
-                if a > 0 {
-                    ui.label(egui::RichText::new(format!("+{a}")).color(palette::DIFF_ADDED).size(11.0));
-                }
-            });
+    let mut copied = None;
+    ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::hover()), |ui| {
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::Label::new(egui::RichText::new(format!("{:4}", file.change.word())).color(ink).size(11.0))
+                    .selectable(false),
+            )
+            .on_hover_text(&file.path);
+            ui.add(
+                egui::Label::new(egui::RichText::new(truncate_head(&file.name(), KEEP_TAIL)).color(body_ink).strong())
+                    .selectable(false),
+            )
+            .on_hover_text(&file.path);
+            if let Some(old) = &file.old_path {
+                let old =
+                    Path::new(old).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| old.clone());
+                ui.label(dim(truncate_head(&format!("← {old}"), KEEP_TAIL)));
+            }
+            // Git's numbers or nothing. A path without counts shows no figures, because `+0 −0` would
+            // claim a measured zero on a binary path or in a repository without a commit.
+            if let (Some(a), Some(d)) = (file.additions, file.deletions) {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if d > 0 {
+                        ui.label(egui::RichText::new(format!("−{d}")).color(palette::DIFF_REMOVED).size(11.0));
+                    }
+                    if a > 0 {
+                        ui.label(egui::RichText::new(format!("+{a}")).color(palette::DIFF_ADDED).size(11.0));
+                    }
+                });
+            }
+        });
+    // Zelfde volle-breedte-regel als de boom, en dezelfde `displayPath`: git noemt een
+    // repository-relatief pad, dus de riem toont het relatieve en kopiéért het relatieve
+    // (`maybePopupRows` lost `row.relPath` op in `rootPath`, `FileTreePanel.kt:525-527`).
+        let git_path = root.map(|root| root.join(&file.path));
+        let row = ui.interact(ui.max_rect(), ui.id().with(("change-row", &file.path)), egui::Sense::hover());
+        if let Some(text) = copy_path_menu(&row, root, git_path.as_deref()) {
+            copied = Some(text);
         }
     });
+    copied
 }
 
 /// The branch line, in the words the probe actually managed to produce.

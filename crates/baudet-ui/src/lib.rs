@@ -18,6 +18,7 @@ mod app;
 // Publiek zodat tests/tabs.rs dat palet tekent en niet een standaard-`Visuals`: de vormen waarmee
 // die test maten vergelijkt, zijn de vormen van dit venster.
 pub mod palette;
+pub mod clipboard;
 // Publiek zodat tests/folder_open.rs het commit-pad (Workspace::open) buiten de lay-out
 // kan meten: het mappadveld zit in een SidePanel-kolom en is niet root-adresseerbaar om in te
 // typen, dus het commit-pad wordt hier rechtstreeks aangesproken.

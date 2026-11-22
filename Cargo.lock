@@ -249,6 +249,7 @@ dependencies = [
 name = "baudet-ui"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "baudet-app",
  "baudet-backend",
  "baudet-core",

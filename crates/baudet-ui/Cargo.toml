@@ -54,6 +54,12 @@ png = "0.18"
 # paneel) maar wordt vanuit de UI-thread aangeroepen, waar hij dat ook doet in elke desktop-app.
 rfd = { version = "0.18", default-features = false }
 
+# Het "Copy path"-menu van de bestandsboom én de changes-lijst (`FileTreePanel.kt:533-539` zet een
+# `StringSelection` op de `systemClipboard`). `arboard` is het stuk dat in deze crate nog ontbrak:
+# `rfd` kiepert mappen maar heeft geen klembord, en egui heeft er geen. Geen nieuw pakket naar
+# schatting: `arboard 3.7.0` staat al in de lokale crate-boom, dus dit kost geen netwercopeging.
+arboard = "3.7"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 winit = "0.30"
 
