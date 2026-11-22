@@ -64,13 +64,15 @@ writes/gepinde calls blijven serieel.
 - [x] `ProjectIds`/`SessionIds` — `project/ProjectIds.kt`, `session/SessionIds.kt`: `p-`/`s-` plus acht hex-tekens.
 - [x] Sidemap-project-/sessieindex met actieve-volgorde, cascade, titeloverride, afgeleide titel (eerste gebruikersregel, cap 48), meest-recent-eerst en atomair schrijven. Tests: 10 groen; workspace: 144 groen.
 - [ ] `ToolMode { Off, Ask, Auto }` — `config/ToolMode.kt`; `ContextStrategy` is reeds in `baudet-store::window`, maar moet bij item F aan de settings-/tool-gate gekoppeld worden.
-- [ ] UI-koppeling van deze catalogus naar de linkersidebar (item C).
+- [x] UI-koppeling van deze catalogus naar de linkersidebar (item C). commit `af9b336`.
 - Embed-match: "rechten lezen schrijven uitvoeren" → Permissions.kt 0.57, FolderPermission 0.53.
 
 ## C. Correcte vensterlay-out (na B)
-- [ ] Doel uit `Main.kt:161-170`: `[ ProjectSidebar | Chat/Settings ]  [ FileTree ]`; twee onafhankelijke toolbar-toggles.
-- [ ] Bestandsboom van `panels::left` naar **rechter** `FileTreePanel` + git-kleuren (groen gewijzigd, blauw untracked, rood deleted), dubbelklik = patch. `ui/FileTreePanel.kt`.
-- [ ] Linker `ProjectSidebar`: projecten-boom + sessies eronder + `Unassigned` + Add-project + read/write/execute-vakjes + contextmenu. `ui/ProjectSidebar.kt` (embed-match 0.53).
+- [x] Lay-out uit `Main.kt:150-170`: `[ ProjectSidebar | Chat/Settings ]  [ FileTree ]`. Sidebar links, bestandsboom rechts; README-besluit "projecten links". commit `af9b336`.
+- [x] Linker `ProjectSidebar`: projecten-boom + sessies eronder + `Unassigned` + Add-project + read/write/execute-vakjes + contextmenu (hernoemen, map koppelen/ontkoppelen, archiveren, verwijderen met cascade + bevestigingsriem). Domein in `sidebar.rs`, tekening in `panels::project_sidebar`, 12 testen in `tests/project_tree.rs`. `ui/ProjectSidebar.kt` (embed-match 0.53). commit `af9b336`.
+- [ ] Twee onafhankelijke toolbar-toggles: sidebar in/uit en bestandsboom in/uit (`sidebarToggle` in `Main.kt`). Nu staan beide kolommen altijd.
+- [ ] Git-kleuren in de rechter bestandsboom (groen gewijzigd, blauw untracked, rood deleted), dubbelklik = patch. `ui/FileTreePanel.kt`. Vereist item G (`git/` + `diff/`); de boom tekent nu zonder kleuren.
+- Splitsing van C: de **sessie-lading** (`OpenSession` → transcript uit de rollout) staat als item D; `SidebarIntent::OpenSession` onthoudt nu alleen het gekozen sessie-id.
 
 ## D. Sessies (na C)
 - [ ] Meerdere sessies, niet één globe transcript — `session/SessionState.kt`.

@@ -102,6 +102,28 @@ bestand heel laat. Voor de lokale id's geldt dezelfde vorm als Kotlin (`p-`/`s-`
 ze worden gegenereerd uit een monotone tijd en een procesloper, zonder cryptografisch
 random-dependency: de eis is lokale uniciteit, niet een niet-raadbare identifier.
 
+## Besluit: projecten links, bestandsboom rechts — zoals `Main.kt` tekent
+
+Eerdere rondes zetten de workspace-/bestandsboom in de linkerkolom en lieten de projectsidebar
+ontbreken. Dat is een lay-out die de origineler niet heeft, en het verdween daardoor zichtbaar
+gedrag: projecten toevoegen, sessies eronder, de inbox en de drie maprechten. `Main.kt:150-178`
+tekent expliciet
+
+```
+[ ProjectSidebar | tabs ]  | FileTree
+```
+
+dus deze port draait de siden terug: `panels::project_sidebar` als `Panel::left("projects")`
+(280 px, min 190 px), de bestandsboom naar rechts. De toolbar-toggles die in `Main.kt` naast het
+tabblad verzetten staan nog niet; dat is hetzelfde item C en volgt.
+
+Het domein onder die sidebar staat in `sidebar.rs` en is bewust vrij van egui: het is een model met
+publieke methoden (`add_project`, `set_permissions`, `answer_confirm`, …) dat de catalogus uit
+`baudet-projects` doorgeeft. `panels.rs` tekent alleen wat erachter bestaat — de dragende regel in
+[`TODO.md`](TODO.md): een widget bestaat pas als het domein eronder bestaat. De testen in
+`tests/project_tree.rs` draaien tegen een echte egui-pass in een tijdelijke `BAUDET_HOME`, dus de
+knop is vindbaar via zijn adres in plaats van via een aanname over het scherm.
+
 ## Werkwijze bij een vastloper of een onzekere keuze
 
 **Zeker?** Bouw door op `main`. **Niet zeker, of een keuze die de richting koest?** Maak van de

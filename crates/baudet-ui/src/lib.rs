@@ -24,6 +24,10 @@ pub mod palette;
 pub mod panels;
 mod rows;
 mod settings;
+// De linkersidebar: het domeinmodel erachter (sidebar.rs) en de riemen die het tekenen
+// (panels::project_sidebar). Het model is publiek voor tests: een test die de rechtenregels, de
+// cascade en de titelregels wil meten, doet dat op het model, niet door duizend pixels te klikken.
+pub mod sidebar;
 
 pub use app::{run, run_from, Startup, TranscriptApp};
 
@@ -34,8 +38,12 @@ pub use app::{run, run_from, Startup, TranscriptApp};
 // enkele root-keten gaf dat adres (gemeten), dus de velden worden niet op adres getest.
 pub use app::{root_ui_id, TABSTRIP};
 pub use panels::FOLDER_OPEN;
+// De intenties en het adres van de `Add project`-knop: tests/folder_open.rs en tests/project_tree.rs
+// klikken op dat adres, dus het moet van buiten te noemen zijn, zoals `FOLDER_OPEN`.
 pub use palette::DiffLine;
+pub use panels::{SidebarIntent, SIDEBAR_ADD};
 pub use rows::Row;
+pub use sidebar::{Confirm, NameAsk, Selection, SidebarModel, SidebarOutcome};
 
 // Het tabbladtype hoort bij de publiek testbare grens: tests/tabs.rs tekent er een na met dezelfde
 // knoppen die een persoon indrukt, en heeft daar zowel de startkeus (`with_tab`) als de lezing van

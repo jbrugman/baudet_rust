@@ -17,9 +17,10 @@
 //! frame clock that stops draining would otherwise be a second, subtly different turn loop.
 
 use crate::palette;
-use crate::panels::{self, Changes, Workspace};
+use crate::panels::{self, Changes, SidebarIntent, Workspace};
 use crate::rows::Row;
 use crate::settings::{self, SettingsCommand, SettingsEvent, SettingsView};
+use crate::sidebar::SidebarModel;
 use baudet_app::session::pump;
 use baudet_app::AppState;
 use baudet_backend::protocol::Protocol;
@@ -131,6 +132,16 @@ pub struct TranscriptApp {
     settings_events: std::sync::mpsc::Receiver<SettingsEvent>,
     /// The settings worker thread. Joined on drop so a save in flight finishes rather than dies.
     settings_worker: Option<std::thread::JoinHandle<()>>,
+    /// De linkersidebar: de projectcatalogus plus wat er in die boom is gekozen. Het model woont
+    /// hier en niet in `panels`, omdat het venster — niet de paint-pass — de eigenaar is van wat er
+    /// in een vensterleven lang is gekozen.
+    sidebar: SidebarModel,
+    /// Het project van de selectie, onthouden tussen twee paint-passen door. Het model weet dit al,
+    /// maar dit veld is wat de *rest* van het venster volgt — zo blijft de sidebar de schrijver en de
+    /// bestandsboom de lezer, in één richting.
+    current_project: Option<String>,
+    /// Het sessie-id dat de sidebar het laatst koos. Item D zet hier de lading op.
+    current_session: Option<String>,
 }
 
 impl TranscriptApp {
@@ -174,6 +185,9 @@ impl TranscriptApp {
             settings_tx,
             settings_events,
             settings_worker: Some(settings_worker),
+            sidebar: SidebarModel::open_default(),
+            current_project: None,
+            current_session: None,
         }
     }
 
@@ -299,6 +313,15 @@ impl TranscriptApp {
         // width and leave the flanks to overlap it.
         // Asking git is bounded by the probe's own timeout, so it happens on the turn an opening or
         // a switch commits rather than from a paint.
+        // De linkersidebar vóór de rest: egui verdeelt de breedte in de volgorde van de aanroep,
+        // dus de kolom die het eerst wordt gevraagd, krijgt zijn breedte uit de volle breedte.
+        let intents = panels::project_sidebar(ui, &mut self.sidebar);
+        // De intenties eerst verwerken en dan pas tekenen wat ernaast staat: de bestandsboom hoort
+        // het project van de zojuist gemaakte keuze, niet dat van de vorige pass.
+        self.apply_sidebar_intents(intents);
+        // De bestandsboom staat rechts, naast het middenvlak — `[ ProjectSidebar | Chat/Settings ]
+        // [ FileTree ]` zoals `Main.kt:161-170` het opzet. Vóór deze wissel stond hij links, wat de
+        // klacht "sinds wanneer staat de folderstructuur links" opleverde.
         if panels::left(ui, &mut self.workspace, &mut self.folder_draft, self.changes.meta()) {
             self.changes.refresh(self.workspace.cwd());
         }
@@ -431,6 +454,53 @@ impl TranscriptApp {
     /// bewijst (een klik op `Open` na een getypt pad móet hier uitkomen).
     pub fn workspace_folder(&self) -> Option<&str> {
         self.workspace.cwd()
+    }
+
+    /// Wat de sidebar deze pass heeft besloten.
+    ///
+    /// Eén functie, drie gevallen, en géén sessie-lading: item D maakt van `OpenSession` een geladen
+    /// gesprek. Zolang dat ontbreekt, onthoudt het venster het id en laat het de rest van het venster
+    /// met rust — een chat die doet alsof hij een sessie laadt terwijl er niets staat, is precies de
+    /// valse belofte die dit project al eerder deed.
+    fn apply_sidebar_intents(&mut self, intents: Vec<SidebarIntent>) {
+        for intent in intents {
+            match intent {
+                SidebarIntent::OpenSession(id) => self.current_session = Some(id),
+                SidebarIntent::StartChat(project) => {
+                    self.current_session = None;
+                    self.current_project = project;
+                }
+                SidebarIntent::Deleted => {
+                    // Wat er in het midden stond, is weg; de rijen zijn nog die van toen. De chat
+                    // van item D weet hiermee wat hij moet laten vallen; nu blijft alleen de eerlijke
+                    // statusregel over.
+                    self.status = "removed from the catalogue".to_string();
+                }
+            }
+        }
+        // Het project van de selectie volgen, niet nadat alles getekend is: de bestandsboom tekent
+        // zichzelf uit `workspace.cwd()`, dus dit veld is wat de volgende pass aan het project vraagt.
+        self.current_project = match self.sidebar.selection() {
+            Some(crate::sidebar::Selection::Project(id)) => Some(id.clone()),
+            Some(crate::sidebar::Selection::Session { project, .. }) => project.clone(),
+            _ => None,
+        };
+    }
+
+    /// Het project van de huidige selectie, of `None` (inbox, of niets gekozen).
+    pub fn selected_project(&self) -> Option<&str> {
+        self.current_project.as_deref()
+    }
+
+    /// Het gekozen sessie-id. Een lezer voor tests en voor item D; er hangt nog geen gedrag aan.
+    pub fn selected_session(&self) -> Option<&str> {
+        self.current_session.as_deref()
+    }
+
+    /// De linkersidebar zelf, voor tests die de catalogus of de rechtenstatus willen lezen zonder
+    /// te raden welke pixel erbij hoort.
+    pub fn sidebar(&self) -> &SidebarModel {
+        &self.sidebar
     }
 
     /// The window's layout, as a plain paint pass.

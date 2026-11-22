@@ -237,6 +237,7 @@ dependencies = [
  "baudet-app",
  "baudet-backend",
  "baudet-core",
+ "baudet-projects",
  "baudet-settings",
  "baudet-store",
  "eframe",
