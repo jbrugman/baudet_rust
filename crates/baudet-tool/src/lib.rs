@@ -9,6 +9,7 @@
 //! Zowel deze laag als de API-laag blijft model-tekst in het Engels: descriptions en tool-uitvoer gaan
 //! rechtstreeks naar het model, ongeacht de UI-taal, precies zoals in de origineler.
 
+pub mod call_extractor;
 pub mod command_signature;
 pub mod diff;
 pub mod edit_file;
@@ -23,3 +24,4 @@ pub mod process_runner;
 pub mod read_file;
 pub mod safe_commands;
 pub mod tool;
+pub mod turn_source;

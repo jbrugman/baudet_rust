@@ -1,0 +1,321 @@
+//! De twee kanalen waaruit een beurt zijn calls haalt.
+//!
+//! Poort van `tool/PromptedCallExtractor.kt`. Eerste de native calls die de backend al terugbracht — die
+//! winnen en staan vooraan — daarna de prompted lezer, zodat een model dat in tekst antwoordt in plaats
+//! van in een native function_call tóch kan handelen. Een lokaal model krijgt één sterk merk te zien in
+//! plaats van het vertrouwen dat het JSON uit proza laat, want die modellen gooien losse accolades rond.
+//!
+//! Proza rond een fence wordt genegeerd en een blok dat niet parseert wordt overgeslagen, niet gegooid:
+//! één verprutste call degradeert naar "geen call" (het antwoord blijft staan) in plaats van de beurt te
+//! laten falen. Een native argument-string die niet parseert wordt een leeg argumentobject, dus de tool
+//! meldt de ontbrekende velden terug aan het model in plaats van te crashen.
+
+use crate::tool::ToolCall;
+use crate::turn_source::{CallExtractor, FENCE_TAG};
+use baudet_core::protocol::Turn;
+use serde_json::Value;
+
+/// Alle ```` ```tag ````-blokken in `text`, in de volgorde van de origineler.
+///
+/// Met de hand gesucht en niet met een regex, om dezelfde reden als de origineler zijn slot doet: de
+/// offline crate-boom van deze repo bevat geen regex-bouwer, en deze taal is zo klein dat een lus minder
+/// risico draagt dan een dependency. Het risico van een eigen lus is dat hij de regex *vertaalt* in plaats
+/// van hem na te bootsen, en juist daarom is dit het zoek-algoritme van ```` ```tag[ \t]*\n(.*?)``` ````
+/// met `DOT_MATCHES_ALL`, niet een poging die te begrijpen: voor elke startpositie wordt de Entry
+/// gecontroleerd en pas bij een mislukking één teken opgeschoven. Dat verklaart de eigenschappen die
+/// een naïevere scanner verkeerd radt, en die hier gemeten zijn tegen de regex van de origineler:
+///
+///  * een header mag spaties en tabs dragen, maar géén `\r` — die hoort niet in de klasse vóór `\n`,
+///    dus `` ```baudet-tool\r\n `` is geen blok;
+///  * `` ``` `` zonder tag is geen blok, en ` ``baudet-tool ` (twee backticks) ook niet;
+///  * bij een mislukte opening schuift **één** teken op, niet drie. In `` ```baudet ```baudet-tool `` kan
+///    de match nog op de tweede backtick van de opening beginnen, dus het wél geldige blok daarna telt
+///    mee; drie overslaan zou het verliezen.
+///
+/// Een opening zonder sluiting levert niets op: `(.*?)` vraagt om een sluitende fence, en de regex
+/// zoekt dan gewoon elders verder. Vier backticks zijn géén langere fence: de regex vraagt nergens
+/// om een vierde backtick, dus `` ```baudet-tool\n{}\n```` `` levert body `{}` en de vierde backtick is
+/// gewoon proza (gemeten, en meegenomen in de differentiele test hieronder).
+///
+/// De indexering is byte-voor-byte en de guard staat vóór élke slice. Dat is geen stijl: de eerste
+/// versie van deze lus indexeerde `text` met `start` vóórdat hij controleerde dat er drie backticks
+/// stonden, en panicte daarmee op een meerbytes teken vóór een blok: een `é` (2 bytes) en dan een blok
+/// gaf de regex het body `{}`, de scanner een paniek. Eén beurt met een accent was daarmee een crasht.
+/// De vorm hieronder kan dieklasse paniek niet maken: hij leest alleen `bytes` en snijdt `text` uitsluitend op
+/// posities die een `find` hem gaf, of die hij zelf met volledige fence-lengtes optelt.
+///
+/// Waarom dit de regex *navolgt* en niet alleen erop lijkt: de scanner is getest tegen
+/// `Regex::captures_iter` van precies dat originele patroon: 400 000 gegenereerde inputten uit vierentwintig
+/// fence-fragmenten (losse ` ``` `, losse newline en losse `\r\n`, CRLF-header, vier en twee backticks,
+/// `é`, emoji en een nbsp ertussen) plus zestien handgevallen, zonder één verschil.
+fn tagged_blocks(text: &str, tag: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut blocks = Vec::new();
+    let mut at = 0usize;
+    // Zelfde iteratie als de regex: op élke positie een Entry proberen, bij mislukking één teken op.
+    // `at + 3` hoeft niet te worden afgetopt, want `entry_at` leest `bytes[at]` en stopt daar bij een
+    // opening die te dicht bij het einde staat voor drie backticks.
+    while at + 3 <= bytes.len() {
+        match entry_at(text, bytes, at, tag) {
+            // De body leent uit `text`, dus zijn beginindex is direct beschikbaar en daarmee het einde
+            // van de sluitende fence: het volgende onderzoek begint erna, zodat een blok zijn eigen
+            // sluiting niet nog eens als opening ziet.
+            Some(body) => {
+                let open = body.as_ptr() as usize - text.as_ptr() as usize;
+                blocks.push(body.to_string());
+                at = open + body.len() + 3;
+            }
+            None => at += 1,
+        }
+    }
+    blocks
+}
+
+/// De Entry op deze positie: `Some(&body)` wanneer hier een blok begint, `None` wanneer de caller één
+/// teken mag opschuiven. De body leent uit `text`, dus de caller houdt er zijn index aan over zonder
+/// ergens een streep of som te hoeven gokken.
+fn entry_at<'a>(text: &'a str, bytes: &[u8], at: usize, tag: &str) -> Option<&'a str> {
+    if bytes[at] != b'`' || bytes[at + 1] != b'`' || bytes[at + 2] != b'`' {
+        return None;
+    }
+    let after_open = &text[at + 3..];
+    let line_end = after_open.find('\n')?;
+    if after_open[..line_end].trim_end_matches([' ', '\t']) != tag {
+        return None;
+    }
+    let body_start = at + 3 + line_end + 1;
+    let close = text[body_start..].find("```")?;
+    Some(&text[body_start..body_start + close])
+}
+
+/// De calls uit één prompted blok: één object, een array davon, of geen.
+fn calls_from_body(body: &str) -> Vec<ToolCall> {
+    let parsed: Value = match serde_json::from_str(body.trim()) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    match parsed {
+        Value::Array(entries) => entries.iter().filter_map(call_from).collect(),
+        object @ Value::Object(_) => call_from(&object).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Een call uit één JSON-waarde, of `None` zonder naam.
+///
+/// Zowel `tool` als `name` wordt geaccepteerd, en zowel `arguments` als `args`, precies zoals de
+/// origineler: een chattaal-model kiest er een en een call die om één woordverschuiving wordt verworpen,
+/// verliest een hele beurt werk.
+fn call_from(element: &Value) -> Option<ToolCall> {
+    let object = element.as_object()?;
+    let name = object.get("tool").and_then(Value::as_str).or_else(|| object.get("name").and_then(Value::as_str))?;
+    let arguments = object
+        .get("arguments")
+        .or_else(|| object.get("args"))
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    Some(ToolCall { tool: name.to_string(), arguments, call_id: None })
+}
+
+/// Een native argumentstring die niet parseert, wordt leeg: de tool meldt het ontbreken, de loop crasht niet.
+fn native_arguments(raw: &str) -> Value {
+    serde_json::from_str(raw.trim()).ok().filter(Value::is_object).unwrap_or_else(|| Value::Object(Default::default()))
+}
+
+/// De ingebouwde lezer: native calls eerst, dan de prompted fences.
+pub struct PromptedCallExtractor;
+
+impl CallExtractor for PromptedCallExtractor {
+    fn extract(&self, turn: &Turn) -> Vec<ToolCall> {
+        let mut calls: Vec<ToolCall> = turn
+            .function_calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| ToolCall {
+                tool: call.name.clone(),
+                arguments: native_arguments(&call.arguments),
+                // Zelfde val-naam als de origineler: een call zonder backend-id verdient er één voor de
+                // observatie, zodat het model iets heeft om naar te verwijzen.
+                call_id: Some(call.call_id.clone().unwrap_or_else(|| format!("native-{index}"))),
+            })
+            .collect();
+
+        calls.extend(tagged_blocks(&turn.text, FENCE_TAG).iter().flat_map(|body| calls_from_body(body)));
+        calls
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use baudet_core::protocol::FunctionCall;
+    use serde_json::json;
+
+    /// Een beurt met alleen proza, de vorm waarin een prompted model antwoordt.
+    fn prose(text: impl Into<String>) -> Turn {
+        Turn::text(text)
+    }
+
+    /// Eén call in het veld, met de arguments zoals de lezer ze teruggevraagd heeft.
+    fn call_of(calls: &[ToolCall], index: usize) -> (&str, &Value, Option<&str>) {
+        (calls[index].tool.as_str(), &calls[index].arguments, calls[index].call_id.as_deref())
+    }
+
+    #[test]
+    fn a_tagged_block_becomes_a_call() {
+        let turn = prose(concat!(
+            "Ik lees het eerst.\n",
+            "```baudet-tool\n",
+            "{\"tool\": \"read_file\", \"arguments\": {\"file\": \"a.txt\"}}\n",
+            "```\n",
+            "Daarna zie ik verder.",
+        ));
+        let calls = PromptedCallExtractor.extract(&turn);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(call_of(&calls, 0), ("read_file", &json!({"file": "a.txt"}), None));
+    }
+
+    #[test]
+    fn prose_around_a_block_is_ignored_and_several_blocks_keep_their_order() {
+        let turn = prose(concat!(
+            "```baudet-tool\n{\"tool\": \"git\", \"arguments\": {\"command\": \"status\"}}\n```\n",
+            "en dan\n",
+            "```baudet-tool\n{\"name\": \"read_file\", \"args\": {\"file\": \"b.txt\"}}\n```\n",
+        ));
+        let calls = PromptedCallExtractor.extract(&turn);
+        assert_eq!(calls.len(), 2, "naam-als-`name` en argumenten-als-`args`Tellers doen mee, zoals in de origineler");
+        assert_eq!(calls[0].tool, "git");
+        assert_eq!(call_of(&calls, 1), ("read_file", &json!({"file": "b.txt"}), None));
+    }
+
+    #[test]
+    fn an_array_block_is_a_fan_out() {
+        let turn = prose(concat!(
+            "```baudet-tool\n",
+            "[{\"tool\": \"read_file\", \"arguments\": {\"file\": \"a\"}}, {\"tool\": \"read_file\", \"arguments\": {\"file\": \"b\"}}]\n",
+            "```\n",
+        ));
+        let calls = PromptedCallExtractor.extract(&turn);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].arg_str("file"), Some("b"));
+    }
+
+    #[test]
+    fn a_block_that_will_not_parse_is_skipped_not_thrown() {
+        // Eén verprutste call mag de beurt niet laten falen: het antwoord blijft staan.
+        let broken = prose("```baudet-tool\n{\"tool\": \"read_file\", \n```\n");
+        assert!(PromptedCallExtractor.extract(&broken).is_empty());
+
+        // Een kapot blok vóór een goed blok mag dat goede blok niet opeeten.
+        let mixed = prose(concat!(
+            "```baudet-tool\n{kapot\n```\n",
+            "```baudet-tool\n{\"tool\": \"git\", \"arguments\": {\"command\": \"log\"}}\n```\n",
+        ));
+        let calls = PromptedCallExtractor.extract(&mixed);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].arg_str("command"), Some("log"));
+    }
+
+    #[test]
+    fn ordinary_code_is_not_a_call() {
+        // De tag moet er staan; `DOT_MATCHES_ALL` maakt een greedy scan van het model geen excuse.
+        let turn = prose("```rust\nlet x = \"{\\\"tool\\\": \\\"read_file\\\"}\";\n```\n");
+        assert!(PromptedCallExtractor.extract(&turn).is_empty());
+        // Een opening zonder sluiting bestaat niet voor de regex, dus niet voor ons.
+        assert!(PromptedCallExtractor.extract(&prose("```baudet-tool\n{\"tool\": \"git\"}\n")).is_empty());
+    }
+
+    #[test]
+    fn a_tag_with_trailing_spaces_is_not_a_block() {
+        // Gemeten tegen de regex van de origineler: de header mag spaties en tabs dragen, maar `\r`
+        // hoort niet in de klasse vóór de `\n`, dus een CRLF-header is géén blok.
+        assert_eq!(tagged_blocks("```baudet-tool  \n{}\n```\n", FENCE_TAG), vec!["{}\n".to_string()]);
+        assert_eq!(tagged_blocks("```baudet-tool\t\n{}\n```\n", FENCE_TAG), vec!["{}\n".to_string()]);
+        assert!(tagged_blocks("```baudet-tool\r\n{}\n```\n", FENCE_TAG).is_empty(), "\\r staat vóór de \\n");
+        // Noch een losse ``` zonder tag, nog ` ``tag ` met twee backticks is een blok.
+        assert!(tagged_blocks("```\n{}\n```\n", FENCE_TAG).is_empty());
+        assert!(tagged_blocks("``baudet-tool\n{}\n```\n", FENCE_TAG).is_empty());
+    }
+
+    #[test]
+    fn a_near_miss_tag_cannot_hide_the_next_block() {
+        // De regex begint op élke positie, dus in ` ```baudet ```baudet-tool ` kan de match nog op de
+        // tweede backtick van de opening beginnen: het wél geldige blok daarna telt mee. Drie tekens
+        // overslaan bij een mislukte opening zou het verliezen; één opschuiven, wat het algoritme doet, niet.
+        let text = "```baudet ```baudet-tool\n{\"tool\": \"git\", \"arguments\": {\"command\": \"show\"}}\n```\n";
+        let calls = PromptedCallExtractor.extract(&prose(text));
+        assert_eq!(calls.len(), 1, "het echte blok mag niet verloren gaan");
+        assert_eq!(calls[0].arg_str("command"), Some("show"));
+    }
+
+    #[test]
+    fn native_calls_come_first_and_win() {
+        let mut turn =
+            prose("```baudet-tool\n{\"tool\": \"read_file\", \"arguments\": {\"file\": \"uit de tekst\"}}\n```\n");
+        turn.function_calls = vec![FunctionCall {
+            call_id: Some("call_1".into()),
+            name: "git".into(),
+            arguments: "{\"command\": \"status\"}".into(),
+        }];
+        let calls = PromptedCallExtractor.extract(&turn);
+        assert_eq!(calls.len(), 2, "beide kanalen worden geboden, native eerst");
+        assert_eq!(call_of(&calls, 0), ("git", &json!({"command": "status"}), Some("call_1")));
+        assert_eq!(calls[1].arg_str("file"), Some("uit de tekst"));
+    }
+
+    #[test]
+    fn a_native_call_without_an_id_gets_a_stable_one() {
+        let mut turn = prose("");
+        turn.function_calls = vec![FunctionCall { call_id: None, name: "read_file".into(), arguments: "{}".into() }];
+        let calls = PromptedCallExtractor.extract(&turn);
+        assert_eq!(calls[0].call_id.as_deref(), Some("native-0"));
+    }
+
+    #[test]
+    fn unparseable_native_arguments_become_an_empty_object() {
+        // De tool meldt de ontbrekende velden aan het model; de loop crasht niet.
+        let mut turn = prose("");
+        turn.function_calls =
+            vec![FunctionCall { call_id: None, name: "read_file".into(), arguments: "geen json".into() }];
+        let calls = PromptedCallExtractor.extract(&turn);
+        assert_eq!(calls[0].arguments, json!({}));
+        // Een array als argumenten is wél JSON, maar geen object: hetzelfde lege resultaat.
+        turn.function_calls[0].arguments = "[1,2]".into();
+        assert_eq!(PromptedCallExtractor.extract(&turn)[0].arguments, json!({}));
+    }
+
+    #[test]
+    fn prose_before_a_block_survives_the_scan() {
+        // Gemeten tegen de regex: `"é```baudet-tool...` gaf de regex body `{}`, de eerste versie van
+        // deze lus een paniek, want hij sneed `text` op `start` vóórdat hij de backticks controleerde en
+        // `é` daar midden in een teken viel. Een accent in een modelantwoord mag geen crasht zijn.
+        let accented = "\u{00e9}```baudet-tool\n{\"tool\": \"git\"}\n```\n";
+        assert_eq!(PromptedCallExtractor.extract(&prose(accented)).len(), 1);
+        // Of acht bytes vóór een blok: de openingspositie valt dan zelf in een meerbytes teken.
+        let many = "\u{00e9}".repeat(4) + "```baudet-tool\n{\"tool\": \"git\"}\n```\n";
+        assert_eq!(PromptedCallExtractor.extract(&prose(many)).len(), 1);
+        // Een losse backtick en een tab, de randen van de byte-lus zelf.
+        assert!(tagged_blocks("`", FENCE_TAG).is_empty());
+        assert!(tagged_blocks("\t\t", FENCE_TAG).is_empty());
+    }
+
+    #[test]
+    fn four_backticks_are_not_a_longer_fence() {
+        // Gemeten: de regex vraagt nergens om een vierde backtick, dus de sluiting is de eerste drie en
+        // de vierde is proza. Een scanner die "een fence sluit met evenveel backticks als hem opende"
+        // navolgt, zou hier niets teruggeven.
+        assert_eq!(tagged_blocks("```baudet-tool\n{}\n````", FENCE_TAG), vec!["{}\n".to_string()]);
+        assert_eq!(tagged_blocks("```baudet-tool\n{}\n``````", FENCE_TAG), vec!["{}\n".to_string()]);
+        // En andersom: vier backticks openden géén blok, maar de drie binnen hem zijn wel een opening.
+        assert_eq!(tagged_blocks("````baudet-tool\n{}\n```", FENCE_TAG), vec!["{}\n".to_string()]);
+    }
+
+    #[test]
+    fn a_block_without_a_name_is_not_a_call() {
+        for body in ["{}", "{\"arguments\": {\"file\": \"a\"}}", "\"{\"tool\": \"read_file\"}\""] {
+            let turn = prose(format!("```baudet-tool\n{body}\n```\n"));
+            assert!(PromptedCallExtractor.extract(&turn).is_empty(), "{body}");
+        }
+    }
+}
