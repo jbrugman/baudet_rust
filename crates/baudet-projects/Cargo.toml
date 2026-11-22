@@ -1,0 +1,18 @@
+[package]
+name = "baudet-projects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Het projectdomein en de sidebar-index, zonder UI, transport of async. De transcriptinhoud blijft
+# in baudet-store; deze crate is alleen de catalogus waardoor vensters weten welke gesprekken ergens
+# bij horen.
+[dependencies]
+baudet-core = { workspace = true }
+baudet-store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

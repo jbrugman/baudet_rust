@@ -195,6 +195,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "baudet-projects"
+version = "0.1.0"
+dependencies = [
+ "baudet-core",
+ "baudet-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "baudet-settings"
 version = "0.1.0"
 dependencies = [

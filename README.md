@@ -81,6 +81,27 @@ Waarom dit een besluit is en geen bijklus: het raakt het credentialsmodel (niets
 schijf gezet wat de omgeving kan geven) en de definitie van "actueel" in de picker. Beide zijn
 gedrag dat de gebruiker ziet, niet inwendige netheid.
 
+## Besluit: de projectindex is geen transcript, en krijgt daarom geen SQL
+
+De Kotlin-persistentielaag plaatst projecten, sessie-index en berichtinhoud in één H2-database. Rust
+ heeft die keuze niet: H2 is JVM-only en een offline gemaakte crate-boom bevat geen rusqlite. De
+rolloutlaag bewijst bovendien dat platte JSON de gespreksgeschiedenis al duurzaam maakt. Deze port
+splitst de twee taken daarom expliciet:
+
+* `baudet-store` blijft één sessie per map, append-only, met de bericht- en itemregels;
+* `baudet-projects` krijgt alleen de catalogus: projecten en de metadata waarmee de sidebar hun
+  sessies toont;
+* de transcript-inhoud wordt niet in de catalogus gekopieerd. Een projectverwijdering mag de
+  bijbehorende rollout-mappen niet onherkenbaar achterlaten, maar de index is geen tweede bron van
+  gespreksgeschiedenis.
+
+Dat is smaller dan één SQL-database en past bij de bestaande rustige gelaagdheid: de catalogus is
+een herstelbare index, de rollout is de bron van waarheid van de beurt. De catalogus schrijft
+atomair via een tijdelijk bestand plus rename, waardoor een afgebroken opslag het vorige complete
+bestand heel laat. Voor de lokale id's geldt dezelfde vorm als Kotlin (`p-`/`s-` plus acht tekens);
+ze worden gegenereerd uit een monotone tijd en een procesloper, zonder cryptografisch
+random-dependency: de eis is lokale uniciteit, niet een niet-raadbare identifier.
+
 ## Werkwijze bij een vastloper of een onzekere keuze
 
 **Zeker?** Bouw door op `main`. **Niet zeker, of een keuze die de richting koest?** Maak van de
