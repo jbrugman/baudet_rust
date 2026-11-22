@@ -93,8 +93,29 @@ writes/gepinde calls blijven serieel.
       Poort-getrouw: één registratie per naam met verdringsmelding, unknown name wordt een fout-resultaat
       voor het model in plaats van een panic, en `ToolRunner` scheidt uitvoeren van kennen zodat de loop
       later alleen de ronde-regels hoeft toe te voegen.
-- [ ] `ToolLoop` (max iteraties = `maxToolIterations` 8, reads parallel ≤2 via `can_run_parallel`, writes serieel) — `tool/ToolLoop.kt` (ziet tool-loop.puml). Vereist een turn-bron die nog niet bestaat.
-- [ ] Call-extractie: native + fenced JSON — `tool/CallExtractor.kt`, `tool/PromptedCallExtractor.kt`.
+- [ ] `ToolLoop` (max iteraties = `maxToolIterations` 8, reads parallel ≤2 via `can_run_parallel`, writes serieel) — `tool/ToolLoop.kt` (ziet tool-loop.puml). De turn-bron en de extractor bestaan nu (hierboven), dit item is het enige wat voor de lus nog ontbreekt.
+- [x] Call-extractie: native + fenced JSON — `tool/CallExtractor.kt`, `tool/PromptedCallExtractor.kt`.
+      `crates/baudet-tool/src/call_extractor.rs` (13 testen): native calls eerst en vooraan, daarna de
+      ```` ```baudet-tool ````-blokken; `tool`/`name` en `arguments`/`args` doen allebei mee, een blok dat
+      niet parseert wordt overgeslagen in plaats van gegooid, en een native argumentstring die niet parseert
+      wordt een leeg object zodat de tool de ontbrekende velden terugmeldt in plaats van te crashen.
+      **De scanner is met de hand gesucht omdat de offline crate-boom geen regex kent, en dat is de plek
+      waar een port stil verkeerds kan zijn; daarom is hij differentieel getest tegen `Regex::captures_iter`
+      van exact het Kotlin-patroon: 400 000 gegenereerde inputten uit 22 fence-fragmenten plus 16
+      handgevallen, nul verschillen.** Drie eigenschappen die een naïevere lus verkeerd radt, allemaal
+      gemeten: bij een mislukte opening schuift de regex **één** teken op (dus ` ```baudet ```baudet-tool `
+      levert het blok daarna, drie overslaan verliest het); een header mag spaties en tabs maar géén `\r`;
+      en vier backticks zijn géén langere fence (`...\n```` ` levert body `{}`). Twee eigen gebreken
+      tijdens dat werk, beide vastgelegd als test: pointer-aritmetiek gaf een overflow-crash op elke
+      niet-ASCII body, en `text` op `start` snijden **vóór**dat de backticks gecontroleerd zijn, panicte op
+      een accent vóór een blok — één beurt met een `é` was daarmee een crasht. De lus indexeert nu bytes en
+      guardt vóór élke slice. Crate 157 groen, workspace 397 groen. commit `ebd7ff1`.
+- [x] `TurnSource`-naad — `tool/TurnSource.kt`. `crates/baudet-tool/src/turn_source.rs` (2 testen):
+      `next_turn(TurnRequest) -> TurnFuture`, met de zes argumenten van de origineler als één struct omdat
+      vier van de zeven aanroepplekken daar `..default..` laten en Rust die defaults niet heeft. De bron
+      geeft een boxed future (`Send`) terug, want een echte bron leest een socket; de loop blijft daardoor
+      runtime-vrij. Gemeten bij het schrijven: een `FnMut`-haak leent niet, dus een implementatie moet
+      `mut request` overnemen — dat staat nu bij het veld in plaats van als verveling in een test.
 - [x] `ToolContext` (rechten, approvals, allow-lijsten) — `tool/ToolContext.kt`. Besluit: de goedkeuringen
       zijn callbacks (`Approval`, `CommandApproval`) en geen UI-type, zodat een tool vrij blijft van egui en
       de UI op háár thread kan vragen terwijl de tool blokkeert. De twee allow-lijsten zijn _providers_ en
