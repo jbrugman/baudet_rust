@@ -12,4 +12,6 @@
 pub mod command_signature;
 pub mod folder_boundary;
 pub mod folder_listing;
+pub mod read_file;
 pub mod safe_commands;
+pub mod tool;

@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn is_safe_and_trusted_key_stay_two_independent_questions() {
         // Een keten krijgt een gezin maar draait nooit zonder mens; een simpelere read krijgt beide.
-        assert_eq!(trusted_key("git diff | tail").is_some(), true);
+        assert!(trusted_key("git diff | tail").is_some());
         assert!(!is_safe("git diff | tail"), "automatisch draaien blijft één simpel commando");
         // `cargo` en `mvn` staan in de origineler op géén van beide lijsten: ze bouwen en schrijven, dus
         // ze zijn niet read-only en draaien nooit zonder mens. Ze krijgen wél een gezin, want daar staat

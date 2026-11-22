@@ -89,11 +89,24 @@ writes/gepinde calls blijven serieel.
       beide lijsten, ze krijgen alléén een gezins-teken via `trusted_key`; de test eiste het verkeerde
       gedrag, niet de code. Zelfde les bij de diepte-cap: die is relatief aan de root, een `tempdir` woont
       zelf al op niveau vier, dus de eerste test bewees niets. commit `cea2f33`.
-- [ ] `Tool`/`ToolRegistry`/`ToolRunner`/`ToolLoop` (max iteraties, reads parallel ≤2, writes serieel) — `tool/Tool*.kt`, `tool/ToolLoop.kt` (ziet tool-loop.puml).
+- [x] `Tool` + `ToolRegistry` + `ToolRunner` — `tool/Tool.kt`, `tool/ToolRegistry.kt`, `tool/ToolRunner.kt`.
+      Poort-getrouw: één registratie per naam met verdringsmelding, unknown name wordt een fout-resultaat
+      voor het model in plaats van een panic, en `ToolRunner` scheidt uitvoeren van kennen zodat de loop
+      later alleen de ronde-regels hoeft toe te voegen.
+- [ ] `ToolLoop` (max iteraties = `maxToolIterations` 8, reads parallel ≤2 via `can_run_parallel`, writes serieel) — `tool/ToolLoop.kt` (ziet tool-loop.puml). Vereist een turn-bron die nog niet bestaat.
 - [ ] Call-extractie: native + fenced JSON — `tool/CallExtractor.kt`, `tool/PromptedCallExtractor.kt`.
-- [ ] `ToolContext` (rechten, approvals, allow-lijsten) — `tool/ToolContext.kt`.
+- [x] `ToolContext` (rechten, approvals, allow-lijsten) — `tool/ToolContext.kt`. Besluit: de goedkeuringen
+      zijn callbacks (`Approval`, `CommandApproval`) en geen UI-type, zodat een tool vrij blijft van egui en
+      de UI op háár thread kan vragen terwijl de tool blokkeert. De twee allow-lijsten zijn _providers_ en
+      geen kopie: een pin uit ronde twee moet dezelfde beurt al gelden, anders wordt de persoon over het
+      commando gevraagd dat hij zojuist vastlegde. Rechten staan uit, dus een context die niets mag, is de
+      default en niet een uitzondering.
 - [ ] `FolderBoundary` (buiten de map verboden) — `tool/FolderBoundary.kt`.
-- [ ] `ReadFileTool` — `tool/ReadFileTool.kt` (embed 0.64).
+- [x] `ReadFileTool` — `tool/ReadFileTool.kt` (embed 0.64). Poort-getrouw en gemeten: `MAX_FILE_BYTES`
+      1 000 000 met de weigeringstekst die "976 KB read limit" noemt, `MAX_CHARS` 60 000 in **karakters**
+      (een test met 60 001 × `é` bewijst dat het geen bytes zijn), binaire weigering op byte 0, een leeg
+      bestand is succes, en een ontbrekend pad hint naar de mapinhoude via `folder_listing`. Weigeringsformat
+      `read_file: <reden>`, zodat het model uit de tekst alleen al weet wat het anders moet doen.
 - [ ] `EditFileTool` + `PatchApplier` + `Edit` — `tool/{EditFileTool,PatchApplier,Edit}.kt`; Ask toont diff-preview (turn-decision.puml).
 - [ ] `ExecuteTool` + `SafeCommands` + `CommandSignature` + `ExecuteWorkspace` + `ProcessRunner` — shell in map, TMPDIR, read-only auto / altijd-vraag, family-pin. `tool/{ExecuteTool,SafeCommands,CommandSignature,ExecuteWorkspace,ProcessRunner}.kt` (embed 0.62).
 - [ ] `GitTool` — lezen standaard; schrijft verbs (add/commit/checkout/stash/push) opt-in + Write-recht + goedkeuring; force-push/rewrite geblokkeerd. `tool/GitTool.kt` + `git/`.
