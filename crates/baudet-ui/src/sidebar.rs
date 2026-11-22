@@ -9,10 +9,16 @@
 //! de rechten-vakjes volgen de schijf: een map die niet leesbaar is, laten we niet aanvinken alsof
 //! Baudet er wél in mag lezen — de disk is de baas, niet het checkboxje.
 
+use baudet_i18n::{Key, Texts};
 use baudet_projects::{Catalog, FolderPermission, Permissions, Project, SessionSummary};
 
 /// Het ingebouwde inbox-node, precies zoals `InboxNode` in de origineler: sessies zonder project
 /// blijven zichtbaar en raken niet kwijt.
+///
+/// De constante is het `id_salt`-adres van de inbox, niet zijn tekst. De boom knoopt zijn
+/// open/dicht-stand aan deze string vast, en een adres mag niet meebewegen met een taalwissel:
+/// anders staat de inbox na een vertaling open als een ander knoopje en is wat iemand openzette
+/// kwijt. De tekst die op de riem staat, komt uit `Key::InboxNode`.
 pub const UNASSIGNED: &str = "Unassigned";
 
 /// Waar de tekst-riem onder de boom op wacht. Het is geen vierde toestand van de selectie, maar de
@@ -26,12 +32,17 @@ pub enum NameAsk {
 }
 
 impl NameAsk {
-    /// De vraag boven het veld, in hetzelfde woord als `ProjectSidebar.kt` in diens eigen teksten.
+    /// De vraag boven het veld, in de actieve taal.
+    ///
+    /// De drie sleutels zijn die van `ProjectSidebar.kt:304`, `:314` en `:360`, waar dezelfde vraag
+    /// in `JOptionPane.showInputDialog` gaat. De zinsvolgorde van elk woord staat in de tabel en
+    /// wordt hier niet herhaald: een vertaling die hier zou worden nagemarket, wijkt van de dag af
+    /// van wat de buurpanelen zeggen.
     pub fn prompt(&self) -> &'static str {
         match self {
-            NameAsk::NewProject => "Projectnaam:",
-            NameAsk::RenameProject(_) => "Hernoem project:",
-            NameAsk::RenameSession(_) => "Hernoem gesprek:",
+            NameAsk::NewProject => Texts::get(Key::ProjectNamePrompt),
+            NameAsk::RenameProject(_) => Texts::get(Key::RenameProjectPrompt),
+            NameAsk::RenameSession(_) => Texts::get(Key::RenameSessionPrompt),
         }
     }
 }
@@ -58,7 +69,10 @@ impl Confirm {
                     .find(|row| row.id == *id)
                     .map(|row| row.name)
                     .unwrap_or_default();
-                format!("Project \"{name}\" en {count} gesprek(ken) verwijderen? Bestanden op schijf blijven staan.")
+                // Twee argumenten, zoals de sleutel van de origineler er twee vraagt: de naam en
+                // het aantal gesprekken. `ProjectSidebar.kt:332` geeft dat getal door aan
+                // `DeleteProjectConfirm`, en een bevestiging zonder getal belooft minder dan hij weet.
+                Texts::fmt(Key::DeleteProjectConfirm, &[&name, &count])
             }
             Confirm::DeleteSession(id) => {
                 let title = model
@@ -68,7 +82,7 @@ impl Confirm {
                     .find(|session| session.id == *id)
                     .map(|session| session.title)
                     .unwrap_or_default();
-                format!("Gesprek \"{title}\" verwijderen?")
+                Texts::fmt(Key::DeleteConversationConfirm, &[&title])
             }
         }
     }

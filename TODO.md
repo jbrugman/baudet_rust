@@ -174,7 +174,17 @@ writes/gepinde calls blijven serieel.
 - [ ] Dubbelklik in de linker bestandsboom opent die patch voor één pad (kleuren staan er al; de dialoog is dit venster) — sluit het restant van item C af.
 
 ## H. i18n (na C)
-- [ ] `Key`/`Language`/`Texts` NL/EN/FR/DE, runtime wissel, EN default — `i18n/` (embed 0.61). Lokaal-honesty-note reger.
+- [x] `Key`/`Language`/`Texts` NL/EN/FR/DE, runtime wissel, EN default — `i18n/` (embed 0.61). Lokaal-honesty-note reger.
+      Crate `baudet-i18n`: 264 sleutels × 4 talen, byte-voor-byte uit `i18n/Key.kt`, en de generator
+      (`/tmp/i18n/gen.py` + `keys.json`) is de bron — een gegenereerd bestand repareer je in de
+      generator, niet in de output. Draad door de UI: `settings.language` (serde-lezer die een
+      onbekend woord op En laat vallen), `Texts::set_language` bij het openen (`AppState.kt:195`) en
+      bij het opslaan (`Main.kt:74-82`, `TipSave`), en de riemteksten van sidebar, mappenboom,
+      changed-files, composer en settingsreader lezen uit `Key`. Adressen (`id_salt`) dragen geen
+      vertaling: een adres dat meebeweegt, verliest de staat die eraan vasthangt.
+      Gemeten bij het bouwen: `thread_local` taalwas fout — werker-, test- en paint-draad
+      antwoordden in verschillende talen; de taal staat nu proces-breed op een `AtomicU8`, zoals de
+      globalie van `Texts.kt`. Workspace groen (530).
 
 ## I. MCP client (later)
 - [ ] stdio-only McpClient/JsonRpc/ToolAdapter/Servers/Config; per-server always-allow + timeout — `mcp/` (embed 0.72). (HTTP/SSE + Baudet-MCP-server bestaan in de origineler NIET — niet overbouwen.)

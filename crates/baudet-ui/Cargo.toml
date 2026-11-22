@@ -18,6 +18,9 @@ baudet-settings = { workspace = true }
 # bijgeschreven; de rechtenregels en de cascade blijven in die crate staan, zodat de sidebar geen
 # tweede opslag wordt (zie src/sidebar.rs).
 baudet-projects = { workspace = true }
+# De tabel met alle zichtbare tekst in vier talen. De panel tekent er de labels uit en de app zet
+# er de actieve taal op vanuit het instellingenbestand, precies zoals `AppState.kt:195` daar doet.
+baudet-i18n = { workspace = true }
 # Only for the settings panel's Scan button: the probe it sends is a blocking request made from the
 # settings worker, and it goes through `baudet_backend::protocol::scan`, which is where the dialect
 # rules live. Declared at the workspace for the reason already stated there — the GUI and the

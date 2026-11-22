@@ -16,6 +16,7 @@
 //! data-map van de ontwikkelaar, dus elke aanroeper zet eerst een eigen `TempDir` neer. Omdat de
 //! variabele proces-breed is, delen deze tests één slot.
 
+use baudet_i18n::{Language, Texts};
 use baudet_projects::{FolderPermission, Permissions};
 use baudet_ui::sidebar::{Confirm, NameAsk, Selection, SidebarModel, SidebarOutcome};
 use baudet_ui::{root_ui_id, TranscriptApp, ASK_OK, SIDEBAR_ADD};
@@ -240,19 +241,27 @@ fn een_project_verdwijnt_met_zijn_sessies_en_de_inbox_blijft() {
     model.add_session(Some(&project.id)).unwrap();
     model.add_session(None).unwrap();
 
+    // De bevestiging is riemtekst en riemtekst draagt de taal van de instelling: het venster zet
+    // die bij het openen uit het bestand (`AppState.kt:195`), dus dit doet hetzelfde, en haalt hem
+    // na de slot weer weg — `Texts` is één waarde voor het hele proces en deze tests delen het.
+    Texts::set_language(Language::Nl);
     model.start_confirm(Confirm::DeleteProject(project.id.clone(), model.session_count(&project.id)));
     // De bevestiging noemt het aantal gesprekken, zoals `DeleteProjectConfirm` in de origineler:
     // iemand die bevestigt, moet zien wát er weggaat.
     assert_eq!(
         model.confirm.as_ref().map(|confirm| confirm.prompt(&model)),
         Some(
-            "Project \"Te verwijderen\" en 1 gesprek(ken) verwijderen? Bestanden op schijf blijven staan.".to_string()
+            // Het NL-woord van `Key.DeleteProjectConfirm` (`Key.kt:336`), letterlijk: de bevestiging
+            // noemt de naam én het aantal gesprekken, en beloofde eerder minder dan hij wist.
+            "Project \"Te verwijderen\" en al zijn 1 gesprek(len) verwijderen? Elk bericht wordt definitief verwijderd. Bestanden in de gekoppelde map blijven ongemoeid. Dit kan niet ongedaan worden gemaakt."
+                .to_string()
         )
     );
     assert_eq!(model.answer_confirm(true), Some(SidebarOutcome::DeletedProject));
     assert!(model.catalog().list_projects().is_empty());
     assert_eq!(model.catalog().sessions_in(None).len(), 1, "de inbox mocht niet meeverwijderd worden");
     assert_eq!(model.catalog().sessions_in(Some(&project.id)).len(), 0);
+    Texts::set_language(Language::En);
     assert_eq!(model.selected_project(), None, "de selectie hangt aan een weg project");
 }
 

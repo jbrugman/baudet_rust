@@ -196,6 +196,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "baudet-i18n"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "baudet-projects"
 version = "0.1.0"
 dependencies = [
@@ -213,6 +220,7 @@ name = "baudet-settings"
 version = "0.1.0"
 dependencies = [
  "baudet-core",
+ "baudet-i18n",
  "baudet-store",
  "reqwest",
  "serde",
@@ -253,6 +261,7 @@ dependencies = [
  "baudet-app",
  "baudet-backend",
  "baudet-core",
+ "baudet-i18n",
  "baudet-projects",
  "baudet-settings",
  "baudet-store",

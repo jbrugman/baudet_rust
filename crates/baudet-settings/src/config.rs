@@ -11,6 +11,7 @@
 //! graph and `toml` is not, and nothing here needs TOML's syntax. A settings file the person is
 //! never promised to hand-edit does not earn a new dependency.
 
+use baudet_i18n::Language;
 use serde::{Deserialize, Serialize};
 
 /// When the assistant may use tools during a turn.
@@ -252,6 +253,41 @@ pub struct Settings {
     /// "voorbij de rand" wordt tegen de hoogte gemeten en niet tegen de breedte
     /// (`Main.kt:236-241`: `orientation == VERTICAL_SPLIT → split.height`).
     pub files_divider: i32,
+    /// De taal van de interface.
+    ///
+    /// Poort van `AppConfig.kt:23-24` (`var language: String = "en"`), met één verschil: hier is het
+    /// een `Language` in plaats van een frei woord. De opslag blijft kleinschrijfg (`en`, `nl`,
+    /// `fr`, `de`) omdat de origineler dát in zijn bestand zet, en een bestand dat iets anders zegt,
+    /// leest als Engels — precies de regel van `Texts.parse` (`Texts.kt:27-33`). Een latere build
+    /// die een taal toevoegt, breekt dit bestand dus niet, en een ouder build dat dit veld niet
+    /// kent, leest de rest gewoon.
+    ///
+    /// De herinnerde verdeelstanden staan hierboven en niet onder dit veld, en dat is geen volgorde
+    /// uit gewoonte: `AppConfig.kt:151` zegt letterlijk dat de maten er zijn zodat "a rebuild, such
+    /// as a language change, keeps the user layout". De taal wisselt het venster, de maten overleven
+    /// die wisselt.
+    ///
+    /// Lezen gaat door `Language::parse` en niet door de afgeleide variantaam: die kent precies
+    /// vier woorden en wijst alles af wat erbuiten staat, terwijl de origineler een vrij woord
+    /// bewaart en het pas bij het lezen naar een taal vertaalt (`AppConfig.kt:24`, en
+    /// `AppState.kt:195` -> `Texts.parse`). Zonder die poort breekt `"pools"` het hele bestand: de
+    /// persoon is zijn endpoint, zijn model en zijn sleutel kwijt omdat één woord niet klopt.
+    #[serde(deserialize_with = "parse_language")]
+    pub language: Language,
+}
+
+/// De leespoort voor de taal: een woord naar `Language`, via dezelfde regel als de origineler.
+///
+/// `deserialize_with` is hier de enige vorm die kan werken: het bestand bevat een vrij woord,
+/// `Language` kent er vier, en wat daartussen staat moet een taal worden in plaats van een fout.
+/// Alleen een woord wordt aangenomen - `null` of een getal is geen taal maar een kapot veld, en
+/// dat verschil is precies wat `"pools"` van een getal scheidt.
+fn parse_language<'de, D>(deserializer: D) -> Result<Language, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let stored = <String as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(Language::parse(&stored))
 }
 
 impl Default for Settings {
@@ -289,6 +325,9 @@ impl Default for Settings {
             left_divider: 0,
             right_divider: 0,
             files_divider: 0,
+            // Engels, zoals `AppConfig.kt:24`. Niet "de taal van deze machine": de origineler kiest
+            // bewust een vaste default zodat een scherm dat iemand deelt, er overal gelijk uitziet.
+            language: Language::default(),
         }
     }
 }
@@ -417,6 +456,60 @@ mod tests {
         let json = r#"{"base_url":"http://studio:8000/v1","model":"gemma"}"#;
         let read: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(read.tool_mode, ToolMode::Ask);
+    }
+
+    #[test]
+    fn de_taal_is_engels_en_overleeft_het_bestand() {
+        // De default van de origineler (`AppConfig.kt:24`), en het woord zoals hij het op schijf
+        // zet: kleinschrijft, niet `En` en niet een object. De schrijfwijze is het contract met het
+        // bestand van de JVM-app, dus een afgeleide serde-naam die `Nl` of `nl` maar één letter
+        // verschilt, maakt van een gedeeld profiel twee half lege bestanden.
+        assert_eq!(Settings::default().language, Language::En);
+        let json = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(json.contains("\"language\":\"en\""), "het bestand noemt het veld zoals het heet: {json}");
+
+        let mut settings = Settings::default();
+        settings.language = Language::Nl;
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("\"language\":\"nl\""), "{json}");
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.language, Language::Nl);
+        assert_eq!(back, settings);
+    }
+
+    #[test]
+    fn een_older_bestand_zonder_taal_leest_als_engels() {
+        // Hetzelfde bewijs als bij `tool_mode`: een bestand van vóór dit veld moet gewoon openen.
+        // Hier valt niets verkeerd te kiezen — Engels is de enige uitkomst — maar wat wel kan
+        // misgaan, is dat het hele bestand geweigerd wordt omdat er een veld ontbreekt. Dat is de
+        // eigendom van `#[serde(default)]` op de struct, en dit is het moment waarop die wordt
+        // aangesproken voor een taal die er toe doet.
+        let json = r#"{"base_url":"http://studio:8000/v1","model":"gemma","tool_mode":"ask"}"#;
+        let read: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(read.language, Language::En);
+        assert_eq!(read.model.as_deref(), Some("gemma"));
+    }
+
+    #[test]
+    fn een_onbekende_taal_in_het_bestand_valt_terug_naar_engels() {
+        // De regel van `Texts.parse` (`Texts.kt:27-33`), hier op de plek waar het bestand naar
+        // `Language` wordt vertaald. Met de hand aangepast of half afgeschreven profiel tekst mag
+        // het venster niet breken; wel mag het wél leesbaar blijven, dus de rest van het bestand
+        // blijft staan.
+        let json = r#"{"base_url":"http://studio:8000/v1","model":"gemma","language":"pools"}"#;
+        let read: Settings =
+            serde_json::from_str(json).expect("een onbekend taalwoord mag geen kapot bestand maken");
+        assert_eq!(read.language, Language::En);
+        assert_eq!(read.model.as_deref(), Some("gemma"), "de rest van het profiel blijft staan");
+        // Ruimte en hoofdletter maken geen verschil, want de origineler trimt en kleint vóór de
+        // keus (`Texts.kt:27`). Vanaf de schijf geldt dezelfde regel.
+        let spaced: Settings =
+            serde_json::from_str(r#"{"language":" NL "}"#).expect("hetzelfde woord met randen is hetzelfde woord");
+        assert_eq!(spaced.language, Language::Nl);
+        // Een veld dat géén woord is, is wél kapot: dat is geen taalkeuze van iemand, dat is een
+        // bestand dat niets meer voorstelt, en `store.rs` moet het als schade kunnen melden.
+        let wrong_kind: Result<Settings, _> = serde_json::from_str(r#"{"language":7}"#);
+        assert!(wrong_kind.is_err(), "een getal is geen taal");
     }
 
     #[test]

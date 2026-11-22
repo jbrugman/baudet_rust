@@ -21,6 +21,7 @@
 
 use crate::palette;
 use baudet_backend::protocol::Protocol;
+use baudet_i18n::{Key, Language, Texts};
 use baudet_settings::config::ToolMode;
 use baudet_settings::{ListingError, Model, ReadOutcome, Settings, SettingsFile, WriteError};
 use egui::Ui;
@@ -145,6 +146,13 @@ pub struct SettingsView {
     probing: bool,
     /// The password widget's transient buffer, kept so the field's show/hide survives a repaint.
     reveal_key: bool,
+    /// De taal uit het bestand, tot iemand opslaat.
+    ///
+    /// Een eigen veld en niet `stored_context.language`, om dezelfde reden als de lusdeksel daar
+    /// staat: `stored_context` is de kopie van alles waar deze panel géén widget voor heeft, en de
+    /// taal heeft er wél een. terwijs zou `draft()` het gekozen woord moeten overlappen terwijl er
+    /// een veld naast staat dat het zegt.
+    language: Language,
 }
 
 /// The reasoning level the panel offers. Maps one-to-one onto the strings `Settings::reasoning`
@@ -260,6 +268,11 @@ impl SettingsView {
         self.stored_context.left_divider = settings.left_divider;
         self.stored_context.right_divider = settings.right_divider;
         self.stored_context.files_divider = settings.files_divider;
+        // De kiezer laat het bestandwoord zien en niet een vertaalde naam: hetzelfde argument als
+        // bij de systeemprompt daarboven (`SettingsPanel.kt:258-261` over de raw stored text). Wat
+        // hier zou staan als "Nederlands", gaat terug als gebruiker-tekst en bevriest wat bij een
+        // latere taalwijziging mee moet bewegen. De kiezer zelf toont `Language::native_name`.
+        self.language = settings.language;
         self.fetched_for = None;
         self.listing_answered = false;
         // A stored dialect is a claim about an endpoint this panel has not asked yet, so it is shown
@@ -314,6 +327,7 @@ impl SettingsView {
             left_divider: self.stored_context.left_divider,
             right_divider: self.stored_context.right_divider,
             files_divider: self.stored_context.files_divider,
+            language: self.language,
         })
     }
 
@@ -333,6 +347,14 @@ impl SettingsView {
         self.stored_context.left_divider = dividers.left;
         self.stored_context.right_divider = dividers.right;
         self.stored_context.files_divider = dividers.files;
+    }
+
+    /// De taal die het gelezen bestand draagt, voor de vensterbouwer die vóór de eerste pass
+    /// moet weten in welke taal hij labels gaat zetten. Zelfde pattern als `dividers()`: de
+    /// lezing is eenmaal gedaan en de app leest haar uit de panel in plaats van het bestand nog
+    /// een keer open te doen.
+    pub fn language(&self) -> Language {
+        self.language
     }
 
     /// Het bestand waarnaar een opslag gaat, of `None` wanneer nog niets werd gelezen.
@@ -576,6 +598,10 @@ pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<S
     // 360 pt: het plafond dat het venster gaf, niet de breedte van het middenvlak. Het formulier is
     // één kolom, en elke veldbreedte hieronder wordt uit deze breedte opgemaakt.
     ui.set_width(ui.available_width().min(360.0));
+    // Taal bovenaan, zoals de rijenlijst van `SettingsPanel.kt:107` — daar staat
+    // `LanguageLabel to language` als eerste rij, vóór het endpoint.
+    language_row(ui, view);
+    ui.separator();
     endpoint_row(ui, view, &mut commands);
     ui.separator();
     model_row(ui, view);
@@ -604,8 +630,35 @@ pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<S
     }
 }
 
+/// De taalkeuze. Bovenstaande labels staan in deze taal; deze rij is waar iemand hem wisselt.
+///
+/// Een kiezer over `Language::ALL` en niet over vier losse woorden, zodat een taal die hier wordt
+/// toegevoegd automatisch door het venster en door het bestand gaat. De items dragen
+/// `native_name` — "Deutsch" blijft "Deutsch", want een kiezer die de taalnamen zélf vertaalt, is
+/// onleesbaar voor iemand die juist die taal zoekt (`SettingsPanel.kt:40` doet eveneens).
+///
+/// Er gebeurt niets bij de klik. De toepassing hangt aan de opslag, want de rij is hier het enige
+/// wat de taal wijzigt en de origineler herbouwt het venster alleen op diens eigen
+/// opslagknop (`Main.kt:74-82`, en `TipSave`: "The language switch is applied here too.").
+/// De kiezer toont dus wat er op slot staat en niet wat er nu op screen staat; dat verschil is
+/// precies wat het verschil tussen "kies" en "pas toe" zichtbaar maakt.
+fn language_row(ui: &mut Ui, view: &mut SettingsView) {
+    ui.label(dim(Texts::get(Key::LanguageLabel)));
+    let mut current = view.language;
+    let picker = egui::ComboBox::from_id_salt("settings-language")
+        .selected_text(view.language.native_name())
+        .show_ui(ui, |ui| {
+            for option in Language::ALL {
+                ui.selectable_value(&mut current, option, option.native_name());
+            }
+        })
+        .response;
+    picker.on_hover_text(Texts::get(Key::TipLanguage));
+    view.language = current;
+}
+
 fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<SettingsCommand>) {
-    ui.label(dim("endpoint"));
+    ui.label(dim(Texts::get(Key::BaseUrlLabel)));
     let response = ui.add_sized(
         [ui.available_width(), 20.0],
         egui::TextEdit::singleline(&mut view.base_url)
@@ -615,13 +668,19 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
             .id_salt(FIELD_ENDPOINT)
             .hint_text("http://127.0.0.1:8000/v1")
             .desired_width(f32::INFINITY),
-    );
+    )
+    .on_hover_text(Texts::get(Key::TipBaseUrl));
     // Retyping the endpoint invalidates the picker: models belong to the endpoint that listed them.
     if response.changed() {
         view.fetched_for = None;
     }
     let fetch_now = ui
-        .add_enabled(!view.fetching, egui::Button::new(if view.fetching { "fetching…" } else { "Fetch models" }))
+        .add_enabled(
+            !view.fetching,
+            egui::Button::new(
+                if view.fetching { Texts::get(Key::Fetching) } else { Texts::get(Key::FetchModels) },
+            ),
+        )
         .clicked();
     ui.horizontal(|ui| {
         // The second question about an address: not which models are on it, but what it answers.
@@ -659,7 +718,7 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
 }
 
 fn model_row(ui: &mut Ui, view: &mut SettingsView) {
-    ui.label(dim("model"));
+    ui.label(dim(Texts::get(Key::ModelLabel)));
     if view.models.is_empty() {
         ui.label(dim(if view.fetched_for.is_some() { "this endpoint lists none" } else { "not fetched yet" }));
         return;
@@ -688,11 +747,15 @@ fn model_row(ui: &mut Ui, view: &mut SettingsView) {
         .map(row_for)
         .or_else(|| labels.iter().find(|l| *l == &current).cloned())
         .unwrap_or_else(|| "choose…".to_string());
-    egui::ComboBox::from_id_salt("settings-model").selected_text(selected).show_ui(ui, |ui| {
-        for (model, label) in view.models.iter().zip(row_labels.iter()) {
-            ui.selectable_value(&mut chosen, model.id.clone(), label.as_str());
-        }
-    });
+    egui::ComboBox::from_id_salt("settings-model")
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            for (model, label) in view.models.iter().zip(row_labels.iter()) {
+                ui.selectable_value(&mut chosen, model.id.clone(), label.as_str());
+            }
+        })
+        .response
+        .on_hover_text(Texts::get(Key::TipModel));
     // Only a listed id is stored; "choose…" and the "(not listed)" entry leave the choice untouched.
     if chosen != current && view.models.iter().any(|m| m.id == chosen) {
         view.model = Some(chosen);
@@ -716,22 +779,27 @@ pub(crate) fn row_for(model: &Model) -> String {
 }
 
 fn reasoning_row(ui: &mut Ui, view: &mut SettingsView) {
-    ui.label(dim("reasoning"));
+    ui.label(dim(Texts::get(Key::ReasoningEffortLabel)));
     let mut current = view.reasoning;
-    egui::ComboBox::from_id_salt("settings-reasoning").selected_text(view.reasoning.label()).show_ui(ui, |ui| {
-        for option in Reasoning::ALL {
-            ui.selectable_value(&mut current, option, option.label());
-        }
-    });
+    let reasoning = egui::ComboBox::from_id_salt("settings-reasoning")
+        .selected_text(view.reasoning.label())
+        .show_ui(ui, |ui| {
+            for option in Reasoning::ALL {
+                ui.selectable_value(&mut current, option, option.label());
+            }
+        })
+        .response;
+    reasoning.on_hover_text(Texts::get(Key::TipReasoning));
     view.reasoning = current;
 }
 
 fn tokens_row(ui: &mut Ui, view: &mut SettingsView) {
-    ui.label(dim("max output tokens (empty = endpoint decides)"));
+    ui.label(dim(Texts::get(Key::MaxTokensLabel)));
     ui.add_sized(
         [ui.available_width(), 20.0],
         egui::TextEdit::singleline(&mut view.max_output_tokens).hint_text("e.g. 4096").desired_width(f32::INFINITY),
-    );
+    )
+    .on_hover_text(Texts::get(Key::TipMaxTokens));
 }
 
 /// De deksel op de tool-lus, naast de keuzelijst die er later boven komt.
@@ -740,41 +808,52 @@ fn tokens_row(ui: &mut Ui, view: &mut SettingsView) {
 /// een bewerkbaar vakje zou een limiet beloven dat niets aangaat. `draft` laat bij `Off` het
 /// opgeslagen limiet staan, dus wat hier niet te bereiken is, wordt ook niet stilletjes gewijzigd.
 fn iterations_row(ui: &mut Ui, view: &mut SettingsView) {
-    ui.label(dim("max tool iterations (turns the loop may spend)"));
+    ui.label(dim(Texts::get(Key::MaxToolIterationsLabel)));
     // `add_enabled` zoals `save_row` dat voor een onleesbaar bestand doet; de breedte volgt uit het
     // formulier, dus het vakje hoeft er niet apart een te krijgen.
     ui.add_enabled(
         view.tool_mode != ToolMode::Off,
         egui::TextEdit::singleline(&mut view.max_tool_iterations).hint_text("e.g. 8").desired_width(ui.available_width()),
-    );
+    )
+    .on_hover_text(Texts::get(Key::TipMaxIterations));
 }
 
 fn key_row(ui: &mut Ui, view: &mut SettingsView) {
-    ui.label(dim("api key (empty = read from environment)"));
+    ui.label(dim(Texts::get(Key::ApiKeyLabel)));
     ui.horizontal(|ui| {
         ui.add_sized(
             [ui.available_width(), 20.0],
             egui::TextEdit::singleline(&mut view.api_key).password(!view.reveal_key),
-        );
+        )
+        .on_hover_text(Texts::get(Key::TipApiKey));
         let toggle = if view.reveal_key { "hide" } else { "show" };
         if ui.small_button(toggle).clicked() {
             view.reveal_key = !view.reveal_key;
         }
     });
-    ui.label(dim("environment variable"));
+    ui.label(dim(Texts::get(Key::OrEnvVar)));
     ui.add_sized(
         [ui.available_width(), 20.0],
         egui::TextEdit::singleline(&mut view.api_key_env_var)
             .hint_text(baudet_settings::DEFAULT_KEY_ENV_VAR)
             .desired_width(f32::INFINITY),
-    );
+    )
+    .on_hover_text(Texts::get(Key::TipEnvVar));
 }
 
 fn save_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<SettingsCommand>) {
-    let save = ui.add_enabled(!view.blocked, egui::Button::new("Save")).clicked();
+    let save = ui
+        .add_enabled(!view.blocked, egui::Button::new(Texts::get(Key::SaveButton)))
+        .on_hover_text(Texts::get(Key::TipSave))
+        .clicked();
     if save {
         match view.draft() {
             Ok(settings) => {
+                // De taal gaat mee met de opslag en niet met de klik op de kiezer:
+                // `Main.kt:74-82` herbouwt de panelen alleen wanneer het persistentie-weerstand
+                // verschilt van de taal op screen, en `TipSave` zegt het met woorden. Hier staat
+                // daarom dezelfde zet als bij de sessie (`AppState.kt:228`).
+                Texts::set_language(settings.language);
                 view.status = "saving…".to_string();
                 commands.push(SettingsCommand::Save(settings));
             }
@@ -801,7 +880,7 @@ fn describe_path(path: &std::path::Path) -> String {
 /// because it is the reason these are unit tests in the file rather than integration tests beside it.
 #[cfg(test)]
 mod tests {
-    use super::{Reasoning, SettingsCommand, SettingsEvent, SettingsView, ToolMode};
+    use super::{Language, Reasoning, SettingsCommand, SettingsEvent, SettingsView, ToolMode};
     use baudet_settings::{ListingError, Model};
     use std::path::PathBuf;
 
@@ -823,6 +902,25 @@ mod tests {
             stored_max_tool_iterations: baudet_settings::DEFAULT_MAX_TOOL_ITERATIONS,
             ..SettingsView::default()
         }
+    }
+
+    /// De taal overleeft het rondje bestand → view → opslag.
+    ///
+    /// Dit is de drager van de hele i18n-draad: als `draft()` het woord van de kiezer niet
+    /// meedraagt, wordt elke opslag — en elk sluiten van het venster dat alleen de maten onthoudt —
+    /// een terugval naar Engels die niemand koos.
+    #[test]
+    fn de_gekozen_taal_reist_mee_naar_het_bestand() {
+        let mut panel = view();
+        assert_eq!(panel.language, Language::En, "een paneel zonder bestand begins bij Engels");
+        panel.language = Language::Nl;
+        assert_eq!(panel.draft().unwrap().language, Language::Nl);
+        // En terug: `adopt` is de kant waar het veld binnenkomt, en `geometry_draft` is de opslag
+        // die niemand voor een taalwijziging maakt — die mag eenmaal gekozen taal niet wissen.
+        panel.adopt(&panel.draft().unwrap());
+        assert_eq!(panel.language, Language::Nl);
+        let dividers = crate::layout::Dividers { left: 1, right: 2, files: 3 };
+        assert_eq!(panel.geometry_draft(&dividers).unwrap().language, Language::Nl);
     }
 
     #[test]

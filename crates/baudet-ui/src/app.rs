@@ -24,6 +24,7 @@ use crate::settings::{self, SettingsCommand, SettingsEvent, SettingsView};
 use crate::sidebar::SidebarModel;
 use baudet_app::session::pump;
 use baudet_app::AppState;
+use baudet_i18n::{Key, Texts};
 use baudet_backend::protocol::Protocol;
 use baudet_backend::scripted::{Script, ScriptedBackend};
 use baudet_backend::transport::{Endpoint, ResponsesBackend};
@@ -117,8 +118,8 @@ impl Tab {
 
     pub fn label(self) -> &'static str {
         match self {
-            Tab::Chat => "Chat",
-            Tab::Settings => "Settings",
+            Tab::Chat => Texts::get(Key::TabChat),
+            Tab::Settings => Texts::get(Key::TabSettings),
         }
     }
 }
@@ -248,6 +249,12 @@ impl TranscriptApp {
         // a thread's — it happens here, at construction, exactly once.
         let mut settings = SettingsView::new();
         settings.load(&baudet_settings::SettingsFile::default_location());
+        // De taal vóór de eerste pass, want de eerste pass tekent de labels. Zet hier en niet in
+        // `load()`: de lezing van het bestand is een gegeven en dit is de beslissing die ernaast
+        // hoort, precies zoals `AppState.kt:195` die in zijn `init` neemt (`Texts.language =
+        // Texts.parse(config.language)`). Een bestand dat een onbekend woord draagt, zegt hier niets
+        // anders dan Engels — `Settings::language` valt bij het lezen al terug.
+        Texts::set_language(settings.language());
         // Opvragen vóór de initializer: `settings` verdwijnt daarin in het venster,
         // en de drie maten moeten wél uit het gelezen bestand komen.
         let dividers = settings.dividers();
@@ -930,14 +937,14 @@ impl TranscriptApp {
             // without, because the same box has to grow and submit.
             let send_requested =
                 ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift) && response.has_focus();
-            let send_clicked = ui.add_enabled(!self.busy, egui::Button::new("Send")).clicked();
+            let send_clicked = ui.add_enabled(!self.busy, egui::Button::new(Texts::get(Key::SendButton))).clicked();
             if (send_clicked || send_requested) && !self.busy && !self.input.trim().is_empty() {
                 let text = std::mem::take(&mut self.input);
                 let _ = self.intents.send(Intent::Submit(text));
                 self.busy = true;
                 self.status = "starting".to_string();
             }
-            if ui.add_enabled(self.busy, egui::Button::new("Stop")).clicked() {
+            if ui.add_enabled(self.busy, egui::Button::new(Texts::get(Key::StopButton))).clicked() {
                 let _ = self.intents.send(Intent::Stop);
             }
         });

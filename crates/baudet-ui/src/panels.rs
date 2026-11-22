@@ -20,6 +20,7 @@ use crate::layout::{self};
 use crate::palette;
 use crate::sidebar::{Confirm, NameAsk, PermissionState, Selection, SidebarModel, UNASSIGNED};
 use crate::app::root_ui_id;
+use baudet_i18n::{Key, Texts};
 use baudet_core::{probe_changes, probe_git, ChangeKind, ChangedFile, GitMeta};
 use egui::{Color32, Panel, ScrollArea, Ui};
 use std::collections::HashMap;
@@ -262,7 +263,7 @@ pub fn file_tree_controls(
                     .id(root.with((TREE_REFRESH, "refresh")))
                     .sense(egui::Sense::click()),
                 |ui| {
-                    ui.add(egui::Button::new("Refresh").sense(egui::Sense::hover()));
+                    ui.add(egui::Button::new(Texts::get(Key::FileTreeRefreshButton)).sense(egui::Sense::hover()));
                 },
             )
             .response
@@ -270,7 +271,7 @@ pub fn file_tree_controls(
         // Het vinkje naast de knop, niet op eigen reinforcement: het bedient dezelfde boom.
         let mut hidden = workspace.show_hidden();
         ui.horizontal(|ui| {
-            if ui.checkbox(&mut hidden, "Hidden files").changed() {
+            if ui.checkbox(&mut hidden, Texts::get(Key::FileTreeHidden)).changed() {
                 workspace.set_show_hidden(hidden);
             }
         });
@@ -420,7 +421,7 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
                     .id(root.with((SIDEBAR_ADD, "add")))
                     .sense(egui::Sense::click()),
                 |ui| {
-                    ui.add(egui::Button::new("Add project").sense(egui::Sense::hover()));
+                    ui.add(egui::Button::new(Texts::get(Key::AddProjectButton)).sense(egui::Sense::hover()));
                 },
             )
             .response
@@ -465,9 +466,9 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
             // inbox-markering steekt in een dik lettertype: het is een markeerstijl, geen nabouwsel
             // van een selectie-api die er niet is.
             let inbox_label = if model.selection() == Some(&Selection::Unassigned) {
-                egui::RichText::new(UNASSIGNED).strong()
+                egui::RichText::new(Texts::get(Key::InboxNode)).strong()
             } else {
-                egui::RichText::new(UNASSIGNED)
+                egui::RichText::new(Texts::get(Key::InboxNode))
             };
             let response =
                 egui::CollapsingHeader::new(inbox_label).id_salt(UNASSIGNED).default_open(true).show(ui, |ui| {
@@ -499,7 +500,7 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
             }
             Some(state) => {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.strong(PERMISSIONS_TITLE);
+                    ui.strong(Texts::get(Key::FolderPermissionsTitle));
                     // Twee cellen zoals de origineler ze tekent (`ProjectSidebar.kt:96-97`:
                     // `BorderLayout.WEST` het label, `CENTER` de waarde), hier in één
                     // horizontale riem. Eén geformatteerde zin maakte van `map:` en zijn waarde
@@ -560,9 +561,9 @@ fn permission_boxes(ui: &mut Ui, state: &PermissionState, model: &mut SidebarMod
     let mut execute = state.execute;
     ui.horizontal(|ui| {
         ui.add_enabled_ui(state.checkbox_enabled, |ui| {
-            ui.checkbox(&mut read, "Read");
-            ui.checkbox(&mut write, "Write");
-            ui.checkbox(&mut execute, "Execute");
+            ui.checkbox(&mut read, Texts::get(Key::PermRead));
+            ui.checkbox(&mut write, Texts::get(Key::PermWrite));
+            ui.checkbox(&mut execute, Texts::get(Key::PermExecute));
         });
     });
     if (read, write, execute) != (state.read, state.write, state.execute) {
@@ -594,7 +595,7 @@ fn ask_and_confirm(ui: &mut Ui, model: &mut SidebarModel, intents: &mut Vec<Side
                         .id(root_ui_id(ui.ctx()).with((ASK_OK, "ok")))
                         .sense(egui::Sense::click()),
                     |ui| {
-                        ui.add(egui::Button::new("OK").sense(egui::Sense::hover()));
+                        ui.add(egui::Button::new(Texts::get(Key::Yes)).sense(egui::Sense::hover()));
                     },
                 )
                 .response
@@ -604,7 +605,7 @@ fn ask_and_confirm(ui: &mut Ui, model: &mut SidebarModel, intents: &mut Vec<Side
                 // project is geen wijziging, dus het middenpaneel hoeft dan niets te laten vallen.
                 intents.push(SidebarIntent::Deleted);
             }
-            if ui.button("Annuleer").clicked() {
+            if ui.button(Texts::get(Key::No)).clicked() {
                 model.cancel_name();
             }
         });
@@ -620,7 +621,7 @@ fn ask_and_confirm(ui: &mut Ui, model: &mut SidebarModel, intents: &mut Vec<Side
                         .id(root_ui_id(ui.ctx()).with((CONFIRM_YES, "yes")))
                         .sense(egui::Sense::click()),
                     |ui| {
-                        ui.add(egui::Button::new("Verwijder").sense(egui::Sense::hover()));
+                        ui.add(egui::Button::new(Texts::get(Key::DeleteButton)).sense(egui::Sense::hover()));
                     },
                 )
                 .response
@@ -628,7 +629,7 @@ fn ask_and_confirm(ui: &mut Ui, model: &mut SidebarModel, intents: &mut Vec<Side
             if yes && model.answer_confirm(true).is_some() {
                 intents.push(SidebarIntent::Deleted);
             }
-            if ui.button("Annuleer").clicked() {
+            if ui.button(Texts::get(Key::No)).clicked() {
                 model.cancel_confirm();
             }
         });
@@ -719,7 +720,8 @@ fn row_menu(
             }
         }
         Some(MenuAction::LinkFolder) => {
-            if let (Some(project), Some(chosen)) = (&project, pick_folder()) {
+            let start = project.as_deref().and_then(|id| model.project_folder(id));
+            if let (Some(project), Some(chosen)) = (&project, pick_folder(start.as_deref())) {
                 let _ = model.link_folder(project, Some(&chosen));
             }
         }
@@ -769,47 +771,48 @@ fn menu_item(
 ) -> Option<MenuAction> {
     match (project, session) {
         (Some(project), None) => {
-            if ui.button("New session").clicked() {
+            if ui.button(Texts::get(Key::NewSessionButton)).clicked() {
                 return Some(MenuAction::NewSession);
             }
-            if ui.button("Rename").clicked() {
+            if ui.button(Texts::get(Key::RenameButton)).clicked() {
                 return Some(MenuAction::Rename);
             }
             // Twee woorden, geen derde bedacht: `Key.kt:296/297` kiest archiveer- of
             // dearchiveer-woorden naargelang de staat, precies zoals `ProjectSidebar.kt:222`.
             let archived = model.project_archived(project).unwrap_or(false);
-            let archive_label = if archived { "Unarchive project" } else { "Archive project" };
+            let archive_label = if archived { Texts::get(Key::UnarchiveProjectButton) }
+                else { Texts::get(Key::ArchiveProjectButton) };
             if ui.button(archive_label).clicked() {
                 return Some(MenuAction::ToggleArchive);
             }
-            if ui.button("Link folder\u{2026}").clicked() {
+            if ui.button(Texts::get(Key::LinkFolderButton)).clicked() {
                 return Some(MenuAction::LinkFolder);
             }
             // `if (p.folderPath != null)` (`ProjectSidebar.kt:226`): loskoppelen heeft geen
             // betekenis zonder map, dus het item bestaat dan niet \u2014 het is niet inactief.
-            if model.project_folder(project).is_some() && ui.button("Unlink folder").clicked() {
+            if model.project_folder(project).is_some() && ui.button(Texts::get(Key::UnlinkFolderButton)).clicked() {
                 return Some(MenuAction::UnlinkFolder);
             }
             ui.separator();
-            if ui.button("Delete project").clicked() {
+            if ui.button(Texts::get(Key::DeleteProjectButton)).clicked() {
                 return Some(MenuAction::DeleteProject);
             }
             None
         }
         (_, Some(_)) => {
-            if ui.button("Open").clicked() {
+            if ui.button(Texts::get(Key::OpenSessionButton)).clicked() {
                 return Some(MenuAction::Open);
             }
-            if ui.button("Rename").clicked() {
+            if ui.button(Texts::get(Key::RenameButton)).clicked() {
                 return Some(MenuAction::Rename);
             }
-            if ui.button("Delete conversation").clicked() {
+            if ui.button(Texts::get(Key::DeleteConversationButton)).clicked() {
                 return Some(MenuAction::DeleteSession);
             }
             None
         }
         (None, None) => {
-            if ui.button("New session").clicked() {
+            if ui.button(Texts::get(Key::NewSessionButton)).clicked() {
                 return Some(MenuAction::NewSession);
             }
             None
@@ -835,8 +838,14 @@ pub const TREE_REFRESH: &str = "file-tree-refresh";
 /// An unnamed function rather than a method on `Workspace`, because it changes nothing the panel
 /// owns: de gekozen map gaat naar `SidebarModel::link_folder`, en `Workspace::cwd` houdt één
 /// schrijver (het geopende project).
-fn pick_folder() -> Option<String> {
-    rfd::FileDialog::new().set_title("Choose a folder").pick_folder().map(|path| path.display().to_string())
+fn pick_folder(start: Option<&str>) -> Option<String> {
+    let mut dialog = rfd::FileDialog::new().set_title(Texts::get(Key::LinkFolderButton));
+    // De dialog begint waar de project nu staat, zoals `ProjectSidebar.kt:371` zijn
+    // `selectedFile` zet: iemand die een map wil verwisselen, hoeft niet opnieuw te zoeken.
+    if let Some(path) = start.filter(|p| Path::new(p).is_dir()) {
+        dialog = dialog.set_directory(path);
+    }
+    dialog.pick_folder().map(|path| path.display().to_string())
 }
 
 /// Het "Copy path"-menu dat de origineler op élke riem van beide lijsten zet.
@@ -1488,17 +1497,23 @@ mod tests {
     /// negeert alleen het punt-deel`, en de `IGNORED_DIRS`-filter kent de origineler niet in
     /// die lijst maar in zijn eigen boom, waar hij ook met het vinkje aan blijft gelden.
 
-    /// De brief onder de boom is geen vrije tekst. Drie woorden staan vast in de bron en
-    /// bestaan hier uit dezelfde constanten: `Folder permissions` (`Key.kt:321`), het
-    /// `folder:`-label (`Key.kt:319`) en `no folder linked` (`Key.kt:320`). Een test die ze
-    /// vergelijkt met een in de test herhaalde zin, bewijst niets; hij vergelijkt ze met de
-    /// regels uit `Key.kt` die erboven staan, en met de selectieregel van de bron.
+    /// De adressen onder en naast de boom zijn geen vrije tekst: het id_salt van de inbox, en de
+    /// vaste woorden `folder:` (`Key.kt:319`) en `no folder linked` (`Key.kt:320`). De brieftitels
+    /// die iemand leest — `Folder permissions` (`Key.kt:321`) en de inbox-riem — gaan inmiddels via
+    /// `Texts::get(..)`, dus die dragen de taal van de instelling. Dit houdt de adressen vast:
+    /// een adres dat meebeweegt, verliest de staat die eraan vasthangt en het testadres dat erop
+    /// wijst. `PERMISSIONS_TITLE` blijft het Engelse woord van de bron dragen als naslag voor wie
+    /// de titel elders zoekt; op de riem staat de vertaalde vorm.
     #[test]
     fn de_brief_onder_de_boom_gebruikt_de_woorden_uit_key_kt() {
         assert_eq!(PERMISSIONS_TITLE, "Folder permissions");
         assert_eq!(FOLDER_LABEL, "folder:");
         assert_eq!(FOLDER_NONE, "no folder linked");
+        // `UNASSIGNED` is het id_salt-adres van de inbox, niet zijn riemtekst: een adres mag niet
+        // meebewegen met een taalwissel. De tekst die iemand leest, is `Key::InboxNode`, en in het
+        // Engels — de standaardtaal van deze test — valt die met het adres samen.
         assert_eq!(UNASSIGNED, "Unassigned");
+        assert_eq!(Texts::get(Key::InboxNode), UNASSIGNED);
     }
 
     /// Zonder selectie tekent de bron zijn map-riem met `FolderNone` en zet hij de vinkjes uit
