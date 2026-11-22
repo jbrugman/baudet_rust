@@ -39,10 +39,17 @@ impl NameAsk {
     /// wordt hier niet herhaald: een vertaling die hier zou worden nagemarket, wijkt van de dag af
     /// van wat de buurpanelen zeggen.
     pub fn prompt(&self) -> &'static str {
+        Texts::get(self.prompt_key())
+    }
+
+    /// Dezelfde vraag als sleutel, voor wie niet de tekst maar de aanduiding nodig heeft — de titel
+    /// van het vraag-venster (`panels::ask_title`) is in de origineler precies dat argument
+    /// (`ProjectSidebar.kt:304`, `:314`, `:360`).
+    pub fn prompt_key(&self) -> Key {
         match self {
-            NameAsk::NewProject => Texts::get(Key::ProjectNamePrompt),
-            NameAsk::RenameProject(_) => Texts::get(Key::RenameProjectPrompt),
-            NameAsk::RenameSession(_) => Texts::get(Key::RenameSessionPrompt),
+            NameAsk::NewProject => Key::ProjectNamePrompt,
+            NameAsk::RenameProject(_) => Key::RenameProjectPrompt,
+            NameAsk::RenameSession(_) => Key::RenameSessionPrompt,
         }
     }
 }

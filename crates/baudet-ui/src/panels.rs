@@ -263,7 +263,10 @@ pub fn file_tree_controls(
                     .id(root.with((TREE_REFRESH, "refresh")))
                     .sense(egui::Sense::click()),
                 |ui| {
-                    ui.add(egui::Button::new(Texts::get(Key::FileTreeRefreshButton)).sense(egui::Sense::hover()));
+                    // Zelfde regel als bij `Add project`: de origineler geeft elke knop zijn
+                    // tooltiptekst mee (`ProjectSidebar.kt:122-123`), en die was hier weggelaten.
+                    ui.add(egui::Button::new(Texts::get(Key::FileTreeRefreshButton)).sense(egui::Sense::hover()))
+                        .on_hover_text(Texts::get(Key::TipFileTreeRefresh));
                 },
             )
             .response
@@ -400,18 +403,13 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
     frame.show(ui, |ui| {
         // --- bovenrij: één knop, één handeling per klik. ---
         let root = crate::app::root_ui_id(ui.ctx());
-        // De vraag en de bevestiging staan bij de knop die ze vraagt en niet onder aan het paneel.
-        // Reden is geen smaak: `JOptionPane.showInputDialog` (`ProjectSidebar.kt:229`) vraagt ook
-        // naast de knop, en wat onderaan de rijen belandde, viel bij een vol paneel ónder de
-        // scrollbalk en dus buiten het venster — gemeten: de OK van de naamvraag stond op y 840-859
-        // in een venster van 800 pt, en `interact_rect` kapt het deel buiten het scherm af
-        // (egui's `interact` klapt `interact_rect` terug op `max_rect`). Niet klikbaar, precies de
-        // "Add project doet niets"-klus. Boven blijven ze in één pass bereikbaar, zonder scrollen.
-        let vraag_open = model.ask_name.is_some() || model.confirm.is_some();
-        ask_and_confirm(ui, model, &mut intents);
-        if vraag_open {
-            ui.separator();
-        }
+        // De vraag en de bevestiging staan niet meer in deze kolom. Ze stonden er tussen de knop en
+        // de scrollbalk van de boom, en bij een vol paneel viel hun bevestigingsknop buiten het
+        // venster — gemeten: de OK van de naamvraag stond op y 840-859 in een venster van 800 pt, en
+        // `interact_rect` kapt het deel buiten het scherm af (egui's `interact` klapt het terug op
+        // `max_rect`). De knop tekende wél en was onklikbaar: precies "Add project doet niets".
+        // `ask_dialog` belt ze na deze pass op een eigen laag, want de origineler vraagt ook in een
+        // eigen venster (`JOptionPane.showInputDialog`, `ProjectSidebar.kt:304`).
         // Een echte `Button`, geen kale klikbare tekst: de origineler zet hier een `JButton`
         // (`ProjectSidebar.kt:67`). De `scope_builder`-wikkel blijft, anders schuift het
         // root-adres `(SIDEBAR_ADD, "add")` dat tests/tabs.rs en tests/project_tree.rs treffen.
@@ -421,22 +419,27 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
                     .id(root.with((SIDEBAR_ADD, "add")))
                     .sense(egui::Sense::click()),
                 |ui| {
-                    ui.add(egui::Button::new(Texts::get(Key::AddProjectButton)).sense(egui::Sense::hover()));
+                    // De tekst van de origineler erbij, niet een eigen verzonnen: `button(Key.
+                    // AddProjectButton, Key.TipAdd)` (`ProjectSidebar.kt:67`) geeft diens knop
+                    // `toolTipText = Texts[Key.TipAdd]` mee (`:122-123`). Die tekst was hier wegge-
+                    // laten, en dat is precies waarom "is dit een knop?" onbeantwoord bleef: een
+                    // knop van 76 x 18 pt (gemeten x 8,0-83,7 en y 2,0-20,0 in een venster van 1280
+                    // pt) met geen woord uitleg is op een donker tema nauwelijks van platte tekst te
+                    // onderscheiden. De wikkel hier is `Sense::click()` en diens response is wat
+                    // `clicked()` leest, dus de hover tekent op precies dat adres.
+                    ui.add(egui::Button::new(Texts::get(Key::AddProjectButton)).sense(egui::Sense::hover()))
+                        .on_hover_text(Texts::get(Key::TipAdd));
                 },
             )
             .response
             .clicked()
         {
-            // De vraag verschijnt in het paneel zelf, niet in een zwevend modaal venster: de
-            // origineler gebruikt `JOptionPane`, maar een los venster boven de sidebar zou precies
-            // de klacht terughalen die de settings-overlay hier al had.
+            // Eén was, dan pas de vraag: een naamvraag en een bevestiging mogen elkaar niet overschrijven.
             model.cancel_confirm();
             model.start_name(NameAsk::NewProject, None);
         }
 
-        if !vraag_open {
-            ui.separator();
-        }
+        ui.separator();
 
         // --- de boom: projecten met hun sessies, dan de inbox. ---
         ScrollArea::vertical().id_salt("project-tree").auto_shrink([false, false]).show(ui, |ui| {
@@ -560,11 +563,35 @@ fn permission_boxes(ui: &mut Ui, state: &PermissionState, model: &mut SidebarMod
     let mut write = state.write;
     let mut execute = state.execute;
     ui.horizontal(|ui| {
+        // Het vierkantje van een vinkje is net zo goed zichtbaar als een knop: de origineler geeft het
+        // `CheckBox.icon.background` rgb(70,73,75) met rand rgb(105,107,109) — 1,88:1 en 3,18:1 op de
+        // paneelkleur, gemeten uit FlatDarkLaf via de eigen jar. De statussen die hier golden gaven
+        // 1,09:1, dus een aangevinkt recht was een donker gaatje in de achtergrond. De noot geldt
+        // alleen voor deze drie vakjes en gaat er meteen weer af, zodat de rest van de app zijn
+        // gemeten palet behoudt.
+        // De noot geldt voor deze drie vakjes en moet eraf voordat er iets anders getekend wordt.
+        // Dat kan zonder wikkel: `Ui::style_mut` is clone-on-write op de stijl van díze Ui
+        // (ui.rs:380-382) en lekt dus niet naar de Context, en het `previous` hieronder is de copia
+        // van vóór de wijziging, dus terugzetten is precies ongedaan maken.
+        let previous = ui.style().visuals.widgets.clone();
+        let style = ui.style_mut();
+        for widget in [
+            &mut style.visuals.widgets.inactive,
+            &mut style.visuals.widgets.hovered,
+            &mut style.visuals.widgets.active,
+        ] {
+            widget.bg_fill = palette::CHECK;
+            widget.weak_bg_fill = palette::CHECK;
+        }
+        style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, palette::CHECK_BORDER);
+        style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, palette::ACCENT);
+        style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, palette::ACCENT);
         ui.add_enabled_ui(state.checkbox_enabled, |ui| {
             ui.checkbox(&mut read, Texts::get(Key::PermRead));
             ui.checkbox(&mut write, Texts::get(Key::PermWrite));
             ui.checkbox(&mut execute, Texts::get(Key::PermExecute));
         });
+        ui.style_mut().visuals.widgets = previous;
     });
     if (read, write, execute) != (state.read, state.write, state.execute) {
         // Alleen bijschrijven als er iets veranderde: de catalogus schrijft per oproep weg, en een
@@ -573,18 +600,137 @@ fn permission_boxes(ui: &mut Ui, state: &PermissionState, model: &mut SidebarMod
     }
 }
 
-/// De vraag-om-naam-riem en de bevestigingsriem, onder alles. Beide zijn dezelfde riem-vorm: een
-/// regel tekst, een of twee knoppen, en het paneel weet wat er stond.
+/// De vraag- en bevestigingslaag, boven alles. Beide zijn dezelfde riem-vorm: een regel tekst, een
+/// of twee knoppen, en het paneel weet wat er stond.
+///
+/// De origineler vraagt in een eigen venster: `JOptionPane.showInputDialog` en
+/// `JOptionPane.showConfirmDialog` (`ProjectSidebar.kt:304`, `334`, `348`) — een laag boven de rest
+/// van het scherm die de aandacht op één vraag zet.
+///
+/// Waarom dit niet in de linkerkolom staat, is gemeten en geen smaak: de riem stond in die kolom,
+/// tussen de knop en de scrollbalk van de boom, en verloor het van die lay-out. De OK van de
+/// naamvraag stond bij een vol project op y 840-859 in een venster van 800 pt; egui kapt
+/// `interact_rect` daar af op `max_rect`, dus de knop tekende wél en was onklikbaar — precies
+/// "add project doet niets". Op een eigen laag is de vraag altijd in beeld en altijd bereikbaar.
+pub fn ask_dialog(ui: &mut Ui, model: &mut SidebarModel) -> Vec<SidebarIntent> {
+    let mut intents = Vec::new();
+    if model.ask_name.is_none() && model.confirm.is_none() {
+        return intents;
+    }
+    // Een `Window` en geen kale `Area`: de origineler vraagt in een eigen venster
+    // (`JOptionPane.showInputDialog`, `ProjectSidebar.kt:304`), en `Window` is het egui-primitief
+    // dat tekent vóór het invoer claimt.
+    //
+    // Let op de volgorde van oorzaken, want de eerste was een verkeerde diagnose. De hoek hieronder
+    // staat inderdaad vast — doch de OK verhuisde in opeenvolgende passen alsnog van x 562,8 naar
+    // x 202,8. Dat bleek geen anker-kwestie maar een groeiend venster: één `ui.separator()` in de
+    // inhoud maakte het breder dan het scherm, en de klem zette het naar links. Zie de noot bij
+    // `VRAAG_VELD_BREEDTE` voor de meting en de bronregels.
+    let (hoek, afmeting) = vraag_vensterhoek(ui.ctx());
+    egui::Window::new(Texts::get(ask_title(model)))
+        .id(egui::Id::new("ask-dialog"))
+        // `current_pos` (containers/area.rs:315-318) overschrijft `pivot_pos` in élke pass, dus de
+        // hoek hangt niet af van wat de vorige pass van het venster maakte.
+        .current_pos(hoek)
+        .default_size(afmeting)
+        .movable(false)
+        .resizable(false)
+        .collapsible(false)
+        // Geen titelbalk: de vraag staat al boven het veld, en `showInputDialog` zet er geen tweede
+        // regel bij (`ProjectSidebar.kt:304` geeft alleen het bericht mee).
+        .title_bar(false)
+        .auto_sized()
+        .frame(egui::Frame::popup(ui.style()))
+        .show(ui.ctx(), |ui| {
+            ask_and_confirm(ui, model, &mut intents);
+        });
+    intents
+}
+
+/// De titel van het vraag-venster, naar de soort vraag.
+///
+/// De vier sleutels zijn letterlijk de titel-argumenten van de origineler, dus er staat geen zin die
+/// hier bedacht is:
+///  * een naamvraag heeft géén aparte titel — `showInputDialog(this, Texts[prompt])`
+///    (`ProjectSidebar.kt:304`, `:314`, `:360`) draagt de vraag zelf aan als bericht, en die vraagt
+///    hier ook boven het veld (`NameAsk::prompt`), dus titel en vraag zijn dezelfde sleutel;
+///  * een bevestiging noemt de handeling: `Texts[Key.DeleteProjectButton]`
+///    (`ProjectSidebar.kt:332-334`) en `Texts[Key.DeleteConversationButton]` (`:346-348`).
+fn ask_title(model: &SidebarModel) -> Key {
+    match &model.confirm {
+        Some(Confirm::DeleteProject(..)) => Key::DeleteProjectButton,
+        Some(Confirm::DeleteSession(..)) => Key::DeleteConversationButton,
+        None => match &model.ask_name {
+            Some(ask) => ask.prompt_key(),
+            None => Key::ProjectNamePrompt,
+        },
+    }
+}
+
+
+/// De hoek en de raming van het vraag-venster, gecentreerd op de strook tussen de twee balken.
+///
+/// De vraag mag niet over de projectbalk links of de bestandsboom rechts vallen; `PANEL_MIN` is de
+/// vloer die `tests/folder_row.rs` voor die kolommen meet. Puur rekenwerk op maten uit `layout`, dus
+/// apart te testen.
+///
+///Wat er hier níet meer staat, is een eerdere diagnose. Die schreef dat deze hoek uit de afmeting van
+/// het venster gehaald moest worden, en dat een anker de OK per pass deed verhuizen. Dat klopt van
+/// geen kanten: met deze vaste hoek verhuisde de OK alsnog van x 562,8 naar x 202,8, en de oorzaak
+/// bleek één scheidingslijn in de inhoud. Zie de noot bij `VRAAG_VELD_BREEDTE`.
+pub fn vraag_vensterhoek(ctx: &egui::Context) -> (egui::Pos2, egui::Vec2) {
+    // De raming is geen meetlat voor de inhoud — `auto_sized` maakt die groter of kleiner naar wat er
+    // staat — maar voor de plaats: hij bepaalt waar het middelpunt van het venster komt, en dus of
+    // het tussen de balken blijft. Te groot zou uit de balken lopen.
+    let afmeting = egui::vec2(280.0, 76.0);
+    let vlak = ctx.viewport_rect();
+    let links = vlak.min.x;
+    let rechts = (vlak.max.x - layout::PANEL_MIN).max(links);
+    let x = (links + (rechts - links) / 2.0 - afmeting.x / 2.0).clamp(links, rechts);
+    (egui::pos2(x, vlak.center().y - afmeting.y / 2.0), afmeting)
+}
+
+/// De scheidingslijn die het vraag-venster níet tekent, en waarom dat geen smuk is.
+///
+/// `ui.separator()` is de oorzaak van "add project doet niets", en het mechanisme staat in de bron
+/// van egui te lezen. Een `Separator` neemt in een verticale layout de hele beschikbare breedte
+/// (`widgets/separator.rs:119-127`: `available_size_before_wrap()`, tenzij het een sizing-pass is,
+/// en die is in een gewoon venster nooit aan). `Window::auto_sized` wikkelt een `Resize`, en
+/// `Resize::begin` onthoudt die breedte: `state.desired_size = state.desired_size.max(last_content_size)`
+/// (`containers/resize.rs:297`) — "auto-expand to include size of last frame". De inhoud die de
+/// volle breedte opeiste, wordt zo de ondergrens van het venster, en die grens kan daarna niet meer
+/// krimpen.
+///
+/// Gemeten, in een venster van 1200 pt, drie passen na elkaar, met de hoek die hieronder op
+/// `vraag_vensterhoek` vaststaat en dus niet verandert:
+///  * pass 0: inhoud 243,7 pt — het venster is `370-627`, de OK staat op x 562,8;
+///  * pass 1: de scheidingslijn nam de aangeboden 1176 pt, dus `desired_size` werd 1176 en het
+///    venster `370-1560`;
+///  * `Area::begin` klemt dat terug op `content_rect` (`containers/area.rs:560-564`,
+///    `context.rs:2424-2436`), en een venster breder dan het scherm schuift naar links: `10-1200`;
+///  * de OK van de volgende pass staat daardoor op x 202,8 — 360 pt verderop dan waar hij getekend
+///    is. egui hit-test de rect van de vorige pass, dus elke klik gaat mis. Zonder die ene lijf meet
+///    het venster in élke pass 243,7 x 19 en staat de OK onbeweeglijk op x 562,8.
+///
+/// De origineler kent dit niet: `JOptionPane.showInputDialog` (`ProjectSidebar.kt:304`) zet een
+/// vraag, een veld en twee knoppen in één rij zonder scheidingslijn, en diens venster groeit niet
+/// mee met wat erboven stond. Dit nadoen is hier zowel dichter bij de origineler als het enige wat
+/// de klik rendert.
+const VRAAG_VELD_BREEDTE: f32 = 90.0;
+
 fn ask_and_confirm(ui: &mut Ui, model: &mut SidebarModel, intents: &mut Vec<SidebarIntent>) {
     if let Some(ask) = model.ask_name.clone() {
-        ui.separator();
         // Vraag, veld en knoppen op één riem. De origineler zet die in één dialoog
-        // (`JOptionPane.showInputDialog`, `ProjectSidebar.kt:229`); als drie stapels onder elkaar
+        // (`JOptionPane.showInputDialog`, `ProjectSidebar.kt:304`); als drie stapels onder elkaar
         // verdween de vraag uit het oog en zonk de bevestigingsknop naar de paneelrand.
         ui.horizontal_wrapped(|ui| {
             ui.label(ask.prompt());
             let field = ui
-                .add(egui::TextEdit::singleline(&mut model.name_entry).hint_text("naam").desired_width(90.0));
+                .add(
+                    egui::TextEdit::singleline(&mut model.name_entry)
+                        .hint_text("naam")
+                        .desired_width(VRAAG_VELD_BREEDTE),
+                );
             // Wie om een naam vraagt, wil er een typen: het veld krijgt de foyer mee, zodat Enter
             // direct bevestigt in plaats van eerst een klik te vereisen.
             field.request_focus();
@@ -612,7 +758,6 @@ fn ask_and_confirm(ui: &mut Ui, model: &mut SidebarModel, intents: &mut Vec<Side
         return;
     }
     if let Some(confirm) = model.confirm.clone() {
-        ui.separator();
         ui.horizontal_wrapped(|ui| {
             ui.label(confirm.prompt(model));
             let yes = ui
@@ -1210,10 +1355,20 @@ impl FileStatus {
 /// `TABSTRIP`): een expliciet id registreert zijn klik op exact dát adres.
 pub const PANEL_TOGGLES: &str = "panel-toggles";
 
-/// De afmeting van een toggle-knop. De kopstrook is één rij hoog en deze knop vult die; de breedte
-/// staat los van de inhoud, want de knop wordt met `Ui::put` op een vaste plek gezet en mag de
-/// breedte van de strook niet mee naar zich toe trekken.
-pub const TOGGLE_SIZE: f32 = 26.0;
+/// De hoogte van een toggle-knop, en tot voor kort ook zijn breedte.
+///
+/// De hoogte is gemeten, niet gekozen: `Main.kt:255-257` zet op deze `JButton` een
+/// `SidebarToggleIcon` van 20 x 18 en `margin = Insets(4, 6, 4, 6)`, en `preferredSize` van zo'n
+/// knop is `icon + margin` — gemeten 28 hoog (`/usr/bin/java -cp /tmp/baudet.jar Probe3`,
+/// `preferred = minimum = Dimension[34, 28]`).
+pub const TOGGLE_SIZE: f32 = 28.0;
+
+/// De breedte van een toggle-knop, gemeten uit dezelfde bron: 20 pt icoon plus 6 pt margin aan
+/// elke zijde is 32, en FlatLaf tekent daar zijn eigen vulling omheen, waardoor de knop 34 pt
+/// breed is. Vóór deze meting stond de breedte gelijk aan de hoogte (26, later 28), dus de tegel
+/// was 6 tot 8 pt te smal: een icoon van 20 pt met de knopvulling eromheen paste er net niet in,
+/// en een afgeknepen icoon is niet leesbaar.
+pub const TOGGLE_WIDTH: f32 = 34.0;
 
 /// Het vierkant waarin een toggle thuishoort, gegeven de strook van de kop en of hij aan de west-
 /// of de oost-rand hoort. Puur rekenwerk op de strook die de kop aanlevert, dus apart te testen:
@@ -1221,54 +1376,133 @@ pub const TOGGLE_SIZE: f32 = 26.0;
 /// elkaar alleen als de strook smaller is dan twee knoppen -- op een normale breedte niet.
 pub fn toggle_rect(band: egui::Rect, right_side: bool) -> egui::Rect {
     let height = band.height().min(TOGGLE_SIZE);
-    let x = if right_side { band.max.x - TOGGLE_SIZE } else { band.min.x };
+    let x = if right_side { band.max.x - TOGGLE_WIDTH } else { band.min.x };
     let min = egui::pos2(x, band.min.y);
-    egui::Rect::from_min_size(min, egui::vec2(TOGGLE_SIZE, height))
+    egui::Rect::from_min_size(min, egui::vec2(TOGGLE_WIDTH, height))
 }
 
-/// Het teken van een paneel-toggle: de zijde die hij verbergt en weer tevoorschijn haalt, als een
-/// dik blok aan die rand. Een geopend paneel wijst naar buiten (klik om te verbergen), een gesloten
-/// paneel naar binnen (klik om terug te halen), exact de betekenis van `sidebarToggle` in
-/// `Main.kt:247-269`.
-fn toggle_glyph(right_side: bool, shown: bool) -> &'static str {
-    match (right_side, shown) {
-        (false, true) => "\u{25E7}",  // ◧ blok links: sidebar open
-        (false, false) => "\u{25E5}", // ◥ blok rechts: sidebar weg
-        (true, true) => "\u{25E5}",   // ◥ blok rechts: bestandboom open
-        (true, false) => "\u{25E7}",  // ◧ blok links: bestandboom weg
-    }
+/// De maat van het icoon in de toggle-knop: `SidebarToggleIcon.kt:20-21` zet 20 x 18 neer.
+pub const TOGGLE_ICON: egui::Vec2 = egui::vec2(20.0, 18.0);
+
+/// De fractie van de icoonbreedte waarop de rail staat — `SidebarToggleIcon.kt:38`
+/// (`0.66` rechts, `0.34` links): "the rail marks the panel it toggles". Puur rekenwerk, dus apart
+/// te testen.
+pub fn toggle_rail_fraction(right_side: bool) -> f32 {
+    if right_side { 0.66 } else { 0.34 }
 }
 
-/// Een paneel-toggle. Het is een eigen `Widget` en geen `Button`, en hij krijgt zijn `Id` van de
-/// aanroeper: zo registreert hij zijn klik op het adres dat de aanroeper construeert, en pas een test
-/// hem vinden en klikken zonder de kop-lay-out na te bouwen.
+/// Het vierkant van het icoon binnen de knop: `JButton` centreert zijn `Icon`, dus dit doet dat ook.
+pub fn toggle_icon_rect(band: egui::Rect) -> egui::Rect {
+    egui::Rect::from_center_size(band.center(), TOGGLE_ICON)
+}
+
+/// Een paneel-toggle: een egui-knop met het icoon van de origineler erin.
+///
+/// De knop is een `egui::Button` en geen eigen `Widget`. Dat is geen smaak: `palette::install`
+/// hangt de gemeten knopvulling en -rand aan `widgets.*`, en alleen de echte knop leest die
+/// (`ui.style().button_style(&classes, state)` → `Frame { fill, stroke, corner_radius }`,
+/// button.rs:330-352 + widget_style.rs:146-170). Een eigen widget die `background_fill` en
+/// `stroke_color` leest — twee velden die `install` nooit zet — tekende opnieuw een vullingloze
+/// tegel: precies de klacht "ik zie niet wat een knop is".
+///
+/// De knop draagt geen tekst, want de inhoud is icoon. Egui meet een tekstloze knop op
+/// `min_size`, en de icoonmaat past daar met `.small()` net in binnen de marges
+/// (`button_padding = style.spacing.button_padding − bg_stroke.width`, gemeten 6/4 − 1 = 5/3).
+///
+/// Geen `.selected(..)`: die overschrijft de vulling met `selection.bg_fill`
+/// (widget_style.rs:150-155), en dat gemeten rij-blok is 1,61:1 op de paneelkleur — daarmee zou
+/// een geopend paneel precies die onzichtbare knop terugkrijgen waar deze klacht over gaat.
+///
+/// Wat er níet meer staat, is de eerdere poging: `\u{25E7}`/`\u{25E5}` meten in dit lettertype
+/// 0.00 breed (`\u{25C0}`/`\u{25B6}` meten 20.31), dus egui viel terug op `.notdef` en de knop
+/// werd een leeg vierkant zonder rand.
 pub struct Toggle {
     id: egui::Id,
     right_side: bool,
-    shown: bool,
 }
 
 impl Toggle {
     /// `id` is het root-adres waarop deze klik geland moet worden; de aanroeper zet er de `Id` neer
     /// die hij zelf weer kan reconstrueren (via `root_ui_id(..).with((PANEL_TOGGLES, ...))`).
-    pub fn new(id: egui::Id, right_side: bool, shown: bool) -> Self {
-        Self { id, right_side, shown }
+    pub fn new(id: egui::Id, right_side: bool) -> Self {
+        Self { id, right_side }
     }
 }
 
 impl egui::Widget for Toggle {
     fn ui(self, ui: &mut Ui) -> egui::Response {
-        let rect = ui.max_rect();
-        let response = ui.interact(rect, self.id, egui::Sense::click());
-        let colour = if response.hovered() { palette::TEXT } else { palette::DIM };
-        let glyph = toggle_glyph(self.right_side, self.shown);
-        let layout = egui::Layout::centered_and_justified(egui::Direction::TopDown);
-        ui.with_layout(layout, |ui| {
-            ui.add(egui::Label::new(egui::RichText::new(glyph).color(colour).size(16.0)).selectable(false));
-        });
-        response
+        // De klik.landt.op `self.id` dankzij dezelfde constructie als `Add project`: de wikkel claimt
+        // `Sense::click()` op dat adres en de knop erin zet `Sense::hover`, zodat de knop zelf geen
+        // adres claimt en er dus geen twee widgetrecten op elkaars middelpunt staan. `Button` heeft
+        // hier geen `id_salt`, dus de adresconstructie moet in de wikkel; `place`/`put` met een
+        // hover-wikkel was de zwakkere variant en liet het `PANEL_TOGGLES`-adres zwijgen.
+        let right_side = self.right_side;
+        let response = ui
+            .scope_builder(
+                egui::UiBuilder::new().id(self.id).sense(egui::Sense::click()),
+                |ui| {
+                    // `frame(true)`, niet `.frame(false)`: de origineler is hier een `JButton`
+                    // (`Main.kt:255`), en FlatLaf tekent een `JButton` altijd met zijn
+                    // `Button.background` en zijn 8 pt hoek (`Main.kt:60`). Zonder frame hing er alleen
+                    // een icoon-stroke in de kop en was er niets dat "klikbaar" said -- na de
+                    // `weak_bg_fill`-fix in `palette` was dit het tweede deel van dezelfde klacht.
+                    ui.add(
+                        egui::Button::new("")
+                            .min_size(egui::vec2(TOGGLE_WIDTH, TOGGLE_SIZE))
+                            .sense(egui::Sense::hover()),
+                    );
+                },
+            )
+            .response;
+        // Het icoon overheen, gecentreerd op de gemeten rect van de knop — niet op de wikkel, want
+        // wikkel en knop zijn pas na meten even breed. `response.rect` is die gemeten rect.
+        // Het icoon **achter** het knopframe: de knop allocateert en schildert in dezelfde
+        // `ui.add`-aanroep (`button.rs:378` `prepared.paint(ui)`), dus alles wat hier vóór die opdracht
+        // getekend wordt, beland onder het vlak en is op een donker thema weg. Met het icoon er ná gaat
+        // de volgorde zoals bij de origineler: `JButton` schildert eerst `Button.background` met zijn
+        // 8 pt hoek (`Main.kt:60`) en roept dán pas `SidebarToggleIcon.paintComponent`.
+        paint_toggle_icon(ui, toggle_icon_rect(response.rect), right_side);
+        // De tooltip die `JButton` draagt: `Main.kt:256` zet `toolTipText = Texts[tipKey]`. Een knop
+        // die alleen uit een icoon bestaat, verklaart zichzelf niet zonder.
+        response.on_hover_text(if right_side {
+            Texts::get(Key::ToggleFileTree)
+        } else {
+            Texts::get(Key::ToggleSidebar)
+        })
     }
 }
+
+/// Het icoon van de paneel-toggle: tekenwerk binnen een vierkant.
+///
+/// Tekenwerk zoals `SidebarToggleIcon.kt:31-46` het doet: een afgerond rechthoekje met een verticale
+/// rail, slag 1.5, zonder vulling. De formules zijn er letterlijk overgenomen: `w = width - 2`,
+/// `h = height - 2`, `arc = 5` en `rail = x + 1 + (w * frac).trunc()`, met `frac` 0.66 oost en
+/// 0.34 west — "the rail marks the panel it toggles".
+///
+/// De inkt volgt de widgetstatus, want `SidebarToggleIcon.kt:33` neemt `c?.foreground` van de
+/// `JButton` en FlatLaf kleurt die per status; hier is dat dezelfde `fg_stroke` waaraan
+/// `palette::install` de knoppen ophangt, dus het icoon kleurt precies mee met de knop eromheen.
+fn paint_toggle_icon(ui: &Ui, icon: egui::Rect, right_side: bool) {
+    let state = if ui.rect_contains_pointer(icon) {
+        egui::widget_style::WidgetState::Hovered
+    } else {
+        egui::widget_style::WidgetState::Inactive
+    };
+    let colour = ui.style().visuals.widgets.state(state).fg_stroke.color;
+    let line = egui::Stroke::new(1.5, colour);
+    let painter = ui.painter();
+    // `drawRoundRect(x + 1, y + 1, w, h, 5, 5)`: Java's tekenfunctie noemt links-boven en de
+    // afmeting, egui's `rect_stroke` een rect, dus `max = min + 1 + afmeting`.
+    let min = icon.min + egui::vec2(1.0, 1.0);
+    let box_rect = egui::Rect::from_min_max(min, min + egui::vec2(icon.width() - 2.0, icon.height() - 2.0));
+    painter.rect_stroke(box_rect, 3.0, line, egui::StrokeKind::Inside);
+    let rail_x = box_rect.min.x + (box_rect.width() * toggle_rail_fraction(right_side)).trunc();
+    painter.line_segment(
+        [egui::pos2(rail_x, box_rect.min.y), egui::pos2(rail_x, box_rect.max.y)],
+        line,
+    );
+}
+
 
 fn dim(text: impl Into<String>) -> egui::WidgetText {
     egui::RichText::new(text.into()).color(palette::DIM).into()
@@ -1519,8 +1753,28 @@ mod tests {
     /// Zonder selectie tekent de bron zijn map-riem met `FolderNone` en zet hij de vinkjes uit
     /// (`ProjectSidebar.kt:249-253`). De waarden hier komen uit `permission_state()`, dus als die
     /// ophoudt `None` te geven boven een lege selectie — of zijn vinkjes aan laat — faalt dit.
+    /// Beide tests hieronder openen een model. `SidebarModel::open_default()` volgt
+    /// `baudet_store::data_dir()`, en dat is zonder `BAUDET_HOME` de echte data-map van deze
+    /// machine. Wat er misging, staat meetbaar in `~/Library/Application Support/Baudet/projects
+    /// .json`: tweeëndertig projecten die allemaal "woorden" heten — de werpnamen van deze tests,
+    /// want élke run liet er een achter. Voor iemand die de app opent is dat de muur waaronder een
+    /// vers project onzichtbaar wordt: "Add project doet niets", terwijl de knop gewoon werkte.
+    /// Zelfde les als `tests/project_tree.rs:14-18` al trekt: een test die niets op schijf mag
+    /// achterlaten, zet eerst een eigen `BAUDET_HOME`.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Zet `BAUDET_HOME` op een werpmap voor de duur van ene test. De variabele is proces-breed,
+    /// dus het slot houdt twee tests uit elkaar; `TempDir` ruimt de map bij de drop.
+    fn private_data_home() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+        let guard = HOME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::TempDir::new().expect("werpmap voor BAUDET_HOME");
+        std::env::set_var("BAUDET_HOME", dir.path());
+        (guard, dir)
+    }
+
     #[test]
     fn zonder_selectie_is_er_geen_map_en_zijn_de_vinkjes_uit() {
+        let (_guard, _home) = private_data_home();
         let model = SidebarModel::open_default();
         assert!(model.selected_project().is_none(), "een vers model claimt een selectie");
         assert!(model.permission_state().is_none(), "zonder selectie tekent de bron geen rechten-vak");
@@ -1533,6 +1787,7 @@ mod tests {
     /// een map die er niet is.
     #[test]
     fn een_map_geeft_de_vinkjes_en_zijn_schijf_regel() {
+        let (_guard, _home) = private_data_home();
         let dir = std::env::temp_dir();
         let path = dir.to_str().expect("temp-dir is geldig UTF-8");
         let mut model = SidebarModel::open_default();

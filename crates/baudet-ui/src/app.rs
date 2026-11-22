@@ -465,13 +465,17 @@ impl TranscriptApp {
         // herbouwen uit de `JSplitPane` die er nog staat — niet uit het bestand.
         let previous_left = self.live_width(ui.ctx(), "projects");
         let left_width = resolve_divider(previous_left, self.dividers.left, layout::LEFT_WIDTH);
-        let intents = if self.show_sidebar {
+        let mut intents = if self.show_sidebar {
             panels::project_sidebar(ui, &mut self.sidebar, left_width)
         } else {
             Vec::new()
         };
         // De intenties eerst verwerken en dan pas tekenen wat ernaast staat: de bestandsboom hoort
         // het project van de zojuist gemaakte keuze, niet dat van de vorige pass.
+        // De vraag en de bevestiging bellen na de sidebar, op hun eigen laag, en hun intenties
+        // tellen mee met dezelfde batch: een bevestigde verwijdering moet in dezelfde pass het
+        // middenvlak ledigen als de klik die hem vraagt.
+        intents.extend(panels::ask_dialog(ui, &mut self.sidebar));
         self.apply_sidebar_intents(intents);
         // De bestandsboom staat rechts, naast het middenvlak — `[ ProjectSidebar | Chat/Settings ]
         // [ Files + Changes ]` zoals `Main.kt:161-170` het opzet. De mapkiezer en de git-lijst
@@ -554,14 +558,14 @@ impl TranscriptApp {
                 let root = root_ui_id(ui.ctx());
                 let west = root.with((panels::PANEL_TOGGLES, "sidebar"));
                 if ui
-                    .put(panels::toggle_rect(band, false), panels::Toggle::new(west, false, self.show_sidebar))
+                    .put(panels::toggle_rect(band, false), panels::Toggle::new(west, false))
                     .clicked()
                 {
                     self.show_sidebar = !self.show_sidebar;
                 }
                 let east = root.with((panels::PANEL_TOGGLES, "filetree"));
                 if ui
-                    .put(panels::toggle_rect(band, true), panels::Toggle::new(east, true, self.show_filetree))
+                    .put(panels::toggle_rect(band, true), panels::Toggle::new(east, true))
                     .clicked()
                 {
                     self.show_filetree = !self.show_filetree;
