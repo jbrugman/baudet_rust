@@ -196,6 +196,10 @@ pub struct SettingsView {
     blocked: bool,
     /// Whether the model ids were fetched since the endpoint last changed, so a stale picker cannot
     /// offer a model the current endpoint does not have.
+    /// Het venster dat voor het **bewaarde** model werd geleerd, of `None` when the file has none for
+    /// this endpoint+model. De modelrij tekent het naast dat woord; een listing overschrijft het niet,
+    /// want daar heeft `Model::context_window` zijn eigen getal voor.
+    model_window: Option<u32>,
     fetched_for: Option<String>,
     /// Whether the endpoint that was asked has answered at all — a listing or a named failure. Unlike
     /// `fetched_for` this is not about which models are current: it is the record that a request is
@@ -356,6 +360,16 @@ impl SettingsView {
         self.language = settings.language;
         self.fetched_for = None;
         self.listing_answered = false;
+        // De **venstermaat** van het bewaarde model blijft wél staan wanneer het sleutelwoord van
+        // dat geleerde venster precies dit adres aan dit model koppelt — anders zou de modelrij
+        // hieronder, dat dat getal toont, bij elke start blanco beginnen terwijl het bestand het
+        // draagt. `ContextLimits::capped_by_budget` laat een typed budget nooit door dit getal
+        // verhogen, dus een achterhaalde maat kan hooguit een te klein plafond opleveren.
+        if settings.learned_context_window > 0
+            && settings.learned_context_key == baudet_store::window_key(&settings.base_url, settings.model_name())
+        {
+            self.model_window = Some(settings.learned_context_window);
+        }
         // A stored dialect is a claim about an endpoint this panel has not asked yet, so it is shown
         // as what it is: chosen, not probed. `probed` stays empty until a scan says otherwise.
         self.probed = None;
@@ -1004,12 +1018,28 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
 fn model_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
     // Het woord van de rij is de vraag, het veld erachter is het antwoord; een los woord boven een
     // keuzelijst was het uiterlijk van een koptekst, niet van een veld (`Form.kt:14-32`).
+    //
+    // De **bewaarde** keuze wordt altijd getekend, ook vóórdat er ooit een listing kwam. Een keuzelijst
+    // die pas bestaat ná een Fetch toonde bij een herstart "not fetched yet" boven een model dat het
+    // bestand wél draagt en dat de volgende beurt ook krijgt (`endpoint_from` leest `Settings::model`
+    // rechtstreeks): same input, different output. De origineler zette die tekst in een kakelvers
+    // `JTextField` (`SettingsPanel.kt:245`) en had dat probleem niet. De lijst blijft de enige bron van
+    // *nieuwe* namen — wie niets fetchte, kan niets nieuws kiezen — maar wat er staat, verdwijnt niet.
+    let saved = view.model.clone().filter(|saved| !saved.trim().is_empty());
     if view.models.is_empty() {
+        if let Some(saved) = saved {
+            let listed = view.fetched_for.is_some();
+            form_row_with_gap(ui, boven, Texts::get(Key::ModelLabel), |ui| {
+                ui.monospace(saved_model_label(&saved, view.model_window, listed));
+            });
+            return;
+        }
         // De rij blijft staan met wat er ontbreekt, want een verdwenen veld laat iemand zoeken naar
         // een instelling die er wél is. De vroege `return` staat hier en niet in de sluiting, want
         // die sluiting hoort bij `form_row` en niet bij deze functie.
         form_row_with_gap(ui, boven, Texts::get(Key::ModelLabel), |ui| {
-            ui.label(dim(if view.fetched_for.is_some() { "this endpoint lists none" } else { "not fetched yet" }));
+            let note = if view.fetched_for.is_some() { "this endpoint lists none" } else { "not fetched yet" };
+            ui.label(dim(note));
         });
         return;
     }
@@ -1020,23 +1050,24 @@ fn model_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
         let row_labels: Vec<String> = view.models.iter().map(row_for).collect();
         let current = view.model.clone().unwrap_or_default();
         let mut labels: Vec<String> = row_labels.clone();
-        // Offer "keep current" when a saved model is not in the list (an offline endpoint), so opening
-        // the panel never silently drops a working choice.
-        if let Some(saved) = view.model.as_ref().filter(|s| !view.models.iter().any(|m| &m.id == *s)) {
-            labels.insert(0, format!("{saved}  (not listed)"));
+        // Offer the stored choice as a row when the listing lacks it — an offline endpoint, or an
+        // endpoint nobody asked yet — so opening the panel never silently drops a working choice.
+        if let Some(saved) = saved.as_ref().filter(|saved| !view.models.iter().any(|m| m.id == **saved)) {
+            labels.insert(0, saved_model_label(saved, view.model_window, view.fetched_for.is_some()));
         }
         // The choice is carried as the id and only *drawn* as a row. Matching the stored id against the
         // label instead would find nothing once a row reads "Qwen … · 256k", and the picker would open
         // as "choose…" above a model that is still selected.
         let mut chosen = current.clone();
-        // The "(not listed)" entry is the one label equal to a bare id, so it is found by this lookup
-        // and every listed model by its row: the field shows exactly what its row shows.
+        // The stored row is the one label equal to the saved choice, so it is found by this lookup and
+        // every listed model by its row: the field shows exactly what its row shows.
         let selected = view
             .models
             .iter()
             .find(|m| m.id == current)
             .map(row_for)
             .or_else(|| labels.iter().find(|l| *l == &current).cloned())
+            .or_else(|| saved.as_ref().map(|s| saved_model_label(s, view.model_window, view.fetched_for.is_some())))
             .unwrap_or_else(|| "choose…".to_string());
         egui::ComboBox::from_id_salt("settings-model")
             .selected_text(selected)
@@ -1047,11 +1078,45 @@ fn model_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
             })
             .response
             .on_hover_text(Texts::get(Key::TipModel));
-        // Only a listed id is stored; "choose…" and the "(not listed)" entry leave the choice untouched.
+        // Only a listed id is stored; "choose…" and the stored row leave the choice untouched.
         if chosen != current && view.models.iter().any(|m| m.id == chosen) {
             view.model = Some(chosen);
         }
     });
+}
+
+/// Het woord naast een **bewaarde** keuze: dat woord, niet een vertaalde naam of een raadsel, want
+/// het is precies wat het bestand draagt en wat de volgende beurt krijgt. Het venster dat deze
+/// endpoint voor dit model leerde (`Settings::learned_context_window`, dezelfde bron als het plafond
+/// van de beurt) gaat mee als het van deze combinatie is; `listed` zegt of de listing hierbij hoort.
+/// `window_label` is privé in `baudet-settings` en de structuur hier namaken is een tweede tabel van
+/// dezelfde maat — daarom deze twee regels, met dezelfde afronding naar de dichtstbijzijnde macht
+/// twee als daar.
+fn saved_model_label(saved: &str, window: Option<u32>, listed: bool) -> String {
+    let venster = match window {
+        Some(tokens) if tokens >= 1024 => {
+            let mut power: u64 = 1024;
+            while power < tokens as u64 {
+                power *= 2;
+            }
+            let lager = power / 2;
+            let dichtstbij =
+                if lager >= 1024 && (tokens as u64) - lager < power - (tokens as u64) { lager } else { power };
+            let kib = dichtstbij / 1024;
+            if kib >= 1024 && kib % 1024 == 0 {
+                format!("{}m", kib / 1024)
+            } else {
+                format!("{kib}k")
+            }
+        }
+        Some(tokens) => tokens.to_string(),
+        None => String::new(),
+    };
+    let bevestiging = if listed { "not listed" } else { "not fetched yet" };
+    if venster.is_empty() {
+        return format!("{saved}  ({bevestiging})");
+    }
+    format!("{saved} · {venster}  ({bevestiging})")
 }
 
 /// A picker row: the name the server prefers, and its window when the server said one.
@@ -1497,6 +1562,83 @@ mod tests {
     /// vloerwerk: een blanco budget is auto (0), blanco of 0 voor de teller is de vloer 1 (de
     /// origineler dwingt die in het panel af), en een ander woord voor het beleid is een item uit de
     /// kiezer en niet een woord uit het bestand.
+    /// De **hoofdklacht**: bewaar een model, sluit de app, herstart, open de settings — het woord
+    /// staat er, ook vóórdat er ooit een Fetch was. De oude kiezer bestond alleen boven een listing,
+    /// dus een herstart gaf "not fetched yet" boven een model dat het bestand wél draagt en dat de
+    /// volgende beurt ook krijgt.
+    #[test]
+    fn bewaard_model_staat_er_zonder_listing() {
+        use baudet_settings::Settings;
+        // Het bestandwoord uit de klacht, en een paneel zoals het na een herstart staat: niets
+        // gefetch, dus een lege listing.
+        let mut bestand = Settings::default();
+        bestand.base_url = "http://127.0.0.1:1234/v1".to_string();
+        bestand.model = Some("google/gemma-4-26b-a4b-qat".to_string());
+        let mut paneel = SettingsView::new();
+        paneel.adopt(&bestand);
+        assert!(paneel.models.is_empty(), "dit scenario is zónder listing");
+        assert_eq!(paneel.fetched_for, None, "er is nooit iets gevraagd");
+        assert_eq!(paneel.chosen_model(), Some("google/gemma-4-26b-a4b-qat"));
+
+        // En het woord overleeft het rondje terug naar het bestand. De opslag was nooit stuk,
+        // alleen de tekening; dat verschil blijft hier vastgelegd.
+        let drafted = paneel.draft().expect("een bewaard model mag niet geweigerd worden");
+        assert_eq!(drafted.model.as_deref(), Some("google/gemma-4-26b-a4b-qat"));
+        let mut terug = SettingsView::new();
+        terug.adopt(&drafted);
+        assert_eq!(terug.model.as_deref(), Some("google/gemma-4-26b-a4b-qat"));
+    }
+
+    /// Het woord dat die rij tekent: het bestandwoord, eventueel met het geleerde venster, en met
+    /// een note die zegt of de listing er bij hoort of niet.
+    #[test]
+    fn bewaard_model_woord_leeft_eerlijk() {
+        use super::saved_model_label;
+        // Nooit gefetch: er is niets om het woord tegen te houden.
+        assert_eq!(saved_model_label("gemma-4", None, false), "gemma-4  (not fetched yet)");
+        // Gefetch, maar dit model staat er niet in: de listing is er wél, dus dat is de melding.
+        assert_eq!(saved_model_label("gemma-4", None, true), "gemma-4  (not listed)");
+        // Het venster dat voor dit model werd geleerd, gaat mee.
+        assert_eq!(saved_model_label("gemma-4", Some(131072), false), "gemma-4 · 128k  (not fetched yet)");
+        assert_eq!(saved_model_label("gemma-4", Some(8194), true), "gemma-4 · 8k  (not listed)");
+        // Afronding als bij `Model::window_label`: macht twee, geen verzonnen tussenwaarden.
+        assert_eq!(saved_model_label("gemma-4", Some(1048576), false), "gemma-4 · 1m  (not fetched yet)");
+        // Een getal onder de kilobyte blijft een rauw getal, zoals daar.
+        assert_eq!(saved_model_label("gemma-4", Some(999), false), "gemma-4 · 999  (not fetched yet)");
+        // Een maatloos woord krijgt geen losse punt achter de naam.
+        assert!(!saved_model_label("gemma-4", None, false).contains("·"));
+    }
+
+    /// Het **geleerde** venster hoort bij één adres + model. Een venster dat voor een ander adres
+    /// werd geleerd, mag niet naast dit woord gezet worden.
+    #[test]
+    fn geleerd_venster_mag_alleen_bij_dezelfde_combinatie() {
+        use baudet_settings::Settings;
+
+        let mut settings = Settings::default();
+        settings.base_url = "http://127.0.0.1:1234/v1".to_string();
+        settings.model = Some("gemma-4".to_string());
+        settings.learned_context_window = 131072;
+        settings.learned_context_key = baudet_store::window_key(&settings.base_url, "gemma-4");
+        let mut eigen = SettingsView::new();
+        eigen.adopt(&settings);
+        assert_eq!(eigen.model_window, Some(131072), "het venster van deze combinatie blijft staan");
+
+        // Een key die van een ander adres komt: geen bewijs voor dit woord, dus niet tekenen.
+        let mut elders = settings.clone();
+        elders.learned_context_key = baudet_store::window_key("http://elders:8000/v1", "gemma-4");
+        let mut vreemd = SettingsView::new();
+        vreemd.adopt(&elders);
+        assert_eq!(vreemd.model_window, None, "een venster voor een ander adres is geen bewijs");
+
+        // Een bestand zonder geleerd venster tekent geen getal.
+        let mut kaal = Settings::default();
+        kaal.model = Some("gemma-4".to_string());
+        let mut blanco = SettingsView::new();
+        blanco.adopt(&kaal);
+        assert_eq!(blanco.model_window, None);
+    }
+
     #[test]
     fn contextbeleid_rondje_en_vloeren() {
         use baudet_settings::config::ContextStrategy;
