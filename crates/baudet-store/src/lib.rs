@@ -28,6 +28,7 @@
 //!  * [`window`] — how far back one request may reach, by strategy;
 //!  * [`data_dir`] — where any of it lives.
 
+pub mod budget;
 pub mod history;
 pub mod paging;
 pub mod records;
@@ -36,6 +37,11 @@ pub mod rollout;
 pub mod session;
 pub mod window;
 
+pub use budget::{
+    ContextLimits, ContextReading, CONTEXT_LOSS_NOTE, FOLD_WINDOW_PERCENT, INPUT_OVERHEAD_TOKENS,
+    MAX_OVERFLOW_RETRIES, MIN_CONTEXT_CEILING_TOKENS, OVERFLOW_SHRINK_STEP, ROLLING_WINDOW_PERCENT,
+    WINDOW_MARGIN_TOKENS, instructions, window_key,
+};
 pub use history::{clamp_chars, cost_chars, estimate_tokens, history_of};
 pub use paging::ItemWindow;
 pub use records::{Record, Session, SessionDetail, SessionMeta};

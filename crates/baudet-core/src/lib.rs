@@ -10,12 +10,14 @@
 //!  * [`usage`] -- token accounting, where a missing number stays missing (`Usage.kt`);
 //!  * [`error`] -- a backend complaint, and the one error a user can act on (`BackendException.kt`);
 //!  * [`context`] -- where a conversation happened, which a transcript needs to stay meaningful;
-//!  * [`msg`] -- a turn as the model is asked to remember it, the wire twin of [`item`].
+//!  * [`msg`] -- a turn as the model is asked to remember it, the wire twin of [`item`];
+//!  * [`model_windows`] -- the context window a model id is known to have.
 
 pub mod context;
 pub mod error;
 pub mod event;
 pub mod item;
+pub mod model_windows;
 pub mod msg;
 pub mod protocol;
 pub mod usage;
@@ -29,5 +31,6 @@ pub use item::{
     UserMessageItem,
 };
 pub use msg::Msg;
+pub use model_windows::known as known_context_window;
 pub use protocol::{FunctionCall, Turn};
 pub use usage::Usage;
