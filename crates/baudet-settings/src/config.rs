@@ -257,6 +257,40 @@ pub struct Settings {
     /// Poort van `AppConfig.kt:76` (`useServerSession`), default aan. Inert onder een knippende
     /// strategie: daar speelt [`ContextStrategy::supports_server_session`] de rol.
     pub use_server_session: bool,
+    /// Of de beurten over de Responses-dialect gaan (`/v1/responses`) of over
+    /// chat/completions.
+    ///
+    /// Poort van `AppConfig.kt:76` (`var useResponsesApi: Boolean = true`), default aan. Dit veld
+    /// is de **behoefte**; `protocol` hierboven is wat een scan van de server antwoordde. `store`
+    /// en `previous_response_id` (de twee vakjes hieronder) betekenen niets boven chat/completions,
+    /// dus die zijn alleen zinnig wanneer deze aan staat.
+    pub use_responses_api: bool,
+    /// Of de server zijnreactie mag bewaren (`store=true` op de Responses-dialect).
+    ///
+    /// Poort van `AppConfig.kt:77` (`var storeResponses: Boolean = true`), default aan. De tip van
+    /// de origineler koppelt hem aan `previous_response_id`: bewaren is nodig wieketting wil doorgeven.
+    pub store_responses: bool,
+    /// Of duidelijk veilige alleen-lezen commando's zonder goedkeuringskaart mogen draaien.
+    ///
+    /// Poort van `AppConfig.kt:111` (`var autoApproveSafeCommands: Boolean = true`), default aan.
+    /// Dit is de instelling die `baudet_tool::ToolContext::auto_approve_safe` voedt — de vlag die
+    /// `ExecuteTool` al uitleest — dus de knop die hieronder staat, bedient iets dat er al is.
+    pub auto_approve_safe_commands: bool,
+    /// Of de git-tool zijn schrijfverbs (add, commit, checkout, stash, push) mag hebben.
+    ///
+    /// Poort van `AppConfig.kt:137` (`var gitAllowWrites: Boolean = false`), default **uit**: schrijven
+    /// via git is opt-in. Dit voedt `baudet_tool::GitWrites` — `Enabled` bij aan, `Disabled` bij uit —
+    /// naast het Write-recht van het project en de goedkeuring op de kaart, zoals de tip zegt.
+    pub git_allow_writes: bool,
+    /// Of lange regels in het transcript worden afgebroken.
+    ///
+    /// Poort van `AppConfig.kt:31` (`var transcriptWrap: Boolean = true`), default aan. Puur een
+    /// weergavekeuze, maar bewaard omdat de persoon die één keer zet, hem terugwil.
+    pub transcript_wrap: bool,
+    /// Of de subtiele "lokaal model kan fout zijn"-regel onderaan getoond wordt.
+    ///
+    /// Poort van `AppConfig.kt:38` (`var honestyFooter: Boolean = true`), default aan.
+    pub honesty_footer: bool,
     /// Het contextvenster dat een weigering ons leerde, of 0 wanneer nooit geleerd.
     ///
     /// Dit is géén instelling: de persoon typt het nooit. Het bestaat omdat de app een beurt anders
@@ -352,6 +386,14 @@ impl Default for Settings {
             context_strategy: ContextStrategy::default(),
             context_keep_recent_messages: DEFAULT_KEEP_RECENT_MESSAGES,
             use_server_session: true,
+            // De waarheden van `AppConfig.kt:31-137`: responses aan, bewaren aan, veilige commando's
+            // automatisch door, git-schrijven uit (opt-in), wrappen en de honesty-notitie aan.
+            use_responses_api: true,
+            store_responses: true,
+            auto_approve_safe_commands: true,
+            git_allow_writes: false,
+            transcript_wrap: true,
+            honesty_footer: true,
             learned_context_window: 0,
             learned_context_key: String::new(),
             // Drie nullen, geen maten: "er is nog nooit een venster gesloten". De maten zelf leven
@@ -706,6 +748,35 @@ mod tests {
         assert_eq!(read.temperature, DEFAULT_TEMPERATURE);
         assert_eq!(read.top_p, None);
         assert_eq!(read.max_parallel_turns, DEFAULT_MAX_PARALLEL_TURNS);
+    }
+
+    #[test]
+    fn de_zeven_vinkjes_zijn_de_default_van_de_origineler_en_overleven_het_bestand() {
+        // De defaults komen één-voor-één uit `AppConfig.kt` en vormen samen het veiligheids- en
+        // weergavebeleid. Wat telt, is niet dat een constructor ze typt, maar dat `git_allow_writes`
+        // uit blijft (git-schrijven is opt-in) en dat een omgezet setje het bestand doorreist.
+        let settings = Settings::default();
+        assert!(settings.use_responses_api, "de origineler spreekt Responses");
+        assert!(settings.store_responses);
+        assert!(settings.auto_approve_safe_commands, "veilige alleen-lezen commando's gaan er automatisch door");
+        assert!(!settings.git_allow_writes, "git mag níét schrijven tot de persoon het aanzet");
+        assert!(settings.transcript_wrap);
+        assert!(settings.honesty_footer);
+        assert!(settings.use_server_session);
+
+        let flipped = Settings {
+            use_responses_api: false,
+            store_responses: false,
+            auto_approve_safe_commands: false,
+            git_allow_writes: true,
+            transcript_wrap: false,
+            honesty_footer: false,
+            use_server_session: false,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&flipped).unwrap();
+        assert!(json.contains("\"git_allow_writes\":true"), "het bestand noemt de git-vlag: {json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), flipped);
     }
 
     #[test]

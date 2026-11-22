@@ -130,6 +130,16 @@ pub struct SettingsView {
     top_p: String,
     /// Het aantal tegelijk gedraaide beurten als tekst, met dezelfde text-vs-getal-reden als hierboven.
     max_parallel_turns: String,
+    /// De zeven vinkjes van `SettingsPanel.kt:41-49,31,38`. Booleans hebben geen blanco-toestand,
+    /// dus ze leven hier als `bool` en niet als tekst: een vinkje is aan of uit, er is geen derde
+    /// toestand die een `String` zou moeten verstoppen.
+    use_responses_api: bool,
+    store_responses: bool,
+    use_server_session: bool,
+    auto_approve_safe_commands: bool,
+    git_allow_writes: bool,
+    transcript_wrap: bool,
+    honesty_footer: bool,
     /// The credential as typed. A separate field from the password widget's buffer is not needed:
     /// this is that buffer, and empty means "not typed" (so the environment still answers).
     api_key: String,
@@ -281,6 +291,16 @@ impl SettingsView {
         self.temperature = settings.temperature.to_string();
         self.top_p = settings.top_p.map(|p| p.to_string()).unwrap_or_default();
         self.max_parallel_turns = settings.max_parallel_turns.to_string();
+        // De vinkjes zijn booleans en reizen als booleans. Let op `use_server_session`: dat veld
+        // had al een widget-loos leven in `stored_context`; nu de checkbox bestaat, is deze kopie de
+        // dragende — `draft` leest hem hier en niet uit de voorraad.
+        self.use_responses_api = settings.use_responses_api;
+        self.store_responses = settings.store_responses;
+        self.use_server_session = settings.use_server_session;
+        self.auto_approve_safe_commands = settings.auto_approve_safe_commands;
+        self.git_allow_writes = settings.git_allow_writes;
+        self.transcript_wrap = settings.transcript_wrap;
+        self.honesty_footer = settings.honesty_footer;
         self.stored_context.use_server_session = settings.use_server_session;
         self.stored_context.learned_context_window = settings.learned_context_window;
         self.stored_context.learned_context_key = settings.learned_context_key.clone();
@@ -342,7 +362,13 @@ impl SettingsView {
             temperature: parse_temperature(&self.temperature)?,
             top_p: parse_top_p(&self.top_p)?,
             max_parallel_turns: parse_parallel_turns(&self.max_parallel_turns)?,
-            use_server_session: self.stored_context.use_server_session,
+            use_responses_api: self.use_responses_api,
+            store_responses: self.store_responses,
+            use_server_session: self.use_server_session,
+            auto_approve_safe_commands: self.auto_approve_safe_commands,
+            git_allow_writes: self.git_allow_writes,
+            transcript_wrap: self.transcript_wrap,
+            honesty_footer: self.honesty_footer,
             learned_context_window: self.stored_context.learned_context_window,
             learned_context_key: self.stored_context.learned_context_key.clone(),
             left_divider: self.stored_context.left_divider,
@@ -724,6 +750,10 @@ pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<S
     iterations_row(ui, view);
     parallel_row(ui, view);
     ui.separator();
+    // De zeven vinkjes, als eigen groep direct na de parallelstand — dezelfde plek als in de
+    // volgorde van `SettingsPanel.kt:121-128`.
+    toggle_rows(ui, view);
+    ui.separator();
     context_rows(ui, view);
     ui.separator();
     key_row(ui, view, 0.0);
@@ -938,6 +968,52 @@ fn reasoning_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
         reasoning.on_hover_text(Texts::get(Key::TipReasoning));
         view.reasoning = current;
     });
+}
+
+/// De band met de zeven vinkjes van `SettingsPanel.kt:133-139`, in die volgorde.
+///
+/// De origineler zet ze als losse `JCheckBox`-rijen met een ledig etiket ("\" to useResponses");
+/// een vinkje draagt zijn eigen tekst, dus hier geen `form_row` met eenetiket-kolom maar een
+/// `checkbox` met het label-woord van de taaltabel. De eerste hangt aan de scheiding erboven en
+/// krijgt geen lucht, de rest de normale rijlucht.
+fn toggle_rows(ui: &mut Ui, view: &mut SettingsView) {
+    let toggles: [(bool, Key); 7] = [
+        (view.use_responses_api, Key::UseResponsesApi),
+        (view.store_responses, Key::StoreResponses),
+        (view.use_server_session, Key::SendPreviousResponseId),
+        (view.auto_approve_safe_commands, Key::AutoApproveSafe),
+        (view.git_allow_writes, Key::GitAllowWrites),
+        (view.transcript_wrap, Key::TranscriptWrap),
+        (view.honesty_footer, Key::HonestyFooter),
+    ];
+    // Eerst de maten lezen, dan schrijven: de indeks van het tuple wijst naar welk veld de klik
+    // mag zetten, zodat de sluiting niet op elke tak een losse `view.<veld> = checkbox` hoeft te
+    // herhalen (zeven keer hetzelfde patroon is precies hoe zo'n lijst uit synchronie raakt).
+    for (index, (current, key)) in toggles.into_iter().enumerate() {
+        if index > 0 {
+            ui.add_space(ROW_GAP);
+        }
+        let mut value = current;
+        let response = ui.checkbox(&mut value, Texts::get(key));
+        let tip = match key {
+            Key::StoreResponses => Key::TipStoreResponses,
+            Key::AutoApproveSafe => Key::TipAutoApproveSafe,
+            Key::GitAllowWrites => Key::TipGitAllowWrites,
+            Key::TranscriptWrap => Key::TipTranscriptWrap,
+            Key::HonestyFooter => Key::TipHonestyFooter,
+            _ => key,
+        };
+        response.on_hover_text(Texts::get(tip));
+        match index {
+            0 => view.use_responses_api = value,
+            1 => view.store_responses = value,
+            2 => view.use_server_session = value,
+            3 => view.auto_approve_safe_commands = value,
+            4 => view.git_allow_writes = value,
+            5 => view.transcript_wrap = value,
+            _ => view.honesty_footer = value,
+        }
+    }
 }
 
 /// De drie sampling-rijen: temperatuur en `top_p`, in de volgorde van `SettingsPanel.kt:117-118`
@@ -1260,6 +1336,26 @@ mod tests {
         assert!(view.draft().is_err(), "nul beurten tegelijk is geen 'serieel' maar 'niets'");
     }
 
+    /// De zeven vinkjes reizen door `draft` als booleans, elk naar zijn eigen veld. De dragende
+    /// eigenschap is dat `use_server_session` — dat eerder widget-loos in `stored_context` leefde —
+    /// nu door de checkbox wordt gezet en niet meer vanuit de voorraad.
+    #[test]
+    fn de_zeven_vinkjes_reizen_naar_hun_eigen_veld() {
+        let mut view = view();
+        // Zet er drie aan/uit die de default tegengaan, laat de rest zoals hij is.
+        view.use_responses_api = false;
+        view.git_allow_writes = true;
+        view.use_server_session = false;
+        let drafted = view.draft().expect("vinkjes veranderen mogen `draft` niet breken");
+        assert!(!drafted.use_responses_api);
+        assert!(drafted.git_allow_writes, "git-schrijven aan komt als aan terug");
+        assert!(!drafted.use_server_session, "de checkbox wint van de oude voorraad");
+        // De defaults die hier niet zijn aangeraakt, blijven hun default.
+        assert!(drafted.auto_approve_safe_commands);
+        assert!(drafted.transcript_wrap);
+        assert!(drafted.honesty_footer);
+    }
+
     /// A view-model holding a whole endpoint, so a test starts from something a person could have
     /// typed rather than from a `Default` that no panel ever shows.
     fn view() -> SettingsView {
@@ -1277,6 +1373,20 @@ mod tests {
             // daar is blanco de betekenis "stuur hem niet".
             temperature: baudet_settings::config::DEFAULT_TEMPERATURE.to_string(),
             max_parallel_turns: baudet_settings::DEFAULT_MAX_PARALLEL_TURNS.to_string(),
+            // De afgeleide `Default` van de view zou de vinkjes op `false` zetten, maar een paneel
+            // uit `load` krijgt ze uit het bestand of uit de domein-default — en die zijn niet
+            // allemaal `false` (auto-approve, wrappen en honesty staan aan; git-schrijven uit). Deze
+            // fixture boots het bestand na, dus ze spiegelen de domein-defaults, net zoals
+            // `max_tool_iterations` hierboven dat doet. `git_allow_writes` en `use_responses_api`
+            // hoeven niet: hun default is al `false`/`true` zoals de domein ze wil, en de fixture
+            // test de overdracht, niet de default.
+            use_responses_api: true,
+            store_responses: true,
+            use_server_session: true,
+            auto_approve_safe_commands: true,
+            git_allow_writes: false,
+            transcript_wrap: true,
+            honesty_footer: true,
             ..SettingsView::default()
         }
     }

@@ -234,6 +234,14 @@ mod tests {
             context_strategy: crate::config::ContextStrategy::RollingWindow,
             context_keep_recent_messages: 4,
             use_server_session: false,
+            // De zeven vinkjes reizen door hetzelfde bestand; allemaal níét op de default, zodat dit
+            // rondreisje bewijst dat ze worden weggeschreven en niet terugvallen.
+            use_responses_api: false,
+            store_responses: false,
+            auto_approve_safe_commands: false,
+            git_allow_writes: true,
+            transcript_wrap: false,
+            honesty_footer: false,
             learned_context_window: 32_768,
             learned_context_key: "http://studio:8000/v1|Qwen3.8-Flash".into(),
             // De verdeelstanden reizen mee door hetzelfde bestand (`AppConfig.kt:152-158`) en hun
