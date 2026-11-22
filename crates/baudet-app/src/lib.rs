@@ -10,5 +10,7 @@
 pub mod reducer;
 pub mod session;
 
-pub use reducer::{reduce, Rows};
+// `Emitter` meegenomen: de id-teler en de open-/observatie-helpers van een beurt zijn publiek
+// gedrag van deze crate, en de tool-lus plus tests spreken ze rechtstreeks aan.
+pub use reducer::{reduce, Emitter, Rows};
 pub use session::{AppState, Sent};

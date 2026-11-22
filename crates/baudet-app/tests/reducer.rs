@@ -1,8 +1,160 @@
 //! Folding a stream into rows. Translated from the `TranscriptRowsSpec` and
 //! `AppStateItemSpec` intents: a transcript is rebuilt from events, never from a cached string.
 
-use baudet_app::{reduce, Rows};
+use baudet_app::{reduce, Emitter, Rows};
 use baudet_core::*;
+
+
+/// Een kaart in de vorm die `Emitter::open` voortbrengt: getekend vóór de run, nog open, nog geen
+/// beslissing. De vraag van een tool moet op díe kaart landen.
+fn command_card(item_id: &str) -> Item {
+    Item::CommandExecution(CommandExecutionItem {
+        item_id: item_id.to_string(),
+        command: "cargo test".to_string(),
+        cwd: None,
+        timeout_seconds: None,
+        status: ItemStatus::InProgress,
+        exit_code: None,
+        timed_out: false,
+        duration_ms: 0,
+        output: String::new(),
+        approval: None,
+    })
+}
+
+fn patch_card(item_id: &str) -> Item {
+    Item::FileChange(FileChangeItem {
+        item_id: item_id.to_string(),
+        path: "src/main.rs".to_string(),
+        change: FileChangeKind::Update,
+        status: ItemStatus::InProgress,
+        diff: None,
+        additions: 0,
+        deletions: 0,
+    })
+}
+
+fn opened(item: Item) -> ThreadEvent {
+    ThreadEvent::ItemStarted { thread_id: "th".to_string(), turn_id: "tu".to_string(), item }
+}
+
+fn asked(item_id: &str) -> ThreadEvent {
+    ThreadEvent::ApprovalRequested {
+        thread_id: "th".to_string(),
+        turn_id: "tu".to_string(),
+        item_id: item_id.to_string(),
+        request: ApprovalRequest::RunCommand {
+            command: "cargo test".to_string(),
+            cwd: None,
+            timeout_seconds: None,
+        },
+    }
+}
+
+fn answered(item_id: &str, decision: ApprovalDecision) -> ThreadEvent {
+    ThreadEvent::ApprovalResolved {
+        thread_id: "th".to_string(),
+        turn_id: "tu".to_string(),
+        item_id: item_id.to_string(),
+        decision,
+    }
+}
+
+#[test]
+fn a_question_lands_on_the_card_it_is_holding() {
+    // De vraag mag geen tweede regel worden: dezelfde kaart, en die blijft open — een vraag is nog
+    // geen feit. Dit is waarom de loop de kaart vóór de run tekende: een kaart die pas ná de run
+    // ontstaat, kan de vraag niet dragen.
+    let mut rows = Rows::new();
+    reduce(&mut rows, &opened(command_card("th/tu/i1")));
+    assert!(reduce(&mut rows, &asked("th/tu/i1")), "de vraag raakte de kaart niet");
+    assert_eq!(rows.len(), 1, "de vraag maakte een tweede regel");
+    match rows.get("th/tu/i1") {
+        Some(Item::CommandExecution(card)) => {
+            assert_eq!(card.status, ItemStatus::InProgress, "een vraag deed alsof de beurt klaar was");
+            assert!(card.approval.is_none(), "er is nog niets beslist");
+        }
+        other => panic!("verwacht de geopende kaart, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_question_on_a_row_that_never_was_gets_a_card_of_its_own() {
+    // Wie gevraagd wil worden, mag niet genegeerd worden: een vraag die op geen enkele bestaande regel
+    // past, krijgt een eigen kaart in plaats van spoorloos te verdwijnen.
+    let mut rows = Rows::new();
+    assert!(reduce(&mut rows, &asked("th/tu/i7")));
+    assert_eq!(rows.len(), 1);
+    assert!(rows.get("th/tu/i7").is_some(), "de vraag verdween spoorloos");
+}
+
+#[test]
+fn an_answer_settles_the_card_and_says_which_way() {
+    let mut rows = Rows::new();
+    reduce(&mut rows, &opened(command_card("th/tu/i1")));
+    reduce(&mut rows, &asked("th/tu/i1"));
+    assert!(reduce(&mut rows, &answered("th/tu/i1", ApprovalDecision::Accept)));
+    match rows.get("th/tu/i1") {
+        Some(Item::CommandExecution(card)) => {
+            assert_eq!(card.approval, Some(ApprovalDecision::Accept), "de beslissing verdween")
+        }
+        other => panic!("verwacht de kaart, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_declined_patch_shows_that_it_was_declined() {
+    // Een patch-kaart heeft geen uitvoer waarin een beslissing past. Verbergen is oneerlijker dan
+    // nergens zetten: de kijker mag zien waarom het bestand bleef zoals het was.
+    let mut rows = Rows::new();
+    reduce(&mut rows, &opened(patch_card("th/tu/i2")));
+    assert!(reduce(&mut rows, &answered("th/tu/i2", ApprovalDecision::Decline)));
+    match rows.get("th/tu/i2") {
+        Some(Item::FileChange(change)) => {
+            assert_eq!(change.status, ItemStatus::Failed, "een weigering deed alsof het lukte")
+        }
+        other => panic!("verwacht de patch-kaart, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_answer_for_a_row_that_never_was_is_reported_not_fabricated() {
+    // Een klik op een kaart van een beurt die al stopte: er is niets te sluiten, en een regel erbij
+    // verzinnen zou het audit-spoor vullen met een feit dat niemand ooit zag.
+    let mut rows = Rows::new();
+    assert!(!reduce(&mut rows, &answered("th/tu/i9", ApprovalDecision::Accept)));
+    assert!(rows.is_empty(), "er verscheen een regel uit het niets");
+}
+
+#[test]
+fn a_turn_divides_ids_that_do_not_collide() {
+    // De teler bestaat omdat één beurt een kaart op hetzelfde id moet kunnen openen en sluiten.
+    // `Rows` verdraagt geen dubbele naam: de tweede tekening overschrijft de eerste.
+    let mut rows = Rows::new();
+    let mut emitter = Emitter::display(&mut rows, "th_1", "tu_1");
+    let first = emitter.next_item_id();
+    let second = emitter.next_item_id();
+    assert_eq!(first, "th_1/tu_1/i1");
+    assert_ne!(first, second, "twee regels van één beurt heetten hetzelfde");
+    reduce(&mut rows, &opened(command_card(&first)));
+    reduce(&mut rows, &opened(command_card(&second)));
+    assert_eq!(rows.len(), 2, "de beurt verdeelde dubbele id's");
+}
+
+#[test]
+fn an_observation_reaches_the_model_without_becoming_a_row() {
+    // Gereedschapsuitvoer is werk, geen prosa: de observatie mag geen rij worden, maar moet wél mee
+    // naar de volgende vraag, anders vergeet het model wat hij zojuist las.
+    let mut rows = Rows::new();
+    let mut emitter = Emitter::display(&mut rows, "th_1", "tu_1");
+    emitter.store_message(&Msg::user("the file holds 12 lines"));
+    let observed = emitter.taken_messages().len();
+    // De emitter laat de rijen pas los als hij hier wegvalt, dus de teller is afgenomen vóór deze
+    // twee vragen — dezelfde volgorde die de tool-lus hanteert: eerst de observaties overnemen, dan
+    // het scherm beoordelen.
+    assert_eq!(observed, 1, "de observatie haalde het model niet");
+    assert!(rows.is_empty(), "een observatie tekende een rij");
+}
 
 fn msg(id: &str, text: &str, status: ItemStatus) -> Item {
     Item::AgentMessage(AgentMessageItem { item_id: id.into(), text: text.into(), status })

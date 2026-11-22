@@ -3,7 +3,7 @@
 //! Pure on purpose: no backend, no clock, no widget. Given the same events, the same rows come
 //! out, which is what lets a UI be verified against a script instead of against a GPU.
 
-use baudet_core::{Item, ItemKind, ItemStatus, ThreadEvent};
+use baudet_core::{ApprovalDecision, CommandExecutionItem, Item, ItemKind, ItemStatus, ThreadEvent};
 use std::collections::HashMap;
 
 /// The rows of one conversation, in the order they appeared, plus the live index by id.
@@ -111,6 +111,19 @@ impl Rows {
 pub struct Emitter<'a> {
     rows: &'a mut Rows,
     items: Option<&'a mut Vec<Item>>,
+    /// De boodschappen die deze beurt aan het model-verleden toevoegde. De aanroeper neemt ze over
+    /// met [`Emitter::taken_messages`], of laat ze ledig als hij het gesprek niet zelf bijhoudt. De
+    /// tool-lus brengt twee soorten voort: een kaart die een lezer leest, en een
+    /// observatie die alleen het model nog ziet. Die tweede mag geen rij worden — gereedschaps-
+    /// uitvoer is werk, geen prosa — maar moet wél mee naar de volgende vraag, anders vergeet het
+    /// model wat hij zojuist las.
+    messages: Vec<baudet_core::Msg>,
+    /// De id's die deze beurt verdeelde. Eén beurt gebruikt op één draad hooguit enkele tientallen
+    /// regels, dus deze teller is per definitie klein; hij bestaat omdat een tool-lus één id nodig
+    /// heeft om een kaart te openen en later op datzelfde id te sluiten. `Rows` verdraagt geen
+    /// dubbele id: de tweede tekening overschrijft de eerste en het audit-spoor krijgt twee regels
+    /// met één naam.
+    seq: usize,
     thread_id: String,
     turn_id: String,
 }
@@ -119,7 +132,14 @@ impl<'a> Emitter<'a> {
     /// Emitter op de rijen van een beurt, zonder opslagdoel: voor een gesprek dat (nog) niet
     /// op disk hoeft — de scripted demo en elke test die alleen het scherm meet.
     pub fn display(rows: &'a mut Rows, thread_id: impl Into<String>, turn_id: impl Into<String>) -> Emitter<'a> {
-        Emitter { rows, items: None, thread_id: thread_id.into(), turn_id: turn_id.into() }
+        Emitter {
+            rows,
+            items: None,
+            messages: Vec::new(),
+            seq: 0,
+            thread_id: thread_id.into(),
+            turn_id: turn_id.into(),
+        }
     }
 
     /// Emitter die vóór alles een opslagdoel krijgt: dezelfde regels gaan naar het scherm én
@@ -130,7 +150,14 @@ impl<'a> Emitter<'a> {
         thread_id: impl Into<String>,
         turn_id: impl Into<String>,
     ) -> Emitter<'a> {
-        Emitter { rows, items: Some(items), thread_id: thread_id.into(), turn_id: turn_id.into() }
+        Emitter {
+            rows,
+            items: Some(items),
+            messages: Vec::new(),
+            seq: 0,
+            thread_id: thread_id.into(),
+            turn_id: turn_id.into(),
+        }
     }
 
     /// De id waaronder deze beurt zijn regels uitzendt. De transport- en tests kant heeft hem
@@ -149,6 +176,40 @@ impl<'a> Emitter<'a> {
     /// [`reduce`], zodat een ontvanger kan tellen of de gebeurtenis iets heeft geraakt - dezelfde
     /// informantie die `apply` doorgeeft en die een drainer nodig heeft om een stream te kunnen
     /// beoordelen zonder de rijen zelf te lezen.
+    /// Het id van de volgende regel van deze beurt.
+    ///
+    /// Emitter-vorm en niet `Rows`-vorm: de beurt is wat de id's groepeert (`th_1/tu_1/i1`). De
+    /// andere verdeler van id's in deze tree is `Session::next_item_seq`, die na een herstart
+    /// `th_1/i1` oplevert; de twee kunnen niet botsen omdat ze verschillend heten en binnen één
+    /// bron monotoon lopen.
+    pub fn next_item_id(&mut self) -> String {
+        self.seq += 1;
+        format!("{}/{}/i{}", self.thread_id, self.turn_id, self.seq)
+    }
+
+    /// Teken een regel die nog loopt, en schuif haar niet in het audit-spoor.
+    ///
+    /// Een geopende regel is een belofte en geen feit: `items` is wat de persoon echt zag en
+    /// afgerekend werd, dus een open rij daarin zou een herstart een half antwoord laten tonen alsof
+    /// het klaar was — precies wat [`Emitter::completed`] verhindert. Wat wél meetekent, is de rij
+    /// zelf: de goedkeuringsvraag die een tool halverwege `execute` stelt, moet op de kaart landen
+    /// die de lezer dan al ziet, want een kaart die pas ná de run ontstaat, kan die vraag niet
+    /// dragen.
+    pub fn open(&mut self, item: Item) {
+        self.started(item);
+    }
+
+    /// Draag een boodschap over aan het model-verleden zonder haar te tekenen.
+    pub fn store_message(&mut self, msg: &baudet_core::Msg) {
+        self.messages.push(msg.clone());
+    }
+
+    /// De boodschappen die deze beurt aan het model-verleden toevoegde, voor de aanroeper die ze
+    /// overneemt wanneer hij het gesprek zelf bijhoudt.
+    pub fn taken_messages(&mut self) -> Vec<baudet_core::Msg> {
+        std::mem::take(&mut self.messages)
+    }
+
     pub fn started(&mut self, item: Item) -> bool {
         reduce(
             self.rows,
@@ -246,8 +307,63 @@ pub fn reduce(rows: &mut Rows, event: &ThreadEvent) -> bool {
             }
             true
         }
+        // De vraag van een tool hoort op de kaart van de stap die hij tegenhoudt. De loop tekende
+        // die kaart al vóór de run (zie [`Emitter::open`]); dit is wat hem in Ask-mode zichtbaar
+        // maakt, want een regel met alleen een commando en een spin laat een lezer niet weten wat er
+        // gevraagd werd. De vraag zelf blijft in de gebeurtenis wonen: de kaart heeft er geen veld
+        // voor en krijgt er hier ook geen, want wat de UI moet tonen, staat al in het event dat haar
+        // voorschotelt. Een vraag op een onbekende id krijgt wél een eigen kaart — wie gevraagd wil
+        // worden, mag niet genegeerd worden.
+        ThreadEvent::ApprovalRequested { item_id, .. } => {
+            if rows.get(item_id).is_some() {
+                true
+            } else {
+                rows.open(pending_card(item_id));
+                true
+            }
+        }
+        // Een beantwoorde vraag sluit de kaart: de knoppen verdwijnen omdat er een feit van is, en
+        // dat feit (`approval`) staat al op de kaart zelf. Op een kaart die er nooit was is niets te
+        // sluiten, en dat is geen fout maar een klik op een kaart van een beurt die al stopte.
+        ThreadEvent::ApprovalResolved { item_id, decision, .. } => {
+            match rows.items.get_mut(item_id) {
+                Some(Item::CommandExecution(card)) => {
+                    card.approval = Some(*decision);
+                    true
+                }
+                Some(Item::FileChange(change)) => {
+                    // Een patch-kaart heeft geen uitvoer waarin een beslissing past, en de beslissing
+                    // verbergen is oneerlijker dan haar nergens zetten: de kijker mag zien dat hij
+                    // weigerde, want dat verklaart waarom het bestand bleef zoals het was.
+                    change.status = match decision {
+                        ApprovalDecision::Accept | ApprovalDecision::AcceptForSession => ItemStatus::Completed,
+                        ApprovalDecision::Decline | ApprovalDecision::Cancel => ItemStatus::Failed,
+                    };
+                    true
+                }
+                Some(_) => true,
+                None => false,
+            }
+        }
         _ => true,
     }
+}
+
+/// De kaart voor een vraag die op geen enkele bestaande regel past: dan is de vraag zelf het enige
+/// feit, en is een lege regel eerlijker dan een kaart die een uitkomst verzint.
+fn pending_card(item_id: &str) -> Item {
+    Item::CommandExecution(CommandExecutionItem {
+        item_id: item_id.to_string(),
+        command: String::new(),
+        cwd: None,
+        timeout_seconds: None,
+        status: ItemStatus::InProgress,
+        exit_code: None,
+        timed_out: false,
+        duration_ms: 0,
+        output: String::new(),
+        approval: None,
+    })
 }
 
 /// De tekst van een regel, ongeacht welk soort het is.
