@@ -235,6 +235,23 @@ pub struct Settings {
     /// De `base_url|model` waaronder het getal hierboven werd geleerd, zodat een model- of
     /// serverwissel geen stale getal achterlaat.
     pub learned_context_key: String,
+    /// De breedte van de linkerbalk, zoals het venster hem bij het sluiten mat.
+    ///
+    /// Poort van `AppConfig.kt:152` (`var leftDivider: Int = 0`), en die 0 is de helft van de
+    /// betekenis: hij zegt "nooit gemeten", niet "breedte nul". `layout::resolve_divider` laat een
+    /// null dan op de fabrieksmaat van `Main.kt:164` vallen, en `worth_remembering` laat een
+    /// ingeklapte balk het onthield heel laten — een inklapping mag nooit de heropende standaard
+    /// worden.
+    pub left_divider: i32,
+    /// De breedte van het middenvlak plus de linkerbalk samen, dus de plek waar de bestandsboom
+    /// begint (`AppConfig.kt:153`, `Main.kt:171`).
+    pub right_divider: i32,
+    /// De hoogte die de changes-lijst onder de bestandsboom krijgt (`AppConfig.kt:158`).
+    ///
+    /// De derde verdeelstand en dezelfde regel, met één verschil: hij loopt verticaal, dus zijn
+    /// "voorbij de rand" wordt tegen de hoogte gemeten en niet tegen de breedte
+    /// (`Main.kt:236-241`: `orientation == VERTICAL_SPLIT → split.height`).
+    pub files_divider: i32,
 }
 
 impl Default for Settings {
@@ -266,6 +283,12 @@ impl Default for Settings {
             use_server_session: true,
             learned_context_window: 0,
             learned_context_key: String::new(),
+            // Drie nullen, geen maten: "er is nog nooit een venster gesloten". De maten zelf leven
+            // bij de panelen en bij `layout::resolve_divider`, want de origineler bewaart een
+            // verdeelstand en niet haar eigen fabriekswaarde (`AppConfig.kt:152-158`).
+            left_divider: 0,
+            right_divider: 0,
+            files_divider: 0,
         }
     }
 }
@@ -513,6 +536,43 @@ mod tests {
     }
 
     #[test]
+    fn de_verdeelstanden_zijn_eerst_niets_en_daarna_hun_getal() {
+        // De drie nullen van `AppConfig.kt:152-158` zijn een toestand en geen maat. Een test die
+        // alleen `Default::default()` naspeelt, bewijst dat een constructor nul typt; deze bewijst
+        // wat de app ermee doet: een vers bestand laat `resolve_divider` op de fabrieksmaat vallen,
+        // en een gemeten stand overleeft het bestand.
+        let fresh = Settings::default();
+        assert_eq!((fresh.left_divider, fresh.right_divider, fresh.files_divider), (0, 0, 0));
+        assert_eq!(
+            baudet_ui_divider_is_not_invented(fresh.left_divider, 280.0),
+            280.0,
+            "een null in het bestand is geen breedte"
+        );
+
+        let measured = Settings {
+            left_divider: 311,
+            right_divider: 940,
+            files_divider: 168,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&measured).unwrap();
+        assert!(json.contains("\"left_divider\":311"), "het bestand noemt de stands: {json}");
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, measured);
+    }
+
+    /// Het fragment van `WindowLayout.resolveDivider` dat hier thuishoort: zonder vorige waarneming
+    /// is een null "nooit gemeten". De hele functie staat in `baudet-ui::layout`; dit is de enige
+    /// regel die de opslag zelf aangaat, en daarom geen kopie van die module.
+    fn baudet_ui_divider_is_not_invented(persisted: i32, fallback: f32) -> f32 {
+        if persisted > 0 {
+            persisted as f32
+        } else {
+            fallback
+        }
+    }
+
+    #[test]
     fn an_older_file_without_the_context_fields_still_opens() {
         // Forward-compatibiliteit voor deze velden: een bestand van vóór het contextbeleid moet
         // openen met knippen als strategie en niet op `StopAtLimit` vallen — dat zou elk lang
@@ -522,6 +582,9 @@ mod tests {
         assert_eq!(read.context_strategy, ContextStrategy::RecentMessages);
         assert_eq!(read.context_keep_recent_messages, DEFAULT_KEEP_RECENT_MESSAGES);
         assert_eq!(read.learned_context_window, 0);
+        // De drie verdeelstanden kwamen later dan dit bestand en moeten afwezig kunnen zijn; een
+        // afwezig stand telt als "nooit gemeten", precies zoals een null in een vers bestand.
+        assert_eq!((read.left_divider, read.right_divider, read.files_divider), (0, 0, 0));
     }
 
     #[test]

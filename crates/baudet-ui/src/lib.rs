@@ -27,6 +27,7 @@ mod settings;
 // De linkersidebar: het domeinmodel erachter (sidebar.rs) en de riemen die het tekenen
 // (panels::project_sidebar). Het model is publiek voor tests: een test die de rechtenregels, de
 // cascade en de titelregels wil meten, doet dat op het model, niet door duizend pixels te klikken.
+pub mod layout;
 pub mod sidebar;
 
 pub use app::{run, run_from, Startup, TranscriptApp};
@@ -42,6 +43,7 @@ pub use panels::{FOLDER_OPEN, NO_FOLDER, NO_READ, TREE_REFRESH};
 // klikken op dat adres, dus het moet van buiten te noemen zijn, zoals `FOLDER_OPEN`.
 pub use palette::DiffLine;
 pub use panels::{SidebarIntent, PANEL_TOGGLES, SIDEBAR_ADD};
+pub use layout::{resolve_divider, worth_remembering, Dividers};
 pub use rows::Row;
 pub use sidebar::{Confirm, NameAsk, Selection, SidebarModel, SidebarOutcome};
 

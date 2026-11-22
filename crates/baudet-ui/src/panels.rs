@@ -16,6 +16,7 @@
 //! The consequence is stated rather than hidden: edit a file outside the app and the list stays as
 //! it was until the folder is chosen again.
 
+use crate::layout::{self};
 use crate::palette;
 use crate::sidebar::{Confirm, NameAsk, PermissionState, Selection, SidebarModel, UNASSIGNED};
 use baudet_core::{probe_changes, probe_git, ChangeKind, ChangedFile, GitMeta};
@@ -447,15 +448,19 @@ pub enum SidebarIntent {
 
 /// De linkersidebar. Geeft de intenties terug die deze pass heeft opgeleverd. De catalogus zelf is
 /// dan al bijgeschreven door `SidebarModel`, dus een intentie is nooit een verzoek om op te slaan.
-pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel) -> Vec<SidebarIntent> {
+pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec<SidebarIntent> {
     let mut intents = Vec::new();
     let frame = Panel::left("projects")
         .resizable(true)
-        .default_size(280.0)
-        // 190 pt, niet een rond getal: de vloer volgt de breedste riem van het paneel. Het
-        // rechtenvakje met zijn titel plus de drie woorden van de disk-rij — in dezelfde stijl
-        // getekend als hieronder — zijn samen ~165 pt, plus de margering van de `Frame`.
+        // De volgorde is geen smuk: egui klemt `outer_size_range.min` op de default
+        // (`panel.rs:396` `clamp_range`), dus een `default_size` onder de vloer zou die vloer
+        // stiljes halveren. Eerst de vloer, dan de maat.
         .min_size(190.0)
+        .default_size(width)
+        // 190 pt blijft de vloer, en de reden is dezelfde: de breedste riem van het paneel — het
+        // rechtenvakje met zijn titel plus de drie woorden van de disk-rij — is samen ~165 pt,
+        // plus de margering van de `Frame`. Een onthouden stand smaller dan dat bestaat niet, want
+        // `worth_remembering` laat een balk op de vloer als inklapping vallen.
         .frame(egui::Frame::side_top_panel(ui.style()));
     frame.show(ui, |ui| {
         // --- bovenrij: één knop, één handeling per klik. ---
@@ -908,6 +913,50 @@ fn file_row(ui: &mut Ui, path: &Path, change: Option<ChangeKind>) {
         .on_hover_text(path.display().to_string());
 }
 
+/// De strook die de changes-lijst onder de boom krijgt: de hoogte van de greep erboven plus de
+/// lijst, met de greep op de rand van de twee.
+///
+/// Bestaat, omdat de origineler hier een `JSplitPane` neerzet en deze flank tot nu toe alles in
+/// één kolom duwde: de band had toen een hoogte die niemand kon veranderen. De maten zijn niet
+/// eigen — `CHANGES_HEIGHT` en `CHANGES_MIN` komen uit `FileTreePanel.kt:629`, en wat hier staat
+/// is only the strip's own reach, die de bron niet laat zien omdat een screenshot geen greep is.
+fn changes_band(ui: &mut Ui, changes: &Changes, chosen: Option<&str>, dividers: &mut layout::Dividers) {
+    let column = ui.available_height();
+    let stored = if dividers.files > 0 { dividers.files as f32 } else { layout::CHANGES_HEIGHT };
+    // De vloer van de origineler, met de kop van de lijst erbij: `MIN_FILES_VISIBLE` is wat er van
+    // de band zichtbaar moet blijven, en de kop is geen deel van die rijen.
+    let header = ui.text_style_height(&egui::TextStyle::Heading) + ui.spacing().item_spacing.y;
+    let floor = layout::CHANGES_MIN + header;
+    let mut band = stored.clamp(floor, column.max(floor));
+    let handle = ui.available_rect_before_wrap();
+    let strip = egui::Rect::from_min_size(handle.min, egui::vec2(handle.width(), 6.0));
+    let grip = ui.interact(strip, egui::Id::new("files-split-handle"), egui::Sense::drag());
+    if grip.dragged() {
+        // Omlaag slepen maakt de band lager: de band is wat ónder de greep ligt.
+        band = (band - grip.drag_delta().y).clamp(floor, column.max(floor));
+        dividers.files = band as i32;
+        ui.ctx().request_repaint();
+    }
+    let hot = grip.hovered() || grip.dragged();
+    ui.painter().hline(
+        strip.x_range(),
+        strip.center().y,
+        egui::Stroke::new(if hot { 2.0 } else { 1.0 }, palette::BORDER),
+    );
+    // De band is wat er onder de greep overblijft. `allocate_ui_with_layout` geeft die strook een
+    // eigen vierkant binnen dezelfde flank, zodat de kolom één paneel blijft — de bron heeft ook
+    // één `SplitPane` in de rechterhelft en geen derde paneel naast de boom.
+    let height = layout::band_height(column, band);
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), height),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_max_height(height);
+            changes_body(ui, changes, chosen);
+        },
+    );
+}
+
 /// Het achterantwoord van de rechterfiletree: git-wijzigingen onder de mappenboom.
 fn changes_body(ui: &mut Ui, changes: &Changes, chosen: Option<&str>) {
     ui.separator();
@@ -944,20 +993,27 @@ pub fn file_tree(
     workspace: &mut Workspace,
     draft: &mut String,
     changes: &Changes,
+    dividers: &mut layout::Dividers,
+    width: f32,
 ) -> bool {
     let frame = Panel::right("filetree")
         .resizable(true)
-        .default_size(280.0)
-        // De rij met Browse/Open en het veld moet ook in de smaller wordende rechterstrook sluiten.
-        // 220 pt is de brede default uit de oude workspacestrook plus de nodige marge voor de
-        // Changes-rijen; 180 pt is de ondergrens die de gemeten folderrij per constructie aankan.
+        // Zelfde regel als links: vloer eerst, want `default_size` klemt hem.
+        // 180 pt is de ondergrens die de gemeten folderrij per constructie aankan
+        // (tests/folder_row.rs).
         .min_size(180.0)
+        // De strook was 280 pt, uit mijn hoofd. De origineler meet de bestandsboom op het
+        // verschil tussen het venster en `rightDivider` (`Main.kt:171`, val 720), en in een venster
+        // van 1040 pt is dat verschil 320 pt — dus dat is de fabrieksbreedte hier.
+        .default_size(width)
         .frame(egui::Frame::side_top_panel(ui.style()));
     let chosen = workspace.cwd().map(|s| s.to_string());
     let mut refresh: Option<bool> = None;
     frame.show(ui, |ui| {
         refresh = Some(file_tree_controls(ui, workspace, draft, changes.meta(), changes.paths()));
-        changes_body(ui, changes, chosen.as_deref());
+        // De verdeeling die de origineler met een `JSplitPane` tekent: boom boven, changes eronder,
+        // en tussen die twee een greep die iemand kan pakken (`FileTreePanel.kt:103-113`).
+        changes_band(ui, changes, chosen.as_deref(), dividers);
     });
     refresh.unwrap_or(false)
 }
@@ -1366,7 +1422,7 @@ mod tests {
     /// bouw-uitgang niet. Dat onderscheid is de hele inhoud van het item — `FileLister.kt:20
     /// negeert alleen het punt-deel`, en de `IGNORED_DIRS`-filter kent de origineler niet in
     /// die lijst maar in zijn eigen boom, waar hij ook met het vinkje aan blijft gelden.
-    #[test]
+
     /// De brief onder de boom is geen vrije tekst. Drie woorden staan vast in de bron en
     /// bestaan hier uit dezelfde constanten: `Folder permissions` (`Key.kt:321`), het
     /// `folder:`-label (`Key.kt:319`) en `no folder linked` (`Key.kt:320`). Een test die ze
@@ -1409,6 +1465,7 @@ mod tests {
         assert!(state.disk_capability.is_some(), "met een map hoort de schijf-regel er te staan");
     }
 
+    #[test]
     fn verborgen_stukken_mogen_mee_na_het_vinkje() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join(".github")).unwrap();

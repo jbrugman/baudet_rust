@@ -16,6 +16,7 @@
 //! already protect -- one reader, folded while draining, stops when the stream closes -- and a
 //! frame clock that stops draining would otherwise be a second, subtly different turn loop.
 
+use crate::layout::{self, resolve_divider, worth_remembering, Dividers};
 use crate::palette;
 use crate::panels::{self, Changes, SidebarIntent, Workspace, NO_FOLDER, NO_READ};
 use crate::rows::Row;
@@ -210,6 +211,18 @@ pub struct TranscriptApp {
     show_sidebar: bool,
     /// Of het rechtervenster (bestandboom/wijzigingen) staat getekend. Zelfde regel als hierboven.
     show_filetree: bool,
+    /// De drie verdeelstanden van het venster: linkerbalk, de rand waar de bestandsboom begint, en
+    /// de hoogte van de changes-band.
+    ///
+    /// Ze komen uit het instellingsbestand (`AppConfig.kt:152-158`) en gaan er bij het sliten terug
+    /// naartoe, via `worth_remembering` — dus een balk die iemand op 0 zette, wordt niet de
+    /// heropende standaard (`Main.kt:236-241`). Dit is de enige plaats die ze tekent én bewaart:
+    /// de panelen lezen hun breedte hier, schrijven er niets in.
+    dividers: Dividers,
+    /// Of de maten van dit venster al weggeschreven zijn. Een sluitactie kan twee passen zien —
+    /// de `close_requested`-pass en een latente — en een tweede opslag is hier geen idempotente
+    /// no-op: die schrijft het bestand nogmaals, met de maten van een venster dat er al niet meer is.
+    geometry_saved: bool,
 }
 
 impl TranscriptApp {
@@ -237,6 +250,9 @@ impl TranscriptApp {
         // a thread's — it happens here, at construction, exactly once.
         let mut settings = SettingsView::new();
         settings.load(&baudet_settings::SettingsFile::default_location());
+        // Opvragen vóór de initializer: `settings` verdwijnt daarin in het venster,
+        // en de drie maten moeten wél uit het gelezen bestand komen.
+        let dividers = settings.dividers();
         TranscriptApp {
             input: String::new(),
             rows: Vec::new(),
@@ -268,6 +284,8 @@ impl TranscriptApp {
             stick: true,
             show_sidebar: true,
             show_filetree: true,
+            dividers,
+            geometry_saved: false,
         }
     }
 
@@ -387,6 +405,48 @@ impl TranscriptApp {
         Arc::new(ScriptedBackend::new(vec![answer, echo]))
     }
 
+    /// De breedte die een zijkolom in de vorige pass werkelijk kreeg, of `None` als die er niet
+    /// stond.
+    ///
+    /// De origineler leest zijn verdeelstanden rechtstreeks uit de `JSplitPane` die nog op het
+    /// venster staat (`Main.kt:132-136`, `Main.kt:240`); `PanelState` is egui's equivalente van
+    /// die lezing. Hier staat de helper en niet in `layout.rs`, omdat dat bestand de domeinregels
+    /// van `WindowLayout` poort en dus vrij van een ui-laag moet blijven — precies zoals de bron
+    /// die regels in een object zonder Swing-import houdt (`WindowLayout.kt:1-5`).
+    fn live_width(&self, ctx: &egui::Context, panel: &str) -> Option<f32> {
+        egui::containers::PanelState::load(ctx, egui::Id::new(panel)).map(|state| state.size().x)
+    }
+
+    /// Wat er bij het sluiten in de drie verdeelvelden mag staan, en de opslag die erachter zit.
+    ///
+    /// Regel voor regel `Main.kt:236-241` (`clampedDivider`): een stand telt alleen wanneer hij
+    /// groter is dan nul en vóór de verafgelegen rand eindigt, anders blijft wat er stond — een
+    /// balk die iemand inflapte wordt zo nooit de heropende maat. `extent` is die as-verschuiving:
+    /// breedte voor de twee horizontale balken, **hoogte** voor de vertikale van de changes-lijst
+    /// (`orientation == VERTICAL_SPLIT → split.height`). De rechterbalk wordt hier omgezet naar
+    /// wat de bron bewaart: de bron bewaart zijn linkerflank, deze flank meet de strook rechts.
+    fn save_geometry(&mut self, ctx: &egui::Context) {
+        // Het venster-vierkant in punten, zoals de origineler `frame.width`/`frame.height` leest
+        // (`Main.kt:100`). In egui 0.36 is dat `Context::viewport_rect` (`context.rs:2921`).
+        let screen = ctx.viewport_rect();
+        let left = self.live_width(ctx, "projects").unwrap_or(0.0);
+        let tree = self.live_width(ctx, "filetree").unwrap_or(0.0);
+        let stored = self.settings.dividers();
+        let remembered = Dividers {
+            left: worth_remembering(left, screen.width(), stored.left),
+            right: worth_remembering(screen.width() - tree, screen.width(), stored.right),
+            files: worth_remembering(self.dividers.files as f32, screen.height(), stored.files),
+        };
+        self.dividers = remembered;
+        self.settings.set_dividers(&remembered);
+        match self.settings.geometry_draft(&remembered) {
+            Ok(draft) => {
+                let _ = self.settings_tx.send(SettingsCommand::Save(draft));
+            }
+            Err(problem) => self.settings.report(problem),
+        }
+    }
+
     fn paint_layout(&mut self, ui: &mut egui::Ui) {
         // Side panels first. egui allocates a panel's strip from whatever the enclosing `Ui` still
         // has at the moment of the call, so a central panel painted first would take the whole
@@ -395,15 +455,42 @@ impl TranscriptApp {
         // a switch commits rather than from a paint.
         // De linkersidebar vóór de rest: egui verdeelt de breedte in de volgorde van de aanroep,
         // dus de kolom die het eerst wordt gevraagd, krijgt zijn breedte uit de volle breedte.
-        let intents = if self.show_sidebar { panels::project_sidebar(ui, &mut self.sidebar) } else { Vec::new() };
+        // De breedte van de linkerbalk is `resolveDivider` van de bron: wat deze sessie al liet
+        // zien, anders wat het bestand onthield, anders 280 (`Main.kt:164`). `previous` is het
+        // vierkant dat egui zelf onthoudt (`PanelState`), want de origineler leest zijn balk bij het
+        // herbouwen uit de `JSplitPane` die er nog staat — niet uit het bestand.
+        let previous_left = self.live_width(ui.ctx(), "projects");
+        let left_width = resolve_divider(previous_left, self.dividers.left, layout::LEFT_WIDTH);
+        let intents = if self.show_sidebar {
+            panels::project_sidebar(ui, &mut self.sidebar, left_width)
+        } else {
+            Vec::new()
+        };
         // De intenties eerst verwerken en dan pas tekenen wat ernaast staat: de bestandsboom hoort
         // het project van de zojuist gemaakte keuze, niet dat van de vorige pass.
         self.apply_sidebar_intents(intents);
         // De bestandsboom staat rechts, naast het middenvlak — `[ ProjectSidebar | Chat/Settings ]
         // [ Files + Changes ]` zoals `Main.kt:161-170` het opzet. De mapkiezer en de git-lijst
         // delen één rechterstrook; er staat geen derde paneel naast de projectsidebar.
+        // Rechts dezelfde regel met de val van `Main.kt:171`: 720 was de breedte van de linkerflank
+        // en het middenvlak *samen*, dus de strook zelf is het restant van het venster — en dat
+        // restant is wat deze flank werkelijk krijgt.
+        let previous_right = self.live_width(ui.ctx(), "filetree");
+        // Eén regel, en die is de bron zelf: `Main.kt:171` legt `rightDivider` op het vlak dat
+        // links van de bestandsboom ligt (linkerbalk én chat), dus de strook zelf is wat er van
+        // het beschikbare vlak overblijft. Twee regels achter elkaar — eerst de restant-min-formule
+        // en daarna een overschrijving — was mijn eigen verzinsel en is hier weg.
+        let left_extent = resolve_divider(previous_right, self.dividers.right, layout::CENTER_WIDTH);
+        let right_width = (ui.available_width() - left_extent).max(layout::PANEL_MIN);
         if self.show_filetree
-            && panels::file_tree(ui, &mut self.workspace, &mut self.folder_draft, &self.changes)
+            && panels::file_tree(
+                ui,
+                &mut self.workspace,
+                &mut self.folder_draft,
+                &self.changes,
+                &mut self.dividers,
+                right_width,
+            )
         {
             self.changes.refresh(self.workspace.cwd());
         }
@@ -966,6 +1053,19 @@ impl eframe::App for TranscriptApp {
         // Row spacing belongs to this Ui, set once before any row is painted. Per-row style
         // nudges would make the effective spacing depend on what was painted last.
         ui.style_mut().spacing.item_spacing.y = 6.0;
+        // De venstermaten wegschrijven op de pass waarop het venster dichtgaat, en niet later:
+        // `Drop` vervangt de sender van de settings-worker door een wegwerper en sluit die
+        //thread daarna, dus een command dat pas in `Drop` vertrekt, is er al niet meer. De
+        // origineler doet exact hetzelfde op de sluitgebeurtenis (`Main.kt:96-105`), met dezelfde
+        // drie waarden in één aanroep. Een screenshot-run schrijft niets: die heeft niemand
+        // gevraagd iets te onthouden, en een test-beeld mag het bestand van de persoon niet aanraken.
+        if self.shot.is_none()
+            && !self.geometry_saved
+            && ctx.input(|input| input.viewport().close_requested())
+        {
+            self.geometry_saved = true;
+            self.save_geometry(&ctx);
+        }
         self.paint_layout(ui);
         // A streaming turn must repaint on its own; egui otherwise waits for input and would show
         // a half-finished answer until the user moved the mouse.

@@ -104,7 +104,7 @@ pub struct SettingsView {
     /// "lus uit" het limiet van de persoon stilletjes op 8 terugzetten — een wijziging die hij niet
     /// maakte en die pas terugkomt zodra hij de lus weer aanzet.
     stored_max_tool_iterations: u32,
-    /// Het contextbeleid zoals het bestand het draagt.
+    /// Het contextbeleid zoals het bestand het draagt, en alvast de drie verdeelstanden.
     ///
     /// De panel heeft er nog geen widgets voor, dus `draft` draagt deze woordelik terug. De reden is
     /// de `max_tool_iterations`-regel hierboven: een panel zonder veld voor een getal mag het bij een
@@ -254,6 +254,12 @@ impl SettingsView {
         self.stored_context.use_server_session = settings.use_server_session;
         self.stored_context.learned_context_window = settings.learned_context_window;
         self.stored_context.learned_context_key = settings.learned_context_key.clone();
+        // De verdeelstanden zijn geen instelling die de panel bedient, en juist daarom moeten ze
+        // mee: bij een opslag van de panel — of bij het sluiten van het venster — mag een veld waar
+        // niemand aan zat niet op de fabrieksstand terugvallen.
+        self.stored_context.left_divider = settings.left_divider;
+        self.stored_context.right_divider = settings.right_divider;
+        self.stored_context.files_divider = settings.files_divider;
         self.fetched_for = None;
         self.listing_answered = false;
         // A stored dialect is a claim about an endpoint this panel has not asked yet, so it is shown
@@ -305,7 +311,43 @@ impl SettingsView {
             use_server_session: self.stored_context.use_server_session,
             learned_context_window: self.stored_context.learned_context_window,
             learned_context_key: self.stored_context.learned_context_key.clone(),
+            left_divider: self.stored_context.left_divider,
+            right_divider: self.stored_context.right_divider,
+            files_divider: self.stored_context.files_divider,
         })
+    }
+
+    /// De drie verdeelstanden zoals het bestand ze draagt. De lezing die het venster nodig heeft
+    /// vóórdat er iets getekend is — de panelbreedte bij het openen — komt hier vandaan en niet uit
+    /// een tweede `read` van dezelfde file: één lezing per vensterleven is ook hier de regel.
+    pub fn dividers(&self) -> crate::layout::Dividers {
+        crate::layout::Dividers {
+            left: self.stored_context.left_divider,
+            right: self.stored_context.right_divider,
+            files: self.stored_context.files_divider,
+        }
+    }
+
+    /// Wat er bij het sluiten in diezelfde velden mag staan, met de live maten erin.
+    pub fn set_dividers(&mut self, dividers: &crate::layout::Dividers) {
+        self.stored_context.left_divider = dividers.left;
+        self.stored_context.right_divider = dividers.right;
+        self.stored_context.files_divider = dividers.files;
+    }
+
+    /// Het bestand waarnaar een opslag gaat, of `None` wanneer nog niets werd gelezen.
+    pub fn file_path(&self) -> Option<&std::path::Path> {
+        self.path.as_deref()
+    }
+
+    /// Een opslag van alleen de venster-maten, via dezelfde deur als een gewone opslag: dezelfde
+    /// worker, dus dezelfde weigering wanneer het bestand onleesbaar is.
+    pub fn geometry_draft(&self, dividers: &crate::layout::Dividers) -> Result<Settings, String> {
+        let mut settings = self.draft()?;
+        settings.left_divider = dividers.left;
+        settings.right_divider = dividers.right;
+        settings.files_divider = dividers.files;
+        Ok(settings)
     }
 
     /// Drain one worker report into the view. Returns nothing: every outcome lands in `self`, which
@@ -465,6 +507,13 @@ impl SettingsView {
     /// The last thing the panel has to say, for the tab that shares the panel's state.
     pub fn status(&self) -> &str {
         &self.status
+    }
+
+    /// De statusregel van de panel doorgeven aan een buitenstaander — het venster dat bij het
+    /// sluiten niet kan opslaan, draagt die zin hierheen in plaats van het veld te raken. De
+    /// panel blijft de eigenaar van de tekst, zoals hij die ook na elke worker-melding zet.
+    pub(crate) fn report(&mut self, problem: String) {
+        self.status = problem;
     }
 
     /// Whether a listing is in flight, so a second request cannot stack up behind the first.

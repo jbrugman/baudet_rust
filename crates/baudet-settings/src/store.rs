@@ -227,6 +227,11 @@ mod tests {
             use_server_session: false,
             learned_context_window: 32_768,
             learned_context_key: "http://studio:8000/v1|Qwen3.8-Flash".into(),
+            // De verdeelstanden reizen mee door hetzelfde bestand (`AppConfig.kt:152-158`) en hun
+            // fabrikaat is 0, dus waarden die hier niet staan, bewijzen dat ze zijn weggeschreven.
+            left_divider: 301,
+            right_divider: 745,
+            files_divider: 214,
         };
         file.write(&settings).unwrap();
         assert_eq!(file.read().settings(), &settings);
