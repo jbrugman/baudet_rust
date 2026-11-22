@@ -14,12 +14,17 @@ De volledige werklijst staat in [`TODO.md`](TODO.md): elk domein van de originel
 de beslisregel bij twijfel, en hoe de embed-match Kotlin en Rust aan elkaar koppelt. Die lijst is
 de bron van de waarheid over wat er is en wat er nog moet; deze README gaat over *hoe*.
 
-De front-end toont wat er onder zit, en dat is minder dan het doel: transcript met streaming-regels,
-composer, en het ingestpaneel met endpoint, modellenlijst, redenereniveau en uitvoerplafond. **Nog
-niet** het project-/sessiedomein, de read/write/execute-rechten, de linker `ProjectSidebar`, of de
-bestandsboom in het **rechter** `FileTreePanel` zoals `Main.kt:161-170` die legt. Zie `TODO.md`
-voor de volledige stand en de bouwvolgorde. De lay-out is hier eerder onjuist begonnen (boom links
-in plaats van rechts, sidebar helemaal afwezig); dat wordt in item A/B van `TODO.md` rechtgezet.
+De front-end is de lay-out van de origineler: `[ ProjectSidebar | Chat/Settings ] | FileTree`
+(`Main.kt:161-170`). Links de projectenboom met zijn sessies en `Unassigned`, de mapkoppeling en de
+read/write/execute-vakjes; rechts boven de bestandsboom en daaronder de changed-files; in het midden
+de tabs. Inclusief transcript met streaming-regels, composer, plan/details, toolrijen,
+interrupt/resume, en het instellingpaneel met endpoint, modelplukker, redenereniveau en
+uitvoerplafond.
+
+**Wat er nog niet aan hangt, is de werking eronder, niet de lay-out.** De tool-rijen zijn sierraad
+tot item E de draad naar `ToolLoop` legt; er draait nog één transcript in plaats van meerdere
+sessies (item D.2); er is nog geen verdichting (F), geen diff-dialoog (G) en de UI is Engelstalig
+terwijl de origineler vier talen draagt (H). `TODO.md` is de bron van de waarheid over die stand.
 `--screenshot` bewijst de staat van een sessie zonder muis.
 `ScriptedBackend` voert beurtstromen uit voor een venster zonder server; `--live` stuurt de beurt
 naar het opgeslagen endpoint via `ResponsesBackend`, die beide OpenAI-dialecten spreekt en wiens
@@ -168,9 +173,10 @@ Zes crates, de UI kent alleen het `Backend`-contract:
 
 Bewezen gedrag van de frontend: chat over een script, plan/details, toolrijen met wachttijd en
 details, interrupt/resume met toetsenbord en met Esc, Shift+Enter, scroll-vastzetten bijknepen,
-transcript opschonen, rijselectie, workspace-tree met lazy vouwen en verversen, changed-files met
-kopieerbare pakketcodes, settings-venster incl. model-ophalen, twee pane-toggles met herinnerde
-breedte, en git-kleuren in zowel de linker boom als de rechter changed-files-lijst.
+transcript opschonen, rijselectie, de linkerprojectbalk met add/hernoemen/map koppelen/archiveren/
+verwijderen, de foldertoepasser, de rechter workspace-tree met lazy vouwen en verversen, changed-files
+met kopieerbare pakketcodes, settings in het middenpane, model-ophalen uit een server-sweep, twee
+pane-toggles met herinnerde breedte, en git-kleuren in zowel de rechter boom als de changed-files-lijst.
 
 ## Wat er sinds de transport is bijgekomen, en wat er toen twee keer misging
 
