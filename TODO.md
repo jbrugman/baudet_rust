@@ -88,7 +88,7 @@ writes/gepinde calls blijven serieel.
       porteren:** `is_safe("cargo test")` is `false` — `cargo`/`mvn` staan in de origineler op geen van
       beide lijsten, ze krijgen alléén een gezins-teken via `trusted_key`; de test eiste het verkeerde
       gedrag, niet de code. Zelfde les bij de diepte-cap: die is relatief aan de root, een `tempdir` woont
-      zelf al op niveau vier, dus de eerste test bewees niets. commit `ZIE_VOLGENDE`.
+      zelf al op niveau vier, dus de eerste test bewees niets. commit `cea2f33`.
 - [ ] `Tool`/`ToolRegistry`/`ToolRunner`/`ToolLoop` (max iteraties, reads parallel ≤2, writes serieel) — `tool/Tool*.kt`, `tool/ToolLoop.kt` (ziet tool-loop.puml).
 - [ ] Call-extractie: native + fenced JSON — `tool/CallExtractor.kt`, `tool/PromptedCallExtractor.kt`.
 - [ ] `ToolContext` (rechten, approvals, allow-lijsten) — `tool/ToolContext.kt`.
