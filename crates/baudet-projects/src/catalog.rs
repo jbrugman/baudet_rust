@@ -238,6 +238,21 @@ impl Catalog {
             .collect()
     }
 
+    /// Het project met deze id, of `None` als de catalogus het niet kent.
+    ///
+    /// De UI zocht dit vijf keer lineair in `list_projects()`, wat elk een volledige kopie van de
+    /// lijst maakt. `currentProject` in `AppState.kt:724` is één opzoeking per beurt en die beurt
+    /// loopt vóór élke toolcall, dus het hoort hier.
+    ///
+    /// Bewust géén `SessionRecord`-kopie: de catalogus is de index, niet de eigendom. Het gesprek
+    /// woont in een rollout, dus een sessie die hier nog niet staat maar wél in een rollout is geen
+    /// databug — het is een gesprek dat nog niet in de index is geland, en de oorspronkelijke
+    /// `currentProject` heeft haar project in het geheugen en zal het dus nooit missen.
+    pub fn project(&self, id: &str) -> Option<Project> {
+        let state = self.lock();
+        state.data.projects.iter().find(|project| project.id == id).cloned()
+    }
+
     /// Het project waaraan een sessie is gekoppeld, of `None` voor de inbox en onbekende sessies.
     pub fn project_of_session(&self, session_id: &str) -> Option<String> {
         self.lock()

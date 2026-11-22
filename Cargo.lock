@@ -199,6 +199,7 @@ name = "baudet-projects"
 version = "0.1.0"
 dependencies = [
  "baudet-core",
+ "baudet-settings",
  "baudet-store",
  "serde",
  "serde_json",

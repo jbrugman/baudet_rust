@@ -15,4 +15,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+# De instap-eigenschap van de poort wordt bewezen met de échte default van de instellingen,
+# en alleen daarvoor: de productietak blijft vrij van deze crate.
+baudet-settings = { workspace = true }
 tempfile = { workspace = true }
