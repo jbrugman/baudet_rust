@@ -120,6 +120,17 @@ pub struct Settings {
     /// Het veld heet hier `tool_mode` en in de origineler `toolMode`, omdat de JSON hier de
     /// Rust-veljnaam woord-voor-woord herhaalt. De waarden blijven smallcase, zoals `protocol` dat ook is.
     pub tool_mode: ToolMode,
+    /// Het aantal model-tussenpozen dat één beurt mag kosten: de deksel op een doorlopende lus.
+    ///
+    /// Poort van `config/AppConfig.kt:88`, default 8. De grens is de enige verdediging tegen een
+    /// model dat om een call blijft vragen: [`baudet_tool::ToolLoop`] telt zijn call-stappen en
+    /// kapt bij dit getal af. De vloer is 1 — `ToolLoop.kt:149` doet `coerceAtLeast(1)` en dezelfde
+    /// vloer staat daar in `ToolLoop::with_extractor` — want een budget van nul zou een draai
+    /// zonder énkel verzoek maken, en dat is nooit wat "begrens dit" betekent.
+    ///
+    /// De herkenning van de vloer staat hier en niet alleen in de lus: het veld mag geen waarde
+    /// dragen die het bestand in leest als iets anders dan de app ernaar handelt.
+    pub max_tool_iterations: u32,
 }
 
 impl Default for Settings {
@@ -140,6 +151,10 @@ impl Default for Settings {
             // Ask by default, for the reason on the field: a fresh install must not write to a
             // project folder behind the person's back.
             tool_mode: ToolMode::default(),
+            // De default van de origineler (`AppConfig.kt:88`), geen eigen voorkeur: een checkout
+            // van deze herschrijving moet dezelfde lus-limiet hebben als het programma dat als
+            // voorbeeld diende.
+            max_tool_iterations: DEFAULT_MAX_TOOL_ITERATIONS,
         }
     }
 }
@@ -147,6 +162,11 @@ impl Default for Settings {
 /// The variable to fall back to when the field above names nothing. Kept in one place because the
 /// reference app repeats the literal in two spots, and a second copy is how the two drift.
 pub const DEFAULT_KEY_ENV_VAR: &str = "OMLX_API_KEY";
+
+/// De standaarddeksel op de tool-lus, uit `AppConfig.kt:88`. Een eigen naam omdat drie kanten —
+/// de default hier, de instellingskaart die hem toont en de test die een oud bestand leest —
+/// hetzelfde getal moeten dragen; een tweede letterlijke 8 is hoe ze uit elkaar gaan lopen.
+pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 8;
 
 impl Settings {
     /// The credential to actually send: what was typed, otherwise what the named variable holds.
@@ -227,6 +247,45 @@ mod tests {
         // settings-lijst van de origineler en wordt geweigerd in plaats van gerepareerd.
         assert_eq!(ToolMode::from_word("ToolsOn"), None);
         assert_eq!(ToolMode::from_word(" ASK "), Some(ToolMode::Ask), "spaties en kas zijn geen betekenis");
+    }
+
+    #[test]
+    fn the_iteration_cap_defaults_to_eight_and_survives_the_file() {
+        // De deksel van de origineler (`AppConfig.kt:88`), en hij moet het bestand halen: een lus
+        // die zijn limiet niet bewaart, begint elke start opnieuw met 8 terwijl de persoon er 3
+        // koos.
+        assert_eq!(Settings::default().max_tool_iterations, DEFAULT_MAX_TOOL_ITERATIONS);
+        assert_eq!(DEFAULT_MAX_TOOL_ITERATIONS, 8, "de origineler begint op 8");
+
+        let settings = Settings { max_tool_iterations: 3, ..Default::default() };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("\"max_tool_iterations\":3"), "het bestand noemt het veld zoals het heet: {json}");
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_tool_iterations, 3);
+    }
+
+    #[test]
+    fn an_older_file_without_the_cap_still_reads_as_eight() {
+        // Forward-compatibiliteit voor dit veld, zoals `tool_mode` dat heeft: een bestand van vóór
+        // de tool-lus moet openen met de limiet van de origineler en mag niet op 0 of 1 vallen —
+        // een lus die nul tussenpozen toestaat, doet nooit wat de persoon bedoelde.
+        let json = r#"{"base_url":"http://studio:8000/v1","model":"gemma"}"#;
+        let read: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(read.max_tool_iterations, DEFAULT_MAX_TOOL_ITERATIONS);
+    }
+
+    #[test]
+    fn a_cap_of_zero_survives_the_file_and_is_the_loops_problem_to_floor() {
+        // Twee eigenschappen, twee eigenaars, en de grens ertussen is geen versiersel: dit bestand
+        // bewaart wat erin stond — 0 blijft 0 — en repareert niets stilletjes, zoals het een
+        // onbekend `tool_mode`-woord ook niet repareert. De vloer van `ToolLoop.kt:149`
+        // (`coerceAtLeast(1)`) hoeft hier niet bewezen te worden, want de lus doet die zelf al en
+        // meet dat in zijn eigen crate; een tweede bewijsplaats zou verbergen als die vloer ooit
+        // verdwijnt. Wat wél van hier komt: een waarde van 0 wordt doorgegeven, niet verzwegen.
+        let settings = Settings { max_tool_iterations: 0, ..Default::default() };
+        let json = serde_json::to_string(&settings).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_tool_iterations, 0, "een 0 uit de hand blijft een 0, tot bij de lus");
     }
 
     #[test]

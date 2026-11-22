@@ -1554,6 +1554,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_budget_of_zero_still_leaves_the_loop_one_request() {
+        // De vloer van `ToolLoop.kt:149` (`coerceAtLeast(1)`), gemeten op de constructeur die hem
+        // toepast. Een instelling of een bestand met 0 — met de hand gezet, of uit een eerdere
+        // bouw — mag een draai niet in nul verzoeken veranderen: de lus zou dan terugkeren zonder
+        // ooit iets gevraagd te hebben, wat eruitziet als een stilzwijgende assistent.
+        let reg = one(StubTool::new("read_file"));
+        let src = source(vec![StubSource::prose("een enkele beurt volstond")]);
+        let (outcome, _sink) = drive(&reg, &src, &[Msg::user("vraag")], &ctx(), 0, |l| l).await;
+        assert!(matches!(outcome, LoopOutcome::Completed { .. }), "budget 0 mag de lus niet leeg maken: {outcome:?}");
+        assert_eq!(turns(&src), 1, "één verzoek, niet nul");
+    }
+
+    #[tokio::test]
     async fn a_batch_that_must_run_serially_stays_serial() {
         // Een gemengde batch — één schrijver ertussen — houdt het serieuze pad, want een write mag niet
         // racen en een goedkeuringskaart moet live opkomen.

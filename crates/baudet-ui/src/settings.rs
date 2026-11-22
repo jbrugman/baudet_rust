@@ -65,7 +65,13 @@ pub enum SettingsEvent {
 }
 
 /// The panel's whole state: the view-model plus what the last read, fetch, and save reported.
-#[derive(Default)]
+///
+/// The derived `Default` leaves every text field empty, which is right for all of them except one:
+/// the iteration cap has no empty state, since the loop always runs under a cap. A panel that came
+/// from nowhere would therefore refuse its own draft. That cannot happen on a real start — `new`
+/// calls `load`, and `load` calls `adopt`, which fills the cap from the file or from the settings'
+/// own default — so the empty is filled where it is actually observable: in the test fixture below.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SettingsView {
     /// The endpoint as typed. A free field, because the whole point of the panel is to correct it.
     base_url: String,
@@ -85,6 +91,19 @@ pub struct SettingsView {
     reasoning: Reasoning,
     /// The output ceiling as typed; empty means "leave it to the endpoint".
     max_output_tokens: String,
+    /// De deksel op de tool-lus, als tekst zoals het veld het toont. Poort van het
+    /// `maxIterations`-veld uit `SettingsPanel.kt:264`.
+    ///
+    /// Een tekst en geen getal, omdat dit veld het antwoord van de persoon is en niet het besluit:
+    /// "12" is nog geen limiet, pas `draft` beslist of het er een is. Een getal-veld zou een
+    /// onleesbare tussentoestand verstoppen — de persoon zou niet meer kunnen typen wat hij bedoelt.
+    max_tool_iterations: String,
+    /// Het limiet zoals het bestand het draagt, naast het vakje. Alleen bij `Off` in gebruik:
+    /// `SettingsPanel.kt:372` schakelt het vakje dan uit en laat het opgeslagen limiet staan, omdat
+    /// de persoon toen alleen de lus uitzette en geen limiet corrigeerde. Zonder deze kopie zou
+    /// "lus uit" het limiet van de persoon stilletjes op 8 terugzetten — een wijziging die hij niet
+    /// maakte en die pas terugkomt zodra hij de lus weer aanzet.
+    stored_max_tool_iterations: u32,
     /// The credential as typed. A separate field from the password widget's buffer is not needed:
     /// this is that buffer, and empty means "not typed" (so the environment still answers).
     api_key: String,
@@ -211,6 +230,10 @@ impl SettingsView {
         self.model = settings.model.clone();
         self.reasoning = Reasoning::from_stored(settings.reasoning.as_deref());
         self.max_output_tokens = settings.max_output_tokens.map(|n| n.to_string()).unwrap_or_default();
+        // Dit veld is nooit blanco: het draagt altijd een getal, want de lus heeft altijd een
+        // deksel. Een lege tekst zou een limiet betekenen dat niemand koos.
+        self.max_tool_iterations = settings.max_tool_iterations.to_string();
+        self.stored_max_tool_iterations = settings.max_tool_iterations;
         self.api_key = settings.api_key.clone().unwrap_or_default();
         self.api_key_env_var = settings.api_key_env_var.clone();
         self.protocol = settings.protocol_word().map(str::to_string);
@@ -236,7 +259,22 @@ impl SettingsView {
                     .map_err(|_| format!("{} is not a whole number of tokens", self.max_output_tokens.trim()))?,
             )
         };
+        // De regel van `SettingsPanel.kt:372-376`: bij `Off` is het vakje uitgeschakeld en blijft het
+        // opgeslagen limiet staan, want geen enkele tool draait dan — de persoon heeft dan niets
+        // gecorrigeerd, alleen de lus uit gezet. Een blanco of niet-getal veld bij een aanstaande
+        // lus is wél een fout en mag niet stil op 8 terugvallen.
+        let max_tool_iterations = match self.tool_mode {
+            ToolMode::Off => self.stored_max_tool_iterations,
+            _ => self
+                .max_tool_iterations
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| format!("max tool iterations is not a positive number: {}", self.max_tool_iterations.trim()))?,
+        };
         Ok(Settings {
+            max_tool_iterations,
             base_url: self.base_url.trim().to_string(),
             model: self.model.clone().filter(|m| !m.trim().is_empty()),
             reasoning: self.reasoning.as_str().map(str::to_string),
@@ -471,6 +509,7 @@ pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<S
     ui.separator();
     reasoning_row(ui, view);
     tokens_row(ui, view);
+    iterations_row(ui, view);
     ui.separator();
     key_row(ui, view);
     if view.blocked {
@@ -622,6 +661,21 @@ fn tokens_row(ui: &mut Ui, view: &mut SettingsView) {
     );
 }
 
+/// De deksel op de tool-lus, naast de keuzelijst die er later boven komt.
+///
+/// Het vakje schakelt uit bij `Off`, zoals `SettingsPanel.kt:235` — dan draait er geen enkele tool, en
+/// een bewerkbaar vakje zou een limiet beloven dat niets aangaat. `draft` laat bij `Off` het
+/// opgeslagen limiet staan, dus wat hier niet te bereiken is, wordt ook niet stilletjes gewijzigd.
+fn iterations_row(ui: &mut Ui, view: &mut SettingsView) {
+    ui.label(dim("max tool iterations (turns the loop may spend)"));
+    // `add_enabled` zoals `save_row` dat voor een onleesbaar bestand doet; de breedte volgt uit het
+    // formulier, dus het vakje hoeft er niet apart een te krijgen.
+    ui.add_enabled(
+        view.tool_mode != ToolMode::Off,
+        egui::TextEdit::singleline(&mut view.max_tool_iterations).hint_text("e.g. 8").desired_width(ui.available_width()),
+    );
+}
+
 fn key_row(ui: &mut Ui, view: &mut SettingsView) {
     ui.label(dim("api key (empty = read from environment)"));
     ui.horizontal(|ui| {
@@ -673,7 +727,7 @@ fn describe_path(path: &std::path::Path) -> String {
 /// because it is the reason these are unit tests in the file rather than integration tests beside it.
 #[cfg(test)]
 mod tests {
-    use super::{Reasoning, SettingsCommand, SettingsEvent, SettingsView};
+    use super::{Reasoning, SettingsCommand, SettingsEvent, SettingsView, ToolMode};
     use baudet_settings::{ListingError, Model};
     use std::path::PathBuf;
 
@@ -688,6 +742,11 @@ mod tests {
             base_url: "http://127.0.0.1:8000/v1".to_string(),
             max_output_tokens: String::new(),
             api_key_env_var: baudet_settings::DEFAULT_KEY_ENV_VAR.to_string(),
+            // Niet leeg, omdat dit veld geen "niet gekozen" kent: een blanco deksel wijst `draft`
+            // af, en diep in een test over iets anders is dat een ruis die niets bewijst. Een paneel
+            // uit `load` krijgt deze waarde vanzelf uit het bestand of uit de default.
+            max_tool_iterations: baudet_settings::DEFAULT_MAX_TOOL_ITERATIONS.to_string(),
+            stored_max_tool_iterations: baudet_settings::DEFAULT_MAX_TOOL_ITERATIONS,
             ..SettingsView::default()
         }
     }
@@ -784,6 +843,46 @@ mod tests {
         // A new endpoint is a new question, so the answer to the old one cannot settle the new wait.
         view.set_endpoint("http://192.168.1.2:8000/v1");
         assert!(!view.listing_answered());
+    }
+
+    #[test]
+    fn the_iteration_cap_survives_a_panel_round_trip() {
+        // Het veld is geen sierraad: wat erin stond, moet door `draft` heen halen, want de lus
+        // handelt ernaar. Een 12 die hier op 8 terugvalt, is een limiet die de persoon kwijt is
+        // zonder dat er iets omviel.
+        let mut panel = view();
+        panel.max_tool_iterations = "12".into();
+        assert_eq!(panel.draft().unwrap().max_tool_iterations, 12);
+    }
+
+    #[test]
+    fn a_blank_or_nonsense_cap_is_refused_rather_than_repaired() {
+        // `SettingsPanel.kt:373-375` faalt luid op een blanco of niet-getal veld, en repareert het
+        // niet op de default. Een stil gerepareerd limiet is erger dan een weigering: de persoon
+        // denkt dat hij 20 koos en draait op 8.
+        for tekst in ["", "   ", "lots", "0", "-1", "2.5"] {
+            let mut panel = view();
+            panel.max_tool_iterations = tekst.into();
+            let problem = panel.draft().unwrap_err();
+            assert!(problem.contains("not a positive number"), "witruimte en onzin moeten benoemd worden, niet gerepareerd: {problem}");
+        }
+    }
+
+    #[test]
+    fn switching_tools_off_keeps_the_cap_the_person_chose() {
+        // De andere helft van `SettingsPanel.kt:372`: bij `Off` is het vakje uitgeschakeld, dus wat
+        // er staat is niet wat de persoon bewerkte — het opgeslagen limiet blijft staan. Anders zou
+        // "lus uit" zijn limiet stilletjes op 8 terugzetten, en pas terugkomen als hij hem weer aanzet.
+        let mut panel = view();
+        panel.max_tool_iterations = "3".into();
+        panel.stored_max_tool_iterations = 3;
+        panel.max_tool_iterations.clear(); // het vakje is uitgeschakeld: de tekst is niet meer van hem
+        panel.tool_mode = ToolMode::Off;
+        assert_eq!(panel.draft().unwrap().max_tool_iterations, 3, "lus uit mag een limiet niet wissen");
+
+        // En terug aan: het vakje is van de persoon, dus zijn tekst geldt — blanco wordt dan wél geweigerd.
+        panel.tool_mode = ToolMode::Ask;
+        assert!(panel.draft().is_err(), "terug aan hoort het blanco vakje te horen");
     }
 
     #[test]

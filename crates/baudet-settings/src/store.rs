@@ -216,6 +216,9 @@ mod tests {
             api_key_env_var: "SOME_OTHER_KEY".into(),
             protocol: Some("chat_completions".into()),
             tool_mode: crate::config::ToolMode::Auto,
+            // Niet de default, zodat dit rondreisje bewijst dat het veld meegaat en niet op 8
+            // terugvalt wanneer het bestand het wel bevatte.
+            max_tool_iterations: 3,
         };
         file.write(&settings).unwrap();
         assert_eq!(file.read().settings(), &settings);
