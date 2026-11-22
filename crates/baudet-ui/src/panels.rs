@@ -308,8 +308,33 @@ pub fn file_tree_controls(
                 if let Some(meta) = meta {
                     branch_line(ui, meta);
                 }
-                ui.separator();
-                ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                // Een scheiding van nul hoogte, niet `ui.separator()`. Een horizontale
+                // `Separator` verdeelt in een verticale layout de *hele* rest van de kolom over
+                // zijn marges: `spacing` is zijn hoogte (`widgets/separator.rs:124`) en die is in de
+                // standaardstijl de helft van de resterende hoogte (`style.rs:963` `spacing(14.)`).
+                // Gemeten in een kolom van 900 pt: de scheiding claimde 443 pt, de boom-`ScrollArea`
+                // (`auto_shrink(false)`) nam wat overbleef, en de verdeling eronder kreeg nul hoogte
+                // — precies "ik mis de filelisting onder de tree". De origineler tekent hier géén
+                // scheidingslijn tussen boom en wijzigingen maar de greep van zijn `JSplitPane`
+                // (`FileTreePanel.kt:103-113`), dus hoogte 0 is ook hier de oorspronkelijke vorm.
+                ui.add(egui::Separator::default().spacing(0.0));
+                // De boom vult de breedte, maar niet de hoogte.
+                //
+                // `auto_shrink([false, false])` in een verticale layout vraagt de rest van de
+                // (`scroll_area.rs`: `auto_shrink.y == false` → de gewenste hoogte is wat er
+                // beschikbaar is), en de kolom hieronder — de greep en de wijzigingenlijst in
+                // `changes_band` — hield dan nul pixels over.
+                //
+                // Gemeten in deze flank met een geopende map: 596 pt bij binnenkomst, 0 pt na
+                // `file_tree_controls`, en `changes_band` klemde zijn band toen op
+                // `column.max(floor)` met `column == 0` — de lijst bestond, maar had geen
+                // hoogte. Dat is precies "ik mis de filelisting onder de tree".
+                //
+                // `auto_shrink([false, true])`: de breedte blijft de volle strook — `JTree` volgt
+                // in de bron ook de viewport-breedte (`FileTreePanel.kt:554`) — maar de hoogte vraagt
+                // wat de rijen nodig hebben. Wat een boom van 300 pt in een kolom van 596 pt niet
+                // opvult, gaat naar de band eronder; wat hij wél nodig heeft, rolt hij zelf.
+                ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
                     if !root.is_dir() {
                         // `showMessage(FileTreeNoRead)` (`FileTreePanel.kt:212-218`): een pad dat
                         // niet te lezen is, krijgt dezelfde reden als een map zonder Lezen.
@@ -456,6 +481,7 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
                     model.select_project(Some(&project.id));
                     intents.push(SidebarIntent::StartChat(Some(project.id.clone())));
                 }
+                #[cfg(debug_assertions)]
                 row_menu(ui, &response.header_response, model, Some(project.id.clone()), None, &mut intents);
             }
 
@@ -475,7 +501,11 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
                     }
                     // Idem de inbox: `ProjectSidebar.kt:144-145` kent geen lege-riem.
                 });
-            if response.header_response.clicked() {
+            // Alleen bij inhoud. Een klik op de inboxknop is dubbelzinnig: de knop van een project
+            // zet diens selectie én vraagt een gesprek, maar de inbox is leeg en zijn knoop is
+            // "geen project". Een klik die hier ook selecteerde, legde de selectie neer en damit de
+            // map van zojuist — precies wat iemand niet vroeg toen hij op een lege knoop klikte.
+            if response.header_response.clicked() && !inbox.is_empty() {
                 model.select_project(None);
                 intents.push(SidebarIntent::StartChat(None));
             }
@@ -812,14 +842,24 @@ fn row_menu(
     // (memory/mod.rs:1112-1115): een secundaire klik op een andere riem vervangt het menu, en een
     // pass waarin geen enkele riem het state levend houdt, ruimt de pop-up weg
     // (`open_this_frame` is dan niet meer gezet, memory/mod.rs:806-819).
+    // De wikkel um het menu draagt het vaste adres (`ROW_MENU`), zodat élk item erin op
+    // `root_ui_id.with((ROW_MENU, <deel>))` te vinden is. `scope_builder` met click-sense registreert
+    // zijn eigen response op dat adres en laat de items erin hun auto-id van die Wikkel erven.
     let picked = egui::Popup::context_menu(row)
-        .show(|ui: &mut Ui| menu_item(ui, model, project.as_deref(), session.as_deref()))
+        .show(|ui: &mut Ui| {
+            ui.scope_builder(egui::UiBuilder::new().id(crate::app::root_ui_id(ui.ctx()).with(ROW_MENU)), |ui| {
+                menu_item(ui, model, project.as_deref(), session.as_deref())
+            })
+            .inner
+        })
         .and_then(|response| response.inner);
-    match (&project, &session) {
-        (Some(project), None) => model.select_project(Some(project)),
-        (_, Some(session)) => model.select_session(session),
-        (None, None) => model.select_project(None),
-    }
+    // De selectie blijft waar ze stond. Dit match stond hier vóór `picked` werd bekeken, dus
+    // élke pass met een open menu zette de keus om: een rechtermuisklik op de inbox van een project
+    // met een gelinkte map (`None, None`) schoof de selectie naar `Unassigned`, en het volgende
+    // verzoek van `Link folder` kwam bij dat project terug — maar de map zelf was toen al weg, want
+    // `apply_sidebar_intents` leest de boom aan de hand van diezelfde selectie en toonde "no folder".
+    // De gemeten repro: selectie `Project(p-…)` vóór de pass, `Unassigned` na de eerste pass, en
+    // `workspace.cwd()` bleef `None`. Een menu kiest een handeling, geen project.
     match picked {
         Some(MenuAction::NewSession) => {
             if let Ok(created) = model.add_session(project.as_deref()) {
@@ -853,11 +893,20 @@ fn row_menu(
             let start = project.as_deref().and_then(|id| model.project_folder(id));
             if let (Some(project), Some(chosen)) = (&project, pick_folder(start.as_deref())) {
                 let _ = model.link_folder(project, Some(&chosen));
+                // `linkFolder()` sluit af met `selectProjectNode(p.id)` (`ProjectSidebar.kt:377-378`):
+                // wie een map aan een project koppelt, kijkt daar ook naar. Het menu-open zélf verzet
+                // de selectie niet meer (hierboven), maar een gekozen handeling wel: dit is `picked ==
+                // Some`. Zonder die selectie toont de rechterstrook 'no folder' terwijl er net een map
+                // is gekoppeld — de klacht "map gelinked, maar rechts geen boom".
+                model.select_project(Some(project));
             }
         }
         Some(MenuAction::UnlinkFolder) => {
             if let Some(project) = &project {
                 let _ = model.link_folder(project, None);
+                // Idem `unlinkFolder()` (`ProjectSidebar.kt:385`): ook ontkoppelen zet de selectie op
+                // het project, zodat de boom direct de lege map toont.
+                model.select_project(Some(project));
             }
         }
         Some(MenuAction::DeleteProject) => {
@@ -910,7 +959,14 @@ fn menu_item(ui: &mut Ui, model: &SidebarModel, project: Option<&str>, session: 
             if ui.button(archive_label).clicked() {
                 return Some(MenuAction::ToggleArchive);
             }
-            if ui.button(Texts::get(Key::LinkFolderButton)).clicked() {
+            // Een wikkel met `push_id` en niet `.id_salt`: een `Button` heeft in deze build geen
+            // id-zout (alleen `CollapsingHeader` en `TextEdit` dragen die), dus het adres komt van de
+            // wikkel eromheen — dezelfde techniek als de sessieriem en de tabstrip. De klik telt op de
+            // wikkel, diens response registreert op `(ROW_MENU, ROW_MENU_LINK)`.
+            let link = ui
+                .push_id(ROW_MENU_LINK, |ui| ui.add(egui::Button::new(Texts::get(Key::LinkFolderButton))))
+                .inner;
+            if link.clicked() {
                 return Some(MenuAction::LinkFolder);
             }
             // `if (p.folderPath != null)` (`ProjectSidebar.kt:226`): loskoppelen heeft geen
@@ -969,6 +1025,19 @@ fn pick_folder(start: Option<&str>) -> Option<String> {
     }
     dialog.pick_folder().map(|path| path.display().to_string())
 }
+
+/// Het zout van het rijmenu, en damit het vaste adres van élk item erin.
+///
+/// De items kregen dat adres niet, en dat maakte precies één defect onzichtbaar: of een muis-knop op
+/// een riem werkelijk in het menu belandde, is van buiten alleen vast te stellen aan een item dat je
+/// kunt aanwijzen. Met dit zout staat `Link folder…` op `root_ui_id(ctx).with((ROW_MENU, "link"))`,
+/// dus kan een test bewijzen dat hij de handeling zélf heeft afgeroepen en niet slechts dat er niets
+/// veranderde. Zie `tests/link_folder_tree.rs`.
+pub const ROW_MENU: &str = "row-menu";
+
+/// De vaste delen achter dat zout, per menu-item. Eén woord per handeling, want het adres mag niet
+/// meebewegen met een vertaling.
+pub const ROW_MENU_LINK: &str = "link";
 
 /// Het "Copy path"-menu dat de origineler op élke riem van beide lijsten zet.
 ///
@@ -1065,6 +1134,11 @@ fn file_row(ui: &mut Ui, path: &Path, change: Option<ChangeKind>, root: Option<&
         // Het vierkant van de wikkel is de rij, niet de letters: `ui.max_rect()` is de volle
         // breedte die de wikkel inneemt, en geeft zo de klikplaats die `JTree` heeft omdat zijn
         // rijen de viewport-breedte volgen (`getScrollableTracksViewportWidth`, `FileTreePanel.kt:554`).
+        // Een dubbelklik opent in de origineler géén externe app maar het eigen patchvenster
+        // (`DiffViewDialog`, `FileTreePanel.kt:186-190` + `openPatch` :420-466). Dat venster staat
+        // hier nog op TODO item G, dus een dubbelklik heeft nog niets om te tonen en blijft hier net
+        // zo stil als hij vóór deze regel al was — een `open`-oproep zou een handeling zijn die de
+        // bron niet kent.
         let row = ui.interact(ui.max_rect(), ui.id().with(("file-row", path)), egui::Sense::hover());
         if let Some(text) = copy_path_menu(&row, root, Some(path)) {
             copied = Some(text);
@@ -1240,6 +1314,9 @@ fn change_row(ui: &mut Ui, file: &ChangedFile, root: Option<&Path>) -> Option<St
         // repository-relatief pad, dus de riem toont het relatieve en kopiéért het relatieve
         // (`maybePopupRows` lost `row.relPath` op in `rootPath`, `FileTreePanel.kt:525-527`).
         let git_path = root.map(|root| root.join(&file.path));
+        // Een dubbelklik opent ook hier het patchvenster van de origineler (`openChange`,
+        // `FileTreePanel.kt:155-160`), niet een externe app; dat venster is TODO item G, dus de klik
+        // blijft stil tot het er is — `Sense::hover` kent alleen het kopieermenu, zoals de bytes hier.
         let row = ui.interact(ui.max_rect(), ui.id().with(("change-row", &file.path)), egui::Sense::hover());
         if let Some(text) = copy_path_menu(&row, root, git_path.as_deref()) {
             copied = Some(text);

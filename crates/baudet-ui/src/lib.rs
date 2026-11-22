@@ -31,7 +31,7 @@ mod settings;
 pub mod layout;
 pub mod sidebar;
 
-pub use app::{run, run_from, Startup, TranscriptApp};
+pub use app::{chosen_backend, run, run_from, status_balk, with_chosen_backend, Startup, TranscriptApp};
 
 // De adressen die tests/tabs.rs nodig heeft om te vragen "staat díe widget getekend". Alleen widgets
 // met een expliciet id zijn van buiten te vinden — een `UiBuilder::id(..)`-wikkel met click-sense op
@@ -39,7 +39,7 @@ pub use app::{run, run_from, Startup, TranscriptApp};
 // `.id_salt`-veld adresseert relatief aan zijn ouder-`Ui` en is die keten hier bewust níét: geen
 // enkele root-keten gaf dat adres (gemeten), dus de velden worden niet op adres getest.
 pub use app::{root_ui_id, tab_size, Tab, TABSTRIP, TAB_GAP};
-pub use panels::{NO_FOLDER, NO_READ, TREE_REFRESH};
+pub use panels::{NO_FOLDER, NO_READ, ROW_MENU, ROW_MENU_LINK, TREE_REFRESH};
 // De intenties en het adres van de `Add project`-knop: tests/folder_open.rs en tests/project_tree.rs
 // klikken op dat adres, dus het moet van buiten te noemen zijn.
 pub use layout::{resolve_divider, worth_remembering, Dividers};

@@ -40,21 +40,20 @@ fn the_panel_flags_are_off_unless_asked_and_set_when_asked() {
 }
 
 #[test]
-fn sending_turns_to_a_server_is_opt_in() {
-    // `--live` promises a network and answers with whatever that machine happens to be running,
-    // while the scripted window draws the same picture everywhere. So the default must be the
-    // scripted one, and only the flag may change it -- a flag that silently failed to set would
-    // look exactly like a window that reached a server.
-    assert!(!parse(&["b"]).unwrap().live, "zonder vlag blijft het venster scripted");
-    assert!(parse(&["b", "--live"]).unwrap().live, "--live zet het aan");
+fn the_script_player_is_opt_in() {
+    // De server is de standaard (zie `chosen_backend`); `--demo` is de uitzondering voor de
+    // headless beelden, die op elke machine hetzelfde plaatje moeten opleveren. Dus zonder vlag
+    // praat het venster met de server, en alleen de vlag vraagt de scriptspeler.
+    assert!(!parse(&["b"]).unwrap().demo, "zonder vlag praat het venster met de server");
+    assert!(parse(&["b", "--demo"]).unwrap().demo, "--demo vraagt de scriptspeler");
 }
 
 #[test]
 fn a_question_to_send_is_opt_in_and_needs_a_value() {
-    // Only --send puts a real question on the wire; the default is None so a scripted window keeps
+    // Only --send puts a real question on the wire; the default is None so a --demo window keeps
     // its fixed demo. A --send with no question is refused rather than guessed -- a question invented
     // by a flag would make a screenshot answer a turn nobody asked.
-    assert_eq!(parse(&["b", "--live"]).unwrap().send, None);
+    assert_eq!(parse(&["b", "--demo"]).unwrap().send, None);
     assert_eq!(parse(&["b", "--send=why"]).unwrap().send.as_deref(), Some("why"));
     assert_eq!(parse(&["b", "--send", "why"]).unwrap().send.as_deref(), Some("why"));
     assert!(parse(&["b", "--send"]).is_err(), "a --send without a question is an error, not a window");

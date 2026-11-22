@@ -149,7 +149,7 @@ pub struct TranscriptApp {
     /// an immediate send, because the fetch is asynchronous and a screenshot must be able to wait
     /// for its answer.
     fetch_models_on_start: bool,
-    /// The question a screenshot run sends instead of the scripted demo (set by `--live --send`). It
+    /// The question a screenshot run sends instead of the scripted demo (set by `--send`). It
     /// is a flag held until the first paint for the same reason as `fetch_models_on_start`: the turn
     /// is asynchronous and the picture must be able to wait for it to settle. `None` keeps the demo.
     shot_send: Option<String>,
@@ -166,9 +166,15 @@ pub struct TranscriptApp {
     /// Which body the middle panel shows. `Some` is a tab a person chose; `None` is the chat, which
     /// is what a window shows before anyone picks and is not a fourth state — see [`Tab`].
     active_tab: Option<Tab>,
-    /// Why this window is not talking to a server, when `--live` asked it to. `None` for the normal
-    /// scripted start, which is not a fallback and must not read as one.
+    /// Wat er van deze vensterbackend te zeggen is: waarom hij **geen** server is (terugval, of een
+    /// script dat om `--demo` werd gevraagd), of dat hij het wél is. Het veld heet `fell_back` en doet
+    /// meer: het is de enige nơi die weet dat er geen model achter de composer zit, en `composer`
+    /// leest erom. `None` bestaat niet meer sinds de server de standaard is — `chosen_backend`
+    /// geeft élke tak een regel mee.
     fell_back: Option<String>,
+    /// Of de backend op een server antwoordt. Uit `fell_back` afgeleid en niet ernaast gezet: twee
+    /// velden die elkaar moeten ontkennen, is hoe een composer aan gaat terwijl er niets antwoordt.
+    server_beurt: bool,
     /// The settings panel's own state: the view-model, the last listing, the last status line.
     settings: SettingsView,
     /// Commands out to the settings worker (a fetch, a save). The worker never reaches back into the
@@ -278,6 +284,7 @@ impl TranscriptApp {
             changes: Changes::default(),
             active_tab: None,
             fell_back: None,
+            server_beurt: false,
             settings,
             settings_tx,
             settings_events,
@@ -336,6 +343,31 @@ impl TranscriptApp {
     fn with_status(mut self, reason: String) -> TranscriptApp {
         self.status = reason.clone();
         self.fell_back = Some(reason);
+        self.server_beurt = false;
+        self
+    }
+
+    /// Zeg dat dit venster op een server antwoordt, en met welke woorden de kop dat brengt.
+    ///
+    /// De tegenhanger van [`Self::with_status`], en dezelfde eigenschap: wat hier niet staat, is dat
+    /// er geen server is. Een scan die een dialect vond, heeft niets te verklaren maar wél te tonen,
+    /// en die regel is precies het bewijs dat de compose van de eerste beurt ergens naartoe gaat.
+    fn with_server(mut self, notice: String) -> TranscriptApp {
+        self.status = notice;
+        self.fell_back = None;
+        self.server_beurt = true;
+        self
+    }
+
+    /// Zeg dat dit venster uit het script antwoordt omdat `--demo` daarom vroeg.
+    ///
+    /// Dezelfde plek als de terugval, met ander woord: wie er om vroeg, krijgt geen "scripted player"
+    /// als verwijt maar een regel die zegt wat er draait. De reden dat `fell_back` wél gezet wordt, is
+    /// de composer: `server_beurt` moet false blijven, en die twee velden houden elkaar in de hand.
+    fn with_demo(mut self, notice: String) -> TranscriptApp {
+        self.status = notice.clone();
+        self.fell_back = Some(notice);
+        self.server_beurt = false;
         self
     }
 
@@ -347,9 +379,9 @@ impl TranscriptApp {
         self
     }
 
-    /// Ask `question` of the live server on the first paint, as if it were typed into the composer.
-    /// Only reached from a `--live` window: the scripted window's demo answer is the picture the
-    /// screenshots are made of and must not be replaced by a turn nobody sent to a server.
+    /// Ask `question` of the server on the first paint, as if it were typed into the composer.
+    /// Never reached from a `--demo` window: the scripted answer is the picture the screenshots are
+    /// made of and must not be replaced by a turn nobody sent to a server.
     pub fn with_shot_send(mut self, question: impl Into<String>) -> TranscriptApp {
         self.shot_send = Some(question.into());
         self
@@ -534,7 +566,9 @@ impl TranscriptApp {
             }
             self.status = match (&report.reason, &self.fell_back, report.busy, report.loading) {
                 (Some(reason), _, _, _) => reason.clone(),
-                (None, Some(reason), false, false) => reason.clone(),
+                // Een ledige reden is de server die niets te melden heeft: val door naar de regel van
+                // het gesprek zelf, want "niks aan de hand" is geen status.
+                (None, Some(reason), false, false) if !reason.is_empty() => reason.clone(),
                 (None, _, true, _) => "streaming".to_string(),
                 (None, _, _, true) => "loading session".to_string(),
                 (None, _, _, false) => self.status_line(report.stored, report.turns),
@@ -870,6 +904,22 @@ impl TranscriptApp {
         &self.sidebar
     }
 
+    /// Het sidebar-model van deze pass vervangen, zodat een test het stadium vóór de eerste paint
+    /// neerzet: een project met een gelinkte map bestaat dan al, precies zoals bij de persoon die
+    /// die map via het rechtermuismenu koppelde.
+    #[doc(hidden)]
+    pub fn with_sidebar_model(mut self, model: SidebarModel) -> TranscriptApp {
+        self.sidebar = model;
+        self
+    }
+
+    /// De reden die de rechterstrook toont in plaats van een boom, of `None` wanneer er een map
+    /// staat. Uitleesbaar gemaakt voor dezelfde repro-test.
+    #[doc(hidden)]
+    pub fn workspace_message(&self) -> Option<&'static str> {
+        self.workspace.message()
+    }
+
     /// The window's layout, as a plain paint pass.
     ///
     /// A thin public entry on the one layout function `App::ui` already calls, so the pass a test
@@ -1018,9 +1068,46 @@ impl TranscriptApp {
         self.more_older
     }
 
+    /// Of de composer van dit venster aan staat, dat wil zeggen: of er een backend achter zit die
+    /// antwoordt.
+    ///
+    /// Publiek voor één regel testwerk (`tests/composer_enabled.rs`): wat `composer` doet, is
+    /// `add_enabled(self.server_beurt, ...)`, en een eigenschap die alleen in pixels zichtbaar is,
+    /// is geen eigenschap die vasthoudt. Dat binaire bewijst dat `server_beurt` de enige waarheid
+    /// is door hem één keer om te zetten en hetzelfde veld opnieuw te kicken.
+    pub fn composer_enabled(&self) -> bool {
+        self.server_beurt
+    }
+
+    /// De regel die de kop boven de tabs toont: de reden van een terugval, wat er op een scan
+    /// gevonden is, of de status van het gesprek zelf.
+    ///
+    /// Dezelfde reden als hierboven. De test die alleen de composer controleert, mist de helft van
+    /// wat de persoon ziet: een backend die faalt, moet dat zó zeggen dat het niet voor een stil
+    /// venster aangezien wordt.
+    pub fn header_status(&self) -> &str {
+        &self.status
+    }
+
+    /// Zet de kopregel van het geopende venster op `balk`, zonder de composer te veranderen.
+    ///
+    /// De backendkeuze zette de composer al; dit zet alleen het woord in de kop, zodat "wat draait
+    /// er" altijd een naam heeft. Voor een script- of terugvalvenster is dat dezelfde tekst die het
+    /// op stderr meldde; voor een server is het de endpoint die dit venster werkelijk draagt.
+    pub fn with_status_balk(mut self, balk: String) -> TranscriptApp {
+        self.status = balk;
+        self
+    }
+
     fn composer(&mut self, ui: &mut egui::Ui) {
+        // Zonder server is er niets om naartoe te sturen, dus het veld gaat uit. De knop `ui` had dit
+        // niet gedragen: `send_requested` hangt aan `response.has_focus()`, en een
+        // `add_enabled(false, …)`-veld krijgt geen focus — de toets wordt dan simpelweg niet gezien.
+        // `server_beurt` is de enige waarheid daarover (`chosen_backend` zet hem op elke tak), dus
+        // deze rij spreekt hetzelfde woord als de kop: geen knop die niets doet.
         ui.horizontal(|ui| {
-            let response = ui.add(
+            let response = ui.add_enabled(
+                self.server_beurt,
                 egui::TextEdit::multiline(&mut self.input)
                     // Het veld is het bewijs dat de chat-tab zijn composer heeft: zie `COMPOSER_FIELD`.
                     .id_salt(COMPOSER_FIELD)
@@ -1033,8 +1120,13 @@ impl TranscriptApp {
             // without, because the same box has to grow and submit.
             let send_requested =
                 ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift) && response.has_focus();
-            let send_clicked = ui.add_enabled(!self.busy, egui::Button::new(Texts::get(Key::SendButton))).clicked();
-            if (send_clicked || send_requested) && !self.busy && !self.input.trim().is_empty() {
+            // Zonder server is het veld hierboven al uitgevallen, dus deze knop deelt dat oordeel via
+            // `server_beurt` en niet via een eigen mening: `send_requested` vraagt om focus, en een
+            // veld zonder focus kan dat niet krijgen — maar een klik op een knop wel.
+            let send_clicked = ui
+                .add_enabled(self.server_beurt && !self.busy, egui::Button::new(Texts::get(Key::SendButton)))
+                .clicked();
+            if (send_clicked || send_requested) && self.server_beurt && !self.busy && !self.input.trim().is_empty() {
                 let text = std::mem::take(&mut self.input);
                 let _ = self.intents.send(Intent::Submit(text));
                 self.busy = true;
@@ -1861,15 +1953,19 @@ pub struct Startup {
     /// `workspace`: a headless run cannot type an address, so without it `--fetch-models` could only
     /// ever probe the default, which is usually not where a server actually is.
     pub endpoint: Option<std::path::PathBuf>,
-    /// Ask a server instead of the scripted player. Opt-in, because the two are different promises:
-    /// the scripted window draws the same picture on every machine, and a window that reaches a
-    /// network answers with whatever that machine happens to be running. Without a stored protocol
-    /// there is nothing to send to, so the flag alone does not invent an endpoint.
-    pub live: bool,
+    /// Vraag geen server maar de scriptspeler. **De uitzondering**, niet de standaard: die vlag
+    /// bestaat voor de headless beelden, want een `--screenshot`-run moet op elke machine hetzelfde
+    /// plaatje opleveren en dat kan niet afhangen van een server die er vanavond niet staat. Buiten
+    /// die vlag praat het venster met de opgeslagen endpoint — daar is de app voor, en zo staat het
+    /// in de origineler: `AppState.kt:75` kent één fabriek (`gatewayFactory = {
+    /// ResponsesGateway(it) }`) en het scripted backend komt daar alleen voor als test-naad
+    /// (`ModelGateway.kt:8`, `TurnSource.kt:9`). Zie `chosen_backend`.
+    pub demo: bool,
     /// The question a `--screenshot` run sends on its own. A headless window receives no keystrokes,
     /// so without a typed question it can only show its scripted demo. `Some` only means something
-    /// beside `live`: it puts a real turn on the wire so the picture can capture a server answering,
-    /// which is the point of `--live`. It reuses the same `Intent::Submit` a keystroke uses.
+    /// outside `--demo`: it puts a real turn on the wire so the picture can capture a server
+    /// answering, which is the point of asking a question from the command line. It reuses the same
+    /// `Intent::Submit` a keystroke uses.
     pub send: Option<String>,
     /// Report which local server answers, then stop. A flag rather than a startup step for the
     /// reason in [`discover_local`]: the sweep costs seconds, and a window that costs seconds before
@@ -1914,8 +2010,8 @@ impl Startup {
                 out.settings = true;
             } else if arg == "--fetch-models" {
                 out.fetch_models = true;
-            } else if arg == "--live" {
-                out.live = true;
+            } else if arg == "--demo" {
+                out.demo = true;
             } else if arg == "--send" {
                 match args.next() {
                     Some(text) => out.send = Some(text),
@@ -1936,12 +2032,11 @@ impl Startup {
                 return Err(format!("{USAGE}\nunknown option: {arg}"));
             }
         }
-        Ok(out)
-    }
+        Ok(out)    }
 }
 
 const USAGE: &str =
-    "usage: baudet-ui [--screenshot=<file.png>] [--workspace=<folder>] [--settings] [--fetch-models] [--endpoint=<address>] [--live] [--send=<question>] [--discover]";
+    "usage: baudet-ui [--screenshot=<file.png>] [--workspace=<folder>] [--settings] [--fetch-models] [--endpoint=<address>] [--demo] [--send=<question>] [--discover]";
 const HELP: &str = "
 Baudet - a local-first coding assistant
 
@@ -1955,11 +2050,13 @@ usage: baudet-ui [option]
                         the picture waits for the listing so it cannot miss the fetch)
   --endpoint <address>  point the panel at <address> on startup, instead of the stored endpoint
   --endpoint=<address>  (needed with --fetch-models whenever the server is not the default)
-  --live                send turns to the stored endpoint instead of the scripted player;
-                        it needs a protocol in the settings file, which Scan endpoint writes
-  --send <question>     on startup, ask <question> of the live server (with --screenshot, the
-                        picture waits for that turn to settle); it needs --live
-  --send=<question>     (a window with --live but no --send shows its scripted demo)
+  --demo                answer from the scripted player instead of the stored endpoint. The
+                        window talks to the stored endpoint by default; this flag is the
+                        exception and exists for headless pictures, which must look the same
+                        everywhere
+  --send <question>     on startup, ask <question> (with --screenshot, the picture waits for
+                        that turn to settle); a --demo window keeps its own fixed demo text
+  --send=<question>
   --discover            list the local servers that answer a turn, say which dialect each
                         answers in, and exit without opening a window
   -h, --help            show this text";
@@ -2015,7 +2112,7 @@ pub fn run_from(startup: Startup) -> eframe::Result {
     let settings = startup.settings;
     let fetch_models = startup.fetch_models;
     let endpoint = startup.endpoint.clone();
-    let live = startup.live;
+    let demo = startup.demo;
     let shot_send = startup.send.clone();
     // Chosen here rather than inside the closure, because the answer comes from the settings file and
     // nothing in the creation context, and because `startup` is moved into that closure below.
@@ -2026,9 +2123,26 @@ pub fn run_from(startup: Startup) -> eframe::Result {
         Box::new(move |cc| {
             palette::install(&cc.egui_ctx);
             let mut app = TranscriptApp::with_backend(backend);
-            if let Some(reason) = fell_back {
-                app = app.with_status(reason);
+            // De drie toestanden van `chosen_backend`, elk met eigen woord in de kop: een server
+            // (met of zonder wat erbij geleerd is), een terugval, of een script waar om gevraagd was.
+            // De volgorde is de volgorde van de vraag, niet van de arm: eerst `--demo`, want wie er
+            // om vroeg, krijgt geen terugvaltekst. Omdat `chosen_backend` voor `--demo` geen regel
+            // meebrevert, mag deze arm niet op `Some` wachten -- dat was stil defect: de demo-tak
+            // van `with_demo` werd nooit bereikt en het venster toonde "scripted player: " alsof er
+            // iets mis was.
+            // Zeg bij het openen, ook op stderr, wat er draait, en zet dat woord op de kop vóórdat
+            // `with_chosen_backend` het overneemt: een venster dat zonder tekst opent en uit het
+            // script antwoordt, wordt anders als een wachtende server gelezen.
+            let balk = status_balk(
+                startup.demo,
+                fell_back.as_deref(),
+                endpoint.as_deref().map(|address| address.to_string_lossy().into_owned()),
+            );
+            if screenshot.is_none() {
+                eprintln!("baudet: {balk}");
             }
+            app = app.with_status_balk(balk.clone());
+            app = with_chosen_backend(app, startup.demo, fell_back);
             if let Some(path) = &workspace {
                 app = app.with_workspace(path);
             }
@@ -2038,12 +2152,13 @@ pub fn run_from(startup: Startup) -> eframe::Result {
             if let Some(address) = &endpoint {
                 app = app.with_endpoint(&address.to_string_lossy());
             }
-            if live {
-                // The panel's choices reach the session over the same channel a save uses, so a
-                // window opened with --live asks the stored model from its first turn instead of
-                // leaving that to the endpoint. Only for a live window: the scripted player's answer
-                // is the picture the screenshots are taken of, and it must not be stamped with a
-                // model nobody sent it to.
+            if !demo {
+                // De keuzes van het paneel reizen over hetzelfde kanaal als een opslag mee naar de
+                // sessie, dus de eerste beurt vraagt al het model en het niveau dat op schijf staat;
+                // wie ze koos, hoefde ze niet nog eens te typen. Buiten de scriptspeler alleen:
+                // `draft()` leest het **bestand**, en dat woord is aan de scriptspeler nooit gegeven
+                // — een antwoord uit een script met een modelstempel signeren is precies de
+                // misleiding die deze regel al weigerde.
                 let choices = app.settings.draft().ok();
                 let _ = app.intents.send(Intent::Configure {
                     model: choices.as_ref().and_then(|draft| draft.model.clone()),
@@ -2056,10 +2171,12 @@ pub fn run_from(startup: Startup) -> eframe::Result {
             }
             if let Some(path) = &screenshot {
                 app = app.with_screenshot(path);
-                // A live window drawing a picture asks the server its own question, so the shot can
-                // capture a real turn settling. Without --live the demo stands; without a question
-                // there is nothing to ask, and inventing one is the endpoint's owner's decision.
-                if live {
+                // Een venster dat een beeld tekent, vraagt zijn eigen vraag, zodat het beeld een
+                // beurt ziet landen. Bij de scriptspeler heeft die vlag geen betekenis: de demo heeft
+                // haar eigen vaste tekst en dat is het beeld waar de referentie-plaatjes tegen
+                // gehouden worden. Zonder `--send` is er niets te vragen, en een vraag verzinnen is
+                // de beslissing van de eigenaar van de endpoint.
+                if !demo {
                     if let Some(question) = &shot_send {
                         app = app.with_shot_send(question.clone());
                     }
@@ -2070,31 +2187,119 @@ pub fn run_from(startup: Startup) -> eframe::Result {
     )
 }
 
-/// The backend this window will answer with: a server when `--live` can name one, the scripted
-/// player otherwise.
+/// Zet het venster op de backend die `chosen_backend` koos, en laat de kop passen.
 ///
-/// Returns the fallback's reason beside the backend rather than returning an error, because "no
-/// server tonight" is not a reason to refuse to start a window: the scripted transcript is what the
-/// screenshots and the demo are made of, and a person who forgot to scan an endpoint still gets the
-/// app. What it must not get is the impression the answers came from a model, which is what the
-/// reason in the header is for.
-fn chosen_backend(startup: &Startup) -> (Arc<dyn Backend>, Option<String>) {
-    if !startup.live {
+/// Drie toestanden en geen vierde: de vlag van `--demo` spreekt eerst, want wie om een script vraagt,
+/// krijgt geen terugvaltekst. Daarna maakt de melding het verschil tussen een terugval die iets te
+/// verklaren heeft en een server die niets te melden heeft.
+///
+/// Deze beslissing stond in de vensterfabricage en is hieruit getrokken, omdat ze één beurt geleden
+/// stil defect was: `Some(reason) if startup.demo` wachtte op een melding die `--demo` nooit mee-
+/// brengt, dus bestond de demo-tak niet en toonde elk scriptvenster "scripted player: " met een
+/// ledige reden. Een beslissing van drie regels die alleen in een venster bestaan kan, is een
+/// beslissing die niemand testen kan.
+/// Wat de kop van een geopend venster over de gekozen backend moet zeggen.
+///
+/// Drie gevallen, en geen enkel ledig: een ledige balk oogt als een server die wachtend is, en zo
+/// werd een scriptrun als defect gelezen. `fell_back` is wat `chosen_backend` als tweede waarde
+/// meegaf; voor `--demo` is die ledig, dus komt het woord hier vandaan. Een server met een ledige
+/// melding toont de endpoint die het venster werkelijk draagt.
+pub fn status_balk(demo: bool, fell_back: Option<&str>, endpoint: Option<String>) -> String {
+    if demo {
+        return "scripted player: asked for with --demo".to_string();
+    }
+    match fell_back {
+        Some(reason) if !reason.is_empty() => reason.to_string(),
+        _ => match endpoint {
+            Some(address) if !address.is_empty() => format!("server: {address}"),
+            _ => "server: the stored endpoint".to_string(),
+        },
+    }
+}
+
+pub fn with_chosen_backend(app: TranscriptApp, demo: bool, fell_back: Option<String>) -> TranscriptApp {
+    if demo {
+        // Een scriptvenster verklapt zichzelf in de kop: een lege balk oogt als een server die
+        // wachtend is, en zo werd een scriptrun als defect gelezen.
+        app.with_demo("scripted player: asked for with --demo".to_string())
+    } else {
+        match fell_back {
+            Some(reason) => app.with_status(reason),
+            None => app.with_server(String::new()),
+        }
+    }
+}
+
+/// Het backend waarop dit venster antwoordt: **de server**, tenzij `--demo` om de scriptspeler vroeg.
+///
+/// De volgorde is die van de origineler en niet van mij: `AppState.kt:75` kent één fabriek
+/// (`gatewayFactory = { ResponsesGateway(it) }`); het scripted backend staat daar alleen in de doc van
+/// de naad (`ModelGateway.kt:8`, `TurnSource.kt:9`) als **test**-hulpmiddel. Dit venster deed het
+/// omgekeerde: standaard uit een script, en pas op `--live` naar een server. Het gevolg is de klacht
+/// "we hebben nog niet eens een call naar het model vanuit de chat" — gemeten ging er geen enkele
+/// aanvraag uit zolang die vlag ontbrak.
+///
+/// Wat hier van mij is en binnen deze functie blijft: de scan. Een dialect raden is verboden
+/// (`baudet_settings::Settings::protocol`: een geraden dialect stuurt een voor de ene server gebouwde
+/// beurt naar de andere), dus zónder protocol gaat er niets de wire op. Het adres staat dan al wél
+/// in het bestand, en de scan is precies het middel dat de persoon daarvoor in handen heeft — de knop
+/// `Scan endpoint`. Die vraag wordt daarom een keer per venster gesteld, vóór de eerste toets, door
+/// dezelfde kode als de knop en `--discover` (`scan_endpoint`), en het gevonden dialect gaat via
+/// `write` terug naar dat bestand. Lukt het niet, dan tekent het venster de scriptspeler met de reden
+/// in de kop en gaat de composer uit (zie `composer`): niemand krijgt een knop die niets doet.
+pub fn chosen_backend(startup: &Startup) -> (Arc<dyn Backend>, Option<String>) {
+    if startup.demo {
         return (TranscriptApp::demo_backend(), None);
     }
-    // Read the file the window itself would read, rather than trusting a copy: the dialect and the
-    // endpoint have to be the ones a save would write, or the header could claim a server the
-    // settings panel does not show.
+    // Lees het bestand dat het venster zelf ook leest, in plaats van een kopie te vertrouwen: dialect
+    // en endpoint moeten die zijn die een opslag zou schrijven, anders kan de kop een server noemen
+    // die het ingestpaneel niet toont.
     let file = baudet_settings::SettingsFile::default_location();
-    let settings = file.read().settings().clone();
-    match endpoint_from_settings(&settings).and_then(|endpoint| {
-        let reasoning = settings.reasoning.clone();
-        ResponsesBackend::new(endpoint, reasoning)
-            .map(|backend| Arc::new(backend) as Arc<dyn Backend> as _)
-            .map_err(|error| error.to_string())
-    }) {
-        Ok(backend) => (backend, None),
-        Err(problem) => (TranscriptApp::demo_backend(), Some(format!("scripted player: {problem}"))),
+    let mut settings = file.read().settings().clone();
+    match endpoint_from_settings(&settings) {
+        Ok(endpoint) => return live_backend(&settings, endpoint, None),
+        Err(reason) => {
+            // Alleen dit geval is een vraag aan de server waard: een kapot adres, een ontbrekende
+            // sleutel of een geweigerde beurt levert een scan die niets verklaart.
+            if settings.protocol_word().is_some() {
+                return (TranscriptApp::demo_backend(), Some(format!("scripted player: {reason}")));
+            }
+        }
+    }
+    let address = settings.base_url.trim().to_string();
+    let dialect = match scan_endpoint(&address, settings.resolved_key()) {
+        Ok(outcome) => outcome.protocol.map(|word| word.word().to_string()),
+        Err(_) => None,
+    };
+    let Some(word) = dialect else {
+        return (
+            TranscriptApp::demo_backend(),
+            Some(format!("scripted player: no protocol and no server answered on {address}")),
+        );
+    };
+    // Terug naar het bestand, via dezelfde deur als elk opslaan: een scan van deze knop en een scan
+    // van de persoon mogen niet twee verschillende verhalen achterlaten.
+    settings.protocol = Some(word.clone());
+    let _ = file.write(&settings);
+    match endpoint_from_settings(&settings) {
+        Ok(endpoint) => live_backend(&settings, endpoint, Some(format!("scanned {address}: {word}"))),
+        Err(reason) => (TranscriptApp::demo_backend(), Some(format!("scripted player: {reason}"))),
+    }
+}
+
+/// De vervoerder voor dit venster, met de regel die de kop dan toont.
+///
+/// Het redeneerniveau gaat uit het bestand mee; de overige keuzes reizen over `Intent::Configure`,
+/// want die mogen niet met een lopende beurt racen.
+fn live_backend(
+    settings: &baudet_settings::Settings,
+    endpoint: Endpoint,
+    notice: Option<String>,
+) -> (Arc<dyn Backend>, Option<String>) {
+    let reasoning = settings.reasoning.clone();
+    match ResponsesBackend::new(endpoint, reasoning) {
+        Ok(backend) => (Arc::new(backend) as Arc<dyn Backend>, notice),
+        Err(error) => (TranscriptApp::demo_backend(), Some(format!("scripted player: {error}"))),
     }
 }
 
