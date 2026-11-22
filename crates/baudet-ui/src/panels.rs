@@ -61,6 +61,11 @@ pub struct Workspace {
     /// "no folder linked" voor beide zou een rechtenontzegging verbergen als een afwezigheid, en
     /// iemand dan op de verkeerde plek gaan zoeken (bij de ingest, niet bij de maprechten).
     message: Option<&'static str>,
+    /// Of namen met een punt mee mogen in de boom: het vinkje `Hidden files` van
+    /// `FileTreePanel.kt:97`. De origineler herbouwt de hele boom bij elke wijziging van dat
+    /// vinkje (`hiddenBox.addActionListener { rebuild() }`); in immediate mode is dit veld zelf
+    /// de herbouw, want de volgende pass filtert ermee.
+    show_hidden: bool,
 
     /// Whether the current folder has been probed. Opening a folder and switching to another are
     /// one event -- "this folder is now the subject" -- so the caller refreshes on the first folder
@@ -114,6 +119,17 @@ impl Workspace {
         self.message
     }
 
+    /// Of het vinkje `Hidden files` aan staat.
+    pub fn show_hidden(&self) -> bool {
+        self.show_hidden
+    }
+
+    /// Zet het vinkje. De origineler herbouwt de hele tree bij zo'n klik; hier is de boom een
+    /// immediate-mode lijst, dus het vlaggen is de herbouw.
+    pub fn set_show_hidden(&mut self, show: bool) {
+        self.show_hidden = show;
+    }
+
     /// The folder being shown, or `None` when nothing has been chosen.
     pub fn cwd(&self) -> Option<&str> {
         (!self.cwd.is_empty()).then_some(self.cwd.as_str())
@@ -132,7 +148,13 @@ impl Workspace {
             // links loop, and a walk that loops during a paint pass is a hung window.
             let is_dir = file_type.is_dir() && !file_type.is_symlink();
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') || (is_dir && IGNORED_DIRS.contains(&name.as_str())) {
+            // Twee filters, twee betekenis. Een punt-naam is een *voorkeur* van de persoon —
+            // `FileLister.kt:20` (`if (!showHidden && name.startsWith(".")) continue`) en het
+            // vinkje erboven. De bouw-uitgang-filter is dat niet: `FileTreePanel`-boom toont die
+            // nóóit, want `target` en `node_modules` zijn geen projectbron, en een boom die die
+            // toont zodra iemand verborgen bestanden wil zien, is een boom die het paneel vult
+            // met duizend rijen die niemand zocht.
+            if (!self.show_hidden && name.starts_with('.')) || (is_dir && IGNORED_DIRS.contains(&name.as_str())) {
                 continue;
             }
             names.push((name, entry.path(), is_dir));
@@ -224,7 +246,37 @@ pub fn file_tree_controls(
     // Geen eigen `Panel`: de mapkinderen delen de rechterstrook met `changes_body`, zodat egui
     // hier één flank overhoudt, zoals de Kotlin `SplitPane`.
     {
+        let root = crate::app::root_ui_id(ui.ctx());
         ui.strong("Files");
+        // De knoppen-rij van de origineler: `[Refresh] [vinkje Hidden files]`
+        // (`FileTreePanel.kt:126-131`, met de woorden uit `Key.kt:375` en `:380`).
+        // Een eigen rij en niet aangeplakt bij de map-rij hieronder: de checkbox is 18 pt hoog
+        // en gemeten 86,7 pt breed, de `Refresh`-knop 53 pt. Bij 20 pt veldhoogte zou die
+        // rij op de paneelvloer van 180 pt het pad op nul terugbrengen, en afgeknepen tekst is
+        // precies de silent failure die `tests/folder_row.rs` bestrijdt. De origineler kent die
+        // scheiding ook: zijn knoppen-rij staat bóven de kaarten met de boom, niet erin.
+        let refresh_clicked = ui
+            .scope_builder(
+                egui::UiBuilder::new().id(root.with((TREE_REFRESH, "refresh"))).sense(egui::Sense::click()),
+                |ui| {
+                    ui.add(egui::Label::new("Refresh").selectable(false));
+                },
+            )
+            .response
+            .clicked();
+        // Het vinkje naast de knop, niet op eigen reinforcement: het bedient dezelfde boom.
+        let mut hidden = workspace.show_hidden();
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut hidden, "Hidden files").changed() {
+                workspace.set_show_hidden(hidden);
+            }
+        });
+        // Verversen heeft pas zin als er een map staat — ``showMessage`` zet de knop in de
+        // origineler ook op `isEnabled = false` (`FileTreePanel.kt:229`). Weigeren in plaats van
+        // verbergen: een adres dat verdwijnt, kan een test niet meer vinden.
+        if refresh_clicked && workspace.cwd().is_some() {
+            requested = workspace.cwd().map(str::to_string);
+        }
         // Eén rij: het veld zo breed als overblijft, de knoppen ernaast. Het veld blijft de plek om
         // te typen — een dialoog die een pad kiest, is een toevoeging en geen vervanging, want een
         // pad dat iemand uit het hoofd typt, is sneller dan drie klikken door een boom.
@@ -249,7 +301,6 @@ pub fn file_tree_controls(
         // de paneel-kolom, dus is het adres van buiten niet te reconstrueren (idem `TABSTRIP`). De
         // wikkel draagt click-sense, maar de tekst-invoer leeft op het veld erin (Sense::focus), niet
         // op de wikkel; de wikkel bestaat zodat een test dit veld kan *vinden* om erin te typen.
-        let root = crate::app::root_ui_id(ui.ctx());
         ui.horizontal(|ui| {
             // `with_main_wrap(false)`: zonder die regel wrapt de tweede knop naar een eigen rij zodra
             // het veld op 0 staat, en dan valt de rij alsnog buiten de rand (gemeten bij 130 pt).
@@ -766,6 +817,12 @@ pub const FOLDER_FIELD: &str = "folder-path-field";
 /// plus dit zout is wél van buiten te vinden en te klikken, zoals `TABSTRIP`.
 pub const FOLDER_OPEN: &str = "folder-open";
 
+/// Het adres van de `Refresh`-knop in de rechterkop: `Key.FileTreeRefreshButton`
+/// (`Key.kt:375`). Een kale knop in de kolom van het paneel adresseert relatief aan die kolom
+/// en is van buiten niet te reconstrueren — hetzelfde bezwijken als de tabstrip en `Open`
+/// al hadden — dus ook hier een wikkel op een wortel-adres.
+pub const TREE_REFRESH: &str = "file-tree-refresh";
+
 /// Vraag het besturingsselt om een map en geef het gekozen pad terug.
 ///
 /// `Option` en geen paniek: iemand die de dialoog wegklikt, heeft niets gekozen, en dat is geen
@@ -1273,6 +1330,27 @@ mod tests {
         workspace.open(&dir.path().to_string_lossy());
         assert_eq!(workspace.message(), None, "wie zelf een map kiest, hoeft geen uitleg meer");
         assert_eq!(workspace.cwd(), Some(dir.path().to_string_lossy().as_ref()));
+    }
+    /// Het vinkje `Hidden files` uit `FileTreePanel.kt:97`: de punt-namen gaan mee, de
+    /// bouw-uitgang niet. Dat onderscheid is de hele inhoud van het item — `FileLister.kt:20
+    /// negeert alleen het punt-deel`, en de `IGNORED_DIRS`-filter kent de origineler niet in
+    /// die lijst maar in zijn eigen boom, waar hij ook met het vinkje aan blijft gelden.
+    #[test]
+    fn verborgen_stukken_mogen_mee_na_het_vinkje() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".github")).unwrap();
+        std::fs::create_dir_all(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join(".env"), "x").unwrap();
+        std::fs::write(dir.path().join("main.rs"), "x\n").unwrap();
+        let mut workspace = Workspace::default();
+        assert!(!workspace.show_hidden(), "de origineler start zonder vinkje (`JCheckBox` aan)");
+        let stil = workspace.tree_at(dir.path());
+        assert_eq!(stil.files.iter().map(|p| name_of(p)).collect::<Vec<_>>(), vec!["main.rs".to_string()]);
+        // Aan: de punt-namen komen erbij, `target` blijft buiten de boot.
+        workspace.set_show_hidden(true);
+        let open = workspace.tree_at(dir.path());
+        assert_eq!(open.files.iter().map(|p| name_of(p)).collect::<Vec<_>>(), vec![".env".to_string(), "main.rs".to_string()]);
+        assert_eq!(open.dirs.iter().map(|p| name_of(p)).collect::<Vec<_>>(), vec![".github".to_string()], "`target` is geen verborgen naam, maar bouw-uitgang");
     }
     #[test]
     fn folders_are_listed_before_files() {

@@ -706,6 +706,12 @@ impl TranscriptApp {
         self.show_filetree
     }
 
+    /// Of het `Hidden files`-vinkje in de rechterkop aan staat. Idem `filetree_visible`: dezelfde
+    /// staat die de paint-pass tekent, dus de test leest wat het venster toont.
+    pub fn show_hidden_tree(&self) -> bool {
+        self.workspace.show_hidden()
+    }
+
     /// De linkersidebar zelf, voor tests die de catalogus of de rechtenstatus willen lezen zonder
     /// te raden welke pixel erbij hoort.
     pub fn sidebar(&self) -> &SidebarModel {
