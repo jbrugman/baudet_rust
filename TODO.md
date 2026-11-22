@@ -52,17 +52,19 @@ tolerante eventnaam-census (onbekende event nooit fataal); redeneer-tokens apart
 compaction (geen /compact-endpoint); toolloop runt onafhankelijke **reads parallel (pool ≤2)**,
 writes/gepinde calls blijven serieel.
 
-## A. Persistentielaag — crate `baudet-store` is er, maar H2→Rust-mapping (NU, voor alles)
-- [ ] Keuze persistentie-rust: rusqlite vs sled vs JSON (H2 is JVM-only). **Onzeker → beslisregel: tag + branch + README-besluit.**
-- [ ] ProjectStore / SettingsStore / TranscriptStore-tabellen, gespiegeld uit `store/{ProjectStore,SettingsStore,TranscriptStore,H2Store}.kt`.
-- [ ] Data-dir per gebruiker (macOS `~/Library/Application Support/Baudet`, override `--home`). Kotlin README "Build and run".
+## A. Persistentielaag — JSON-catalogus boven rollouts (branch `codex/store-backend`)
+- [x] Persistentiekeuze: JSON-catalogus voor de project-/sessie-index; rollout blijft JSONL. Geen rusqlite of sled, omdat H2 JVM-only is en de offline crate-boom geen SQLite-bouw toelaat. Besluit en grens: README.
+- [x] Vervanging van de drie H2-interface-taken: SettingsStore blijft `baudet-settings`; TranscriptStore blijft `baudet-store`; ProjectStore komt in `baudet-projects::catalog` (projects + sessie-index) uit `store/{ProjectStore,SettingsStore,TranscriptStore,H2Store}.kt`.
+- [x] Data-dir-deel: catalogus gebruikt `baudet_store::data_dir()`, met `BAUDET_HOME`-override. Een latere `--home`-UI-optie resteert als UI-aansluiting.
 
-## B. Project- en permissiedomein — crate `baudet-projects` (na A)
-- [ ] `Project { id, name, folderPath?, permissions-bitmask, archived, createdAt }` — `project/Project.kt`.
-- [ ] `FolderPermission { Read=1, Write=2, Execute=4 }` — `project/FolderPermission.kt`.
-- [ ] `Permissions`-bitmask (encode/decode/has/with) — `project/Permissions.kt`.
-- [ ] `ToolMode { Off, Ask, Auto }` — `config/ToolMode.kt`; `ContextStrategy { KeepLast, Rolling, StopAtLimit }` — `config/ContextStrategy.kt`.
-- [ ] `ProjectIds`/`SessionIds` — `project/ProjectIds.kt`, `session/SessionIds.kt`.
+## B. Project- en permissiedomein — crate `baudet-projects`
+- [x] `Project { id, name, folderPath?, permissions-bitmask, archived, createdAt }` — `project/Project.kt`.
+- [x] `FolderPermission { Read=1, Write=2, Execute=4 }` — `project/FolderPermission.kt`.
+- [x] `Permissions`-bitmask (encode/decode/has/with) — `project/Permissions.kt`.
+- [x] `ProjectIds`/`SessionIds` — `project/ProjectIds.kt`, `session/SessionIds.kt`: `p-`/`s-` plus acht hex-tekens.
+- [x] Sidemap-project-/sessieindex met actieve-volgorde, cascade, titeloverride, afgeleide titel (eerste gebruikersregel, cap 48), meest-recent-eerst en atomair schrijven. Tests: 10 groen; workspace: 144 groen.
+- [ ] `ToolMode { Off, Ask, Auto }` — `config/ToolMode.kt`; `ContextStrategy` is reeds in `baudet-store::window`, maar moet bij item F aan de settings-/tool-gate gekoppeld worden.
+- [ ] UI-koppeling van deze catalogus naar de linkersidebar (item C).
 - Embed-match: "rechten lezen schrijven uitvoeren" → Permissions.kt 0.57, FolderPermission 0.53.
 
 ## C. Correcte vensterlay-out (na B)
