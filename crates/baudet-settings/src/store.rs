@@ -202,6 +202,9 @@ mod permissions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Het taalveld in de letterijke initializer hieronder is geen typewerk: `super::*` bringt
+    // `Settings` mee maar niet het type van zijn veld.
+    use baudet_i18n::Language;
 
     #[test]
     fn a_saved_file_reads_back_identical() {
@@ -232,6 +235,10 @@ mod tests {
             left_divider: 301,
             right_divider: 745,
             files_divider: 214,
+            // Evenmin de default: de taal gaat door een eigen leespoort (`parse_language`), en een
+            // rondreisje langs de default bewijst van zo'n veld niets - dan kan het zowel zijn
+            // weggeschreven als stil teruggevallen.
+            language: Language::Nl,
         };
         file.write(&settings).unwrap();
         assert_eq!(file.read().settings(), &settings);

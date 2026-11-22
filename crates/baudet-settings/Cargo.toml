@@ -11,6 +11,9 @@ license.workspace = true
 [dependencies]
 baudet-core = { workspace = true }
 baudet-store = { workspace = true }
+# De taal van de interface is een keuze en dus een instelling, maar de tabel zelf is compilatekst
+# zonder enige afhankelijkheid. Daarom mag deze crate tegen `baudet-i18n` aanlopen zonder cykel.
+baudet-i18n = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

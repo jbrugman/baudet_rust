@@ -129,6 +129,27 @@ publieke methoden (`add_project`, `set_permissions`, `answer_confirm`, …) dat 
 `tests/project_tree.rs` draaien tegen een echte egui-pass in een tijdelijke `BAUDET_HOME`, dus de
 knop is vindbaar via zijn adres in plaats van via een aanname over het scherm.
 
+## Besluit: de teksten zitten in een tabel, niet in bundles
+
+De origineler kent één enum `Key` met vier woorden per sleutel (`i18n/Key.kt`) en één `Texts`
+dat daaruit leest (`i18n/Texts.kt`). Die vorm is overgenomen: `baudet-i18n` draagt 264 sleutels
+in-en-de-taal, met namen uit `Key.kt` zodat een `.kt`-regel en een `.rs`-regel elkaar zonder
+woordenboek vinden. Bewust géén `.ftl`/`.po`-bundles: een typfout in een bundel is een
+runtime-verrassing, een typfout in de tabel is een compileerfout, en een ontbrekende vertaling
+bestaat in deze opbouw niet — de compiler laat een onvolledige tabel niet toe.
+
+Twee regels die het verschil maken:
+
+* **Een adres draagt geen taal.** `id_salt`-waarden en de id van een knop blijven letterlijk
+  staan (`UNASSIGNED` is het adres van de inbox, `Key::InboxNode` is wat er op de riem staat).
+  Zit de vertaling in het adres, dan staat een knoopje na een taalwissel "open" als een ander
+  knoopje en is wat iemand openzette kwijt.
+* **De taal is één waarde voor het hele proces.** `thread_local` leek handig en is meetbaar fout:
+  de werker-draad die een beurt bouwt, de test-draad die een bevestiging leest en de paint-draad
+  zijn drie draden, en per draad zou elke in een andere taal antwoorden. Nu een `AtomicU8`,
+  gezet uit het ingestellingenbestand bij het openen (`AppState.kt:195`) en bij het opslaan
+  (`Main.kt:74-82`, want `TipSave`: "The language switch is applied here too.").
+
 ## Besluit: twee pane-toggles, en git-kleuren in beide bomen
 
 **Twee toggles.** `Main.kt` zet in zijn NORTH-toolbar één knop op `BorderLayout.WEST` (de sidebar) en
