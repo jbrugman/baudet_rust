@@ -157,8 +157,14 @@ writes/gepinde calls blijven serieel.
   - `baudet-settings` — zes velden (`context_budget_tokens`, `context_strategy`, `context_keep_recent_messages`, `use_server_session`, `learned_context_window`, `learned_context_key`) met de standaardwaarden van de origineler, `ContextStrategy { RecentMessages (default), RollingWindow, StopAtLimit }` als `recent|rolling|stopatlimit` in het bestand, plus `Settings::context_limits()` als **enige** brug naar de store en `Settings::learn_context_window`. De vloer van 1 voor de recenteteller zit bij het lezen, niet in het bestand — dezelfde eigendomssplitsing als bij `max_tool_iterations`.
   - Twee fouten onderweg, beide testzijde: een assert die `context_ceiling() == 0` eiste bij een **bekend** model (Kotlin's `hardCeilingTokens()` kent dan geen 0 — 0 bestaat alleen zonder venster én zonder budget) en een `8_000.min(24_576)` als verwachting, wat door constructie niet kon mislukken. De settings-view wist de zes velden bovendien bij élke opslag terug naar de standaard; ze gaan nu als kopie mee.
   - **Restant, bewust niet opgehaald:** `Transcript` (hierna), het **samenstellen** van de systeemprompt uit basis + samenvatting + inkortingsregel op de draad zelf, en `learn_context_window` aanroepen bij een geweigerde beurt — dat hangt aan de retry-lus in `send()` (`AppState.kt:812-860`), en die lus heeft een sessie nodig, dus item §E. `ContextLimits` en `Settings` staan er klaar voor.
-- [ ] `Transcript` scrub/split/fit — `tool/Transcript.kt`.
-- [ ] `Transcript` scrub/split/fit — `tool/Transcript.kt`.
+- [x] `Transcript` scrub/split/fit — `tool/Transcript.kt` → `crates/baudet-tool/src/transcript.rs`.
+      Port van `scrub`, `fit`, `current_input`, `split_for_window`, `for_call` en `for_loop`. De scanner
+      volgt de klasse `[^|>]` woordelijk (wijst `|` en `>` af, maar géén `<`), dus `<|a|b|>` is één token
+      en `<|a|` zonder sluiting blijft tekst. Grenzen gemeten, niet bedacht (de opmerking “één bron past niet
+      naast de noot” klopte niet: bij cap 112 past één bron van 112 net wél, dus noot + één). De
+      noot (165 met `{first}=9`) wordt na de selectie vooraan gezet en telt niet mee bij het kiezen van
+      de staart, dus noot + bronnen mag de cap overschrijden. Onder `StopAtLimit` geldt de vaste
+      replay-klem van 48 000, niet het budget van de aanroeper. 9 testen groen; workspace groen (459).
 - [ ] `Compactor`/`CompactionPlan`/`CompactionOutcome` (vouwen over meerdere calls, eerlijk bij niets) — `session/Compactor*.kt` + compaction-fold.puml.
 
 ## G. Git- en diff-laag (nodig voor C + E)

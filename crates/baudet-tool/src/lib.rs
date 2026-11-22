@@ -25,4 +25,5 @@ pub mod read_file;
 pub mod safe_commands;
 pub mod tool;
 pub mod tool_loop;
+pub mod transcript;
 pub mod turn_source;
