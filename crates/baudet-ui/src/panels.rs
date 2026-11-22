@@ -19,6 +19,7 @@
 use crate::layout::{self};
 use crate::palette;
 use crate::sidebar::{Confirm, NameAsk, PermissionState, Selection, SidebarModel, UNASSIGNED};
+use crate::app::root_ui_id;
 use baudet_core::{probe_changes, probe_git, ChangeKind, ChangedFile, GitMeta};
 use egui::{Color32, Panel, ScrollArea, Ui};
 use std::collections::HashMap;
@@ -252,11 +253,16 @@ pub fn file_tree_controls(
         // rij op de paneelvloer van 180 pt het pad op nul terugbrengen, en afgeknepen tekst is
         // precies de silent failure die `tests/folder_row.rs` bestrijdt. De origineler kent die
         // scheiding ook: zijn knoppen-rij staat bóven de kaarten met de boom, niet erin.
+        // Zelfde regel als `Add project`: de origineler heeft hier een `JButton`
+        // (`FileTreePanel.kt:98`), dus een afgebakende knop en niet platte tekst. Het vaste adres
+        // `(TREE_REFRESH, "refresh")` blijft, zodat tests/folder_open.rs het vindt.
         let refresh_clicked = ui
             .scope_builder(
-                egui::UiBuilder::new().id(root.with((TREE_REFRESH, "refresh"))).sense(egui::Sense::click()),
+                egui::UiBuilder::new()
+                    .id(root.with((TREE_REFRESH, "refresh")))
+                    .sense(egui::Sense::click()),
                 |ui| {
-                    ui.add(egui::Label::new("Refresh").selectable(false));
+                    ui.add(egui::Button::new("Refresh").sense(egui::Sense::hover()));
                 },
             )
             .response
@@ -346,6 +352,12 @@ pub fn file_tree_controls(
 /// bereikt het model via `MenuAction`, niet via een klik op een bekend id.
 pub const SIDEBAR_ADD: &str = "sidebar-add-project";
 
+/// De adressen van de twee bevestigingsknoppen van de naam- en bevestigingsriem, idem `SIDEBAR_ADD`.
+/// Zonder vast adres is "drukt op OK" van buiten niet te bewijzen: de riem zit in een
+/// `SidePanel`-kolom en adresseert relatief aan die kolom.
+pub const ASK_OK: &str = "sidebar-ask-ok";
+pub const CONFIRM_YES: &str = "sidebar-confirm-yes";
+
 /// De brief onder de boom heet daar `Folder permissions` (`Key.kt:321`), en `createTitledBorder`
 /// zet die titel bóven het vakje (`ProjectSidebar.kt:99`). Daaronder staat eerst de map zelf:
 /// het label `folder:` (`Key.kt:319`) naast zijn waarde, en die waarde is
@@ -387,11 +399,28 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
     frame.show(ui, |ui| {
         // --- bovenrij: één knop, één handeling per klik. ---
         let root = crate::app::root_ui_id(ui.ctx());
+        // De vraag en de bevestiging staan bij de knop die ze vraagt en niet onder aan het paneel.
+        // Reden is geen smaak: `JOptionPane.showInputDialog` (`ProjectSidebar.kt:229`) vraagt ook
+        // naast de knop, en wat onderaan de rijen belandde, viel bij een vol paneel ónder de
+        // scrollbalk en dus buiten het venster — gemeten: de OK van de naamvraag stond op y 840-859
+        // in een venster van 800 pt, en `interact_rect` kapt het deel buiten het scherm af
+        // (egui's `interact` klapt `interact_rect` terug op `max_rect`). Niet klikbaar, precies de
+        // "Add project doet niets"-klus. Boven blijven ze in één pass bereikbaar, zonder scrollen.
+        let vraag_open = model.ask_name.is_some() || model.confirm.is_some();
+        ask_and_confirm(ui, model, &mut intents);
+        if vraag_open {
+            ui.separator();
+        }
+        // Een echte `Button`, geen kale klikbare tekst: de origineler zet hier een `JButton`
+        // (`ProjectSidebar.kt:67`). De `scope_builder`-wikkel blijft, anders schuift het
+        // root-adres `(SIDEBAR_ADD, "add")` dat tests/tabs.rs en tests/project_tree.rs treffen.
         if ui
             .scope_builder(
-                egui::UiBuilder::new().id(root.with((SIDEBAR_ADD, "add"))).sense(egui::Sense::click()),
+                egui::UiBuilder::new()
+                    .id(root.with((SIDEBAR_ADD, "add")))
+                    .sense(egui::Sense::click()),
                 |ui| {
-                    ui.add(egui::Label::new("Add project").selectable(false));
+                    ui.add(egui::Button::new("Add project").sense(egui::Sense::hover()));
                 },
             )
             .response
@@ -404,7 +433,9 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
             model.start_name(NameAsk::NewProject, None);
         }
 
-        ui.separator();
+        if !vraag_open {
+            ui.separator();
+        }
 
         // --- de boom: projecten met hun sessies, dan de inbox. ---
         ScrollArea::vertical().id_salt("project-tree").auto_shrink([false, false]).show(ui, |ui| {
@@ -485,8 +516,6 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
             }
         }
 
-        // --- de tekst-riem en de bevestiging: een incident, geen vast onderdeel van de lay-out. ---
-        ask_and_confirm(ui, model, &mut intents);
     });
     intents
 }
@@ -548,11 +577,29 @@ fn permission_boxes(ui: &mut Ui, state: &PermissionState, model: &mut SidebarMod
 fn ask_and_confirm(ui: &mut Ui, model: &mut SidebarModel, intents: &mut Vec<SidebarIntent>) {
     if let Some(ask) = model.ask_name.clone() {
         ui.separator();
-        ui.label(ask.prompt());
-        let field = ui.add(egui::TextEdit::singleline(&mut model.name_entry).hint_text("naam").desired_width(140.0));
-        let submit = field.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        ui.horizontal(|ui| {
-            if (ui.button("OK").clicked() || submit) && model.answer_name().is_some() {
+        // Vraag, veld en knoppen op één riem. De origineler zet die in één dialoog
+        // (`JOptionPane.showInputDialog`, `ProjectSidebar.kt:229`); als drie stapels onder elkaar
+        // verdween de vraag uit het oog en zonk de bevestigingsknop naar de paneelrand.
+        ui.horizontal_wrapped(|ui| {
+            ui.label(ask.prompt());
+            let field = ui
+                .add(egui::TextEdit::singleline(&mut model.name_entry).hint_text("naam").desired_width(90.0));
+            // Wie om een naam vraagt, wil er een typen: het veld krijgt de foyer mee, zodat Enter
+            // direct bevestigt in plaats van eerst een klik te vereisen.
+            field.request_focus();
+            let submitted = field.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let ok = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .id(root_ui_id(ui.ctx()).with((ASK_OK, "ok")))
+                        .sense(egui::Sense::click()),
+                    |ui| {
+                        ui.add(egui::Button::new("OK").sense(egui::Sense::hover()));
+                    },
+                )
+                .response
+                .clicked();
+            if (ok || submitted) && model.answer_name().is_some() {
                 // De intentie gaat alleen uit als de vraag iets opleverde: een lege naam bij een nieuw
                 // project is geen wijziging, dus het middenpaneel hoeft dan niets te laten vallen.
                 intents.push(SidebarIntent::Deleted);
@@ -565,9 +612,20 @@ fn ask_and_confirm(ui: &mut Ui, model: &mut SidebarModel, intents: &mut Vec<Side
     }
     if let Some(confirm) = model.confirm.clone() {
         ui.separator();
-        ui.label(confirm.prompt(model));
-        ui.horizontal(|ui| {
-            if ui.button("Verwijder").clicked() && model.answer_confirm(true).is_some() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(confirm.prompt(model));
+            let yes = ui
+                .scope_builder(
+                    egui::UiBuilder::new()
+                        .id(root_ui_id(ui.ctx()).with((CONFIRM_YES, "yes")))
+                        .sense(egui::Sense::click()),
+                    |ui| {
+                        ui.add(egui::Button::new("Verwijder").sense(egui::Sense::hover()));
+                    },
+                )
+                .response
+                .clicked();
+            if yes && model.answer_confirm(true).is_some() {
                 intents.push(SidebarIntent::Deleted);
             }
             if ui.button("Annuleer").clicked() {

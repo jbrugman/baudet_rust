@@ -18,7 +18,7 @@
 
 use baudet_projects::{FolderPermission, Permissions};
 use baudet_ui::sidebar::{Confirm, NameAsk, Selection, SidebarModel, SidebarOutcome};
-use baudet_ui::{root_ui_id, TranscriptApp, SIDEBAR_ADD};
+use baudet_ui::{root_ui_id, TranscriptApp, ASK_OK, SIDEBAR_ADD};
 use eframe::egui;
 use std::sync::{Mutex, MutexGuard};
 use tempfile::TempDir;
@@ -148,6 +148,46 @@ fn alleen_een_linkerklik_vraagt_om_een_projectnaam() {
     click_at(&ctx, &mut app, center, egui::PointerButton::Primary);
     paint_once(&ctx, &mut app);
     assert_eq!(app.sidebar().ask_name.as_ref(), Some(&NameAsk::NewProject), "de linkerklik daarna zette de vraag niet");
+}
+
+#[test]
+fn de_hele_add_project_stroom_eindigt_op_een_project() {
+    // De klacht was "add project werkt niet". De klik alleen bewijst daar te weinig van: die zet
+    // slechts de vraag. Dit loopt de hele weg — klik, typ, OK — en assert het resultaat: een project
+    // in de catalogus.
+    //
+    // Twee dingen kosten deze test zijn bestaansrecht, en beide zijn gemeten in plaats van aangenomen:
+    //  * de vraag-riem moet bóven de scrollbalk staan. Toen hij onder aan het paneel zat, viel zijn
+    //    OK in een 800 pt venster op y 840-859; egui kapt `interact_rect` daar af op het scherm, dus
+    //    de knop bestond, tekende, en kon niet geklikt worden.
+    //  * `read_response` leest het *vorige* pass, dus een riem die deze pass verscheen, is pas een
+    //    pass later te vinden. Daarom `paint_once` vóór het adres.
+    let (_guard, _home) = private_data_home();
+    let ctx = addressable_context();
+    let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+    paint_once(&ctx, &mut app);
+    let center =
+        ctx.read_response(root_ui_id(&ctx).with((SIDEBAR_ADD, "add"))).expect("de add-knop tekent").rect.center();
+    click_at(&ctx, &mut app, center, egui::PointerButton::Primary);
+    paint_once(&ctx, &mut app);
+    let ok_center = ctx
+        .read_response(root_ui_id(&ctx).with((ASK_OK, "ok")))
+        .expect("de OK van de naamvraag tekent geen response")
+        .rect
+        .center();
+
+    // Typ alsof het veld de foyer heeft — dat krijgt het mee bij het openen van de vraag.
+    for letter in "Werp".chars() {
+        let mut frame = input();
+        frame.events.push(egui::Event::Text(letter.to_string()));
+        ctx.run_ui(frame, |ui| app.paint(ui)).drop_without_applying_deltas();
+    }
+    click_at(&ctx, &mut app, ok_center, egui::PointerButton::Primary);
+    paint_once(&ctx, &mut app);
+
+    let names: Vec<String> = app.sidebar().catalog().list_projects().into_iter().map(|p| p.name).collect();
+    assert_eq!(names, vec!["Werp".to_string()], "de stroom eindigde niet op het project");
+    assert!(app.sidebar().ask_name.is_none(), "de vraag bleef na OK staan");
 }
 
 // ---------------------------------------------------------------------------------------------
