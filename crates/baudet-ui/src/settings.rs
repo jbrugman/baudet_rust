@@ -718,23 +718,43 @@ pub const FIELD_ENDPOINT: &str = "settings-endpoint-field";
 /// [`form_row`] terug op etiket-boven-veld in plaats van het etiket te kappen.
 const LABEL_COLUMN: f32 = 168.0;
 
-/// De lucht tussen twee formulierrijen, in pt.
+/// De lucht tussen twee formulierrijen, gemeten tussen hun **kaders**, in pt.
 ///
 /// De origineler zet `Insets(4, gap, 4, gap)` op élke cel van zijn `GridBagLayout`
-/// (`Form.kt:16`), dus twee rijen scheiden daar 4 + 4 = 8 pt. Dit formulier stond op
-/// `item_spacing.y` van het venster — 6 pt — en dat merkte men: de etiketrijen plakten tegen elkaars
-/// tekstvelden.
+/// (`Form.kt:16`), dus twee rijen scheiden daar 4 + 4 = 8 pt. 8 is daarom de maat, en geen smaak:
+/// minder is een verslechtering ten opzichte van wat werkt.
 ///
-/// 8 en niet 4, want deze waarde is de **hele** tussenruimte en niet de marge van één cel. In Swing
-/// gelden de ondermarge van de cel erboven en de bovenmarge van deze cel allebei (`Insets(4, ..)` =
-/// 4 + 4), terwijl `add_space` hier de enige ruimte is: 4 pt op een letter van 12-13 pt is één derde
-/// regel, en dat is precies het "plakt tegen elkaar" uit de klacht. 8 pt is de ondergrens van die
-/// meting, en alles wat hier kleiner is dan de origineler, is een verslechtering die niemand vroeg.
+/// Wat deze waarde **niet** is, is het getal dat in `add_space` gaat. Een veld van 20 pt gereserveerd
+/// tekent een kader van 28 pt — `FrameShape`(inner) 20 + 2×`button_padding`(4) + 2×`stroke`(1), en
+/// 4 pt daarvan valt buiten de reservering. Gemeten met twee identieke velden onder elkaar en
+/// `add_space(g)` ertussen: `g` = 0 → −5 pt, 6 → 1, 8 → 3, 12 → 7. De lucht tussen de kaders is dus
+/// `g − 5`, en wie 8 pt tussen de kaders wil, moet 13 reserveren. Daarom gaat [`ROW_GAP`] hier door
+/// [`lucht_voor_kader`] en staat dit document boven die functie, want deze 5 pt zijn precies de
+/// "geen ruimte" uit de klachten over base-url/fetch en reasoning/top_p.
 pub const ROW_GAP: f32 = 8.0;
+
+/// de `add_space` die [`ROW_GAP`] pt lucht tussen twee kaders oplevert, in pt.
+///
+/// Het verschil is de kader-uitssteek, gemeten en niet verzonnen. Een tekstveld van 20 pt tekent 28
+/// (vijf pt meer dan zijn reservering), een knop en een kiezer 26 (één pt minder), een veld met een
+/// `add_enabled`-wikkel 27 (drie). De strakste paar in dit formulier is dus het veld-veld-paar, en
+/// [`lucht_voor_kader`] rekent tegen die aan — een knop onder een veld krijgt er drie pt bij.
+///
+/// Waarom hier een functie en niet een hogere `ROW_GAP`: `add_space` is de enige ruimte tussen twee
+/// `form_row`'s (`layout.rs:757` past `item_spacing.y` ná de widget toe), dus deze correctie hoort op
+/// de plek die de lucht ingeest en niet in de maat zelf — `ROW_GAP` blijft de 8 pt van de origineler,
+/// en de 5 gaan er wél in. Zonder deze functie staat élke rij van het formulier op 3 pt.
+fn lucht_voor_kader(g: f32) -> f32 {
+    if g <= 0.0 {
+        0.0
+    } else {
+        g + 5.0
+    }
+}
 
 /// De lucht rond een groepskop en tussen de knoppen onder een veld, in pt.
 ///
-/// Het dubbele van [`ROW_GAP`], want een kop is geen rij: hij opent een band en moet van de rijen
+/// Groter dan [`ROW_GAP`], want een kop is geen rij: hij opent een band en moet van de rijen
 /// eronder én erboven te onderscheiden zijn zonder kader of lijn. De origineler bereikt dat met een
 /// `TitledBorder` (`SettingsPanel.kt:143,165`), en diens rand inneemt ook ruimtes in. Dit formulier
 /// tekent geen kader, dus is de lucht het enige verschil tussen "kop van een band" en "nog een rij".
@@ -766,7 +786,7 @@ fn form_row_with_gap(ui: &mut Ui, boven: f32, label: impl Into<String>, build: i
     let text = dim(label);
     let taken = ui.available_size_before_wrap();
     if boven > 0.0 {
-        ui.add_space(boven);
+        ui.add_space(lucht_voor_kader(boven));
     }
     // Meten in plaats van gokken op een tekenbreedte. `into_galley` is de weg die de label zelf ook
     // gaat: hij lost de letter op zoals de stijl die voorschrijft (`widget_text.rs:742`) en een
@@ -820,8 +840,10 @@ pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<S
     // (temperature en topP tussen de beurtteller en reasoning). De eerste draagt geen lucht boven
     // zich, want hij hangt aan de scheiding erboven.
     sampling_rows(ui, view);
-    // Groep, dus geen lucht; de rijen eronder wel.
-    reasoning_row(ui, view, 0.0);
+    // De redeneer-kiezer hangt niet aan een band: hij volgt op `top_p`, dus hij draagt zijn
+    // rijlucht. Met 0.0 hier plakten zijn 26 pt hoge Combo Box en het vak erboven aan elkaar
+    // (gemeten: 309 < 313, dus 4 pt overlapping). De rijen eronder houden dezelfde maat.
+    reasoning_row(ui, view, ROW_GAP);
     tokens_row(ui, view);
     iterations_row(ui, view);
     parallel_row(ui, view);
@@ -919,6 +941,13 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
     // De knoppen zijn geen veld maar een bediening, en daarom zijn ze geen etiket-rij: ze staan op de
     // veldkolom, direct onder het adres, met een leeg etiketslot erlinks. Daarvoor stond de "Fetch
     // (GET /models)" plat tegen de linker rand, los van de kolom van het veld waarop hij hoort.
+    //
+    // De lucht boven de eerste knop is dezelfde ROW_GAP als tussen twee rijen, en niet het
+    // `item_spacing.y` van het venster: deze twee rijen staan buiten [`form_row`] en erven 6 pt,
+    // en een knop van 26 pt op 6 pt onder een veld van 28 pt **overlapt** dat veld (gemeten: de Fetch
+    // `Shape::Rect` begint 4 pt vóórdat het adresveld eindigt). `boven` is hier de ondergrens, want
+    // 0.0 betekent elders "deze rij hangt aan een band" en mag hier niets kwijtraken.
+    ui.add_space(lucht_voor_kader(boven.max(ROW_GAP)));
     let fetch_now = ui
         .horizontal(|ui| {
             ui.add_sized([LABEL_COLUMN, 20.0], egui::Label::new("").selectable(false));
@@ -929,7 +958,12 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
             .clicked()
         })
         .inner;
-    ui.add_space(ROW_GAP);
+    // Tussen de twee bedieningen gaat dezelfde lucht in als boven ze. Zonder deze regel resteert
+    // daar het `item_spacing.y` van het venster, en gemeten was dat een overlap: Fetch tekende op
+    // 140..166 en Scan op 163..189 — 3 pt in elkaar. Geen berekening van mij maar wat een knop
+    // doet: `item_spacing.y` is 6 pt en het kader van een knop steekt 3 pt boven zijn tekst uit,
+    // dus 6 − 3 = 3 pt. Met deze aanroep erbij, en door [`lucht_voor_kader`]: de volle rijlucht.
+    ui.add_space(lucht_voor_kader(ROW_GAP));
     ui.horizontal(|ui| {
         ui.add_sized([LABEL_COLUMN, 20.0], egui::Label::new("").selectable(false));
         // The second question about an address: not which models are on it, but what it answers.
@@ -1132,7 +1166,7 @@ fn command_rows(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
         )
         .on_hover_text(Texts::get(Key::AlwaysAllowHint));
     });
-    ui.add_space(ROW_GAP);
+    ui.add_space(lucht_voor_kader(ROW_GAP));
     ui.horizontal(|ui| {
         let apply =
             ui.button(Texts::get(Key::ApplyTrustedButton)).on_hover_text(Texts::get(Key::TipApplyTrusted)).clicked();
@@ -1401,7 +1435,7 @@ fn key_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
 fn save_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<SettingsCommand>) {
     // De knop staat los van het veld erboven: er sits al een `Separator` boven deze band, en zonder
     // eigen marge plakte de knop tegen zijn eigen scheiding.
-    ui.add_space(ROW_GAP);
+    ui.add_space(lucht_voor_kader(ROW_GAP));
     let save = ui
         .add_enabled(!view.blocked, egui::Button::new(Texts::get(Key::SaveButton)))
         .on_hover_text(Texts::get(Key::TipSave))
