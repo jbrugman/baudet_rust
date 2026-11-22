@@ -123,6 +123,106 @@ fn native_arguments(raw: &str) -> Value {
     serde_json::from_str(raw.trim()).ok().filter(Value::is_object).unwrap_or_else(|| Value::Object(Default::default()))
 }
 
+/// Een extra tool — een MCP-tool — die het prompted-protocol moet aanbieden.
+///
+/// Poort van `CallExtractor.ExtraTool`. De invariant is dat de prompt exact de set van de registry noemt,
+/// dus een tool die de loop heeft, moet hier ook staan. `parameters` is de JSON-schema van die tool als
+/// tekst: een prompted (niet-native) backend krijgt geen schema uit de request-body en moet het uit de
+/// prompt lezen om de tool correct aan te roepen.
+#[derive(Debug, Clone)]
+pub struct ExtraTool {
+    pub name: String,
+    pub description: String,
+    /// De JSON-schema van de tool, als tekst, voor een backend die geen request-body-schema krijgt.
+    pub parameters: String,
+}
+
+/// De instructies die het prompted-formaat vastleggen, woordelijk zo opgesteld dat ze alleen de tools
+/// aanbieden die deze beurt werkelijk heeft.
+///
+/// Poort van `CallExtractor.protocolFor`. Bewust naast de parser gezet, zoals in de origineler: de prompt
+/// en de lezer die hem leest, leven op één plek, zodat het contract dat ze delen niet uit elkaar kan lopen.
+/// Altijd Engels en streng: een chattaal-model dat alleen wordt *uitgenodigd* een formaat te gebruiken,
+/// verzint er zelf een, dus deze noemt de ene aanvaarde vorm en verbiedt elke andere.
+///
+/// Hij noemt alleen de ingeschakelde tools, en dat is de eigenschap die hieronder getest wordt: een protocol
+/// dat `run_command` of `git` noemt terwijl de registry ze weglaat, leert het model een tool aan te roepen die
+/// dan als onbekend faalt; en een protocol dat een wél aanwezige tool verzwijgt, laat het model niet weten dat
+/// het mag bouwen, testen of git bekijken.
+///
+/// Een backend die native function-calling doet, negeert de fenced vorm maar heeft baat bij dezelfde regels
+/// (eerst lezen, geen calls verzinnen) en bij dezelfde accurate tool-lijst, daarom hoort deze tekst ook daar
+/// bij de systeemprompt.
+pub fn protocol_for(enabled: &[&str], extra: &[ExtraTool]) -> String {
+    let can_read = enabled.contains(&"read_file");
+    let can_edit = enabled.contains(&"edit_file");
+    let can_run = enabled.contains(&"run_command");
+    let can_git = enabled.contains(&"git");
+    // De ingebouwde tools volgen de registry in vaste volgorde, in plaats van "begin altijd met
+    // read_file". De reden is de invariant zelf: noemt de registry `edit_file` zonder `read_file`, dan zou
+    // een vast eerste element juist die ene tool verzwijgen — precies de richting die de spec van de
+    // origineler verbiedt ("a tool the model has but never hears about"). `read_file` blijft vooraan staan
+    // zodra de registry hem heeft, want dat is de volgorde van de origineler en van diens voorbeeld.
+    let mut advertised: Vec<&str> = Vec::new();
+    for name in ["read_file", "edit_file", "run_command", "git"] {
+        if enabled.contains(&name) {
+            advertised.push(name);
+        }
+    }
+    // De extra tools wonen buiten de ingebouwde set, dus hun namen komen uit `extra` en niet uit
+    // `advertised`: dat is de lijst die de opsomming oplevert.
+    let mut out = String::new();
+    out.push_str("You can act on the project only through the tools below, and only with the exact format shown. The only tools available to you are: ");
+    let named: Vec<String> = advertised.iter().map(|name| format!("\"{name}\"")).chain(extra.iter().map(|tool| format!("\"{}\"", tool.name))).collect();
+    out.push_str(&named.join(", "));
+    out.push_str(". Do not describe a tool call or a patch in prose, and never invent another tool name or markup. To act, emit one fenced block tagged ");
+    out.push_str(FENCE_TAG);
+    out.push_str(" that contains a single JSON object, one object per call.\n\n");
+
+    // Het voorbeeld blijft letterlijk dat van de origineler, maar het staat er alleen wanneer de registry
+    // `read_file` ook werkelijk aanbiedt. De twee regels die eronder staan (`old_text kiezen uit wat
+    // read_file teruggaf`), verwijzen naar dezelfde tool en hangen daarom aan dezelfde voorwaarde: een
+    // prompt die een call-voorbeeld toont voor een tool die er niet is, leert het model een onbekende call.
+    if can_read {
+        out.push_str("Read a file before you change it or reason about it, so you work from the current text:\n");
+        out.push_str("  {\"tool\": \"read_file\", \"arguments\": {\"file\": \"relative/path\"}}\n\n");
+    }
+
+    if can_edit {
+        out.push_str("Change a file by replacing text you saw in that read:\n");
+        out.push_str("  {\"tool\": \"edit_file\", \"arguments\": {\"file\": \"relative/path\", \"edits\": [{\"old_text\": \"...\", \"new_text\": \"...\"}]}}\n\n");
+    }
+    if can_run {
+        out.push_str("Run a shell command in the project folder (the user approves it first), for example to build or test:\n");
+        out.push_str("  {\"tool\": \"run_command\", \"arguments\": {\"command\": \"mvn -B test\"}}\n\n");
+    }
+    if can_git {
+        out.push_str("Inspect the repository with a read-only git command such as status, diff or log:\n");
+        out.push_str("  {\"tool\": \"git\", \"arguments\": {\"command\": \"status\"}}\n\n");
+    }
+
+    for tool in extra {
+        out.push_str("You may also call an external MCP tool, named and shaped exactly as below; use its advertised name and an arguments object that matches its schema:\n");
+        out.push_str(&format!("  {{\"tool\": \"{}\", \"arguments\": <object matching {}>}}\n", tool.name, tool.parameters));
+        out.push_str(&format!("   Purpose: {}\n\n", tool.description));
+    }
+    out.push_str("Prose may come before or after a block. Each call returns an observation that says ok true or ok false; read it before acting again. On ok false, do not send the same call again unchanged; fix the arguments or answer without a block.");
+    // De origineler kiest hier tussen twee zinnen en laat bij `false` de `edit_file`-regel weg, ook
+    // wanneer die tool wél bestaat maar `read_file` niet. Met de vlaggen hierboven wordt de bijzin per tool
+    // toegevoegd: elke uitspraak noemt alleen een tool die aangeboden is, en `edit_file` houdt zijn eigen
+    // advies ongeacht of `read_file` meedoet. De volgorde van beide zinnen volgt de origineler.
+    if can_read {
+        out.push_str(" On ok true from read_file, choose old_text from the text it returned.");
+    }
+    if can_edit {
+        out.push_str(" On ok true from edit_file, either answer or make the next call you still need.");
+    }
+    if !(can_read || can_edit) {
+        out.push_str(" Otherwise either answer or make the next call you still need.");
+    }
+    out
+}
+
 /// De ingebouwde lezer: native calls eerst, dan de prompted fences.
 pub struct PromptedCallExtractor;
 
@@ -317,5 +417,78 @@ mod tests {
             let turn = prose(format!("```baudet-tool\n{body}\n```\n"));
             assert!(PromptedCallExtractor.extract(&turn).is_empty(), "{body}");
         }
+    }
+
+    #[test]
+    fn the_protocol_names_exactly_the_enabled_tools() {
+        // De kern van `protocolFor`: registry en prompt moeten dezelfde noemen. Vier vormen van de
+        // ingebouwde set, want de UI zet de tools aan op de maprechten en niet op een schakelaar.
+        let only_read = protocol_for(&["read_file"], &[]);
+        assert!(only_read.contains("\"read_file\""), "{only_read}");
+        for absent in ["edit_file", "run_command", "git"] {
+            assert!(!only_read.contains(absent), "een tool die er niet is, mag niet aangeboden worden: {absent}");
+        }
+        // De sluitzin noemt alleen wat er is: bij alleen lezen is dat het read-advies van de origineler,
+        // en de "Otherwise"-zin is er uitsluitend wanneer er géén van beide tools staat.
+        assert!(only_read.ends_with("On ok true from read_file, choose old_text from the text it returned."));
+
+        let editing = protocol_for(&["read_file", "edit_file"], &[]);
+        assert!(editing.contains("\"edit_file\""));
+        assert!(editing.contains("\"old_text\""));
+        assert!(editing.ends_with("On ok true from edit_file, either answer or make the next call you still need."));
+        assert!(!editing.contains("run_command"), "uitgeschreven rechten blijven weg uit de prompt");
+
+        // De richting die de vorige versie doorliet: een registry die `edit_file` aanbiedt zonder
+        // `read_file`. Een vast eerste element van de opsomming zou dán de ene tool verzwijgen die het
+        // model wél heeft, en de bijzin zou een advies geven over een tool die niemand kan aanroepen.
+        let edit_without_read = protocol_for(&["edit_file"], &[]);
+        assert!(edit_without_read.contains("\"edit_file\""), "aanwezig blijft aangeboden: {edit_without_read}");
+        assert!(!edit_without_read.contains("\"read_file\""), "afwezig blijft verzwegen: {edit_without_read}");
+        assert!(!edit_without_read.contains("old_text from the text it returned"), "geen advies over een afwezige tool");
+        assert!(edit_without_read.ends_with("On ok true from edit_file, either answer or make the next call you still need."));
+
+        // Zonder élke tool blijft er een_protocol over dat niets belooft: de opsomming mag geen tool noemen
+        // die de registry niet heeft, ook niet als de registry ledig is.
+        let empty = protocol_for(&[], &[]);
+        for tool in ["read_file", "edit_file", "run_command", "git"] {
+            assert!(!empty.contains(&format!("\"{tool}\"")), "ledige registry adverteert niets: {tool}");
+        }
+        assert!(empty.contains(FENCE_TAG), "de vorm blijft, ook zonder tools");
+
+        let full = protocol_for(&["read_file", "edit_file", "run_command", "git"], &[]);
+        for tool in ["read_file", "edit_file", "run_command", "git"] {
+            assert!(full.contains(&format!("\"{tool}\"")), "{tool} mist in {full}");
+        }
+        // De volgorde van de opsomming volgt de registry, en de opsomming is één regel: een model dat de
+        // lijst parseert, mag niet twee interpretaties krijgen.
+        let listing = full.split(". Do not describe").next().expect("één opsomming");
+        assert!(listing.find("\"read_file\"") < listing.find("\"edit_file\""));
+        assert!(listing.find("\"run_command\"") < listing.find("\"git\""));
+
+        // De fenced vorm zelf: de tag en één object per call, met dezelfde letterlijke tag die de lezer hier
+        // boven zoekt. Dwaalt die tag weg uit deze tekst, dan is de prompt een contract dat niemand leest.
+        for text in [&only_read, &editing, &full] {
+            assert!(text.contains(FENCE_TAG), "de prompt moet de tag noemen die deze module leest");
+        }
+        // Één voorbeeld per aangeboden tool, in de volgorde van de opsomming: het voorbeeld is wat een
+        // prompted model kopieert, dus een ontbrekend voorbeeld is een tool die het nooit zal aanroepen.
+        assert!(editing.contains("{\"tool\": \"edit_file\""));
+        assert!(full.contains("{\"tool\": \"run_command\""));
+        assert!(full.contains("{\"tool\": \"git\""));
+    }
+
+    #[test]
+    fn an_extra_tool_is_advertised_with_its_schema() {
+        let extra = ExtraTool {
+            name: "mcp__time__now".to_string(),
+            description: "Current time".to_string(),
+            parameters: "{\"type\":\"object\"}".to_string(),
+        };
+        let text = protocol_for(&["read_file"], &[extra]);
+        assert!(text.contains("\"mcp__time__now\""), "ook een extra tool moet geadverteerd worden: {text}");
+        assert!(text.contains("Purpose: Current time"));
+        assert!(text.contains("{\"type\":\"object\"}"), "een prompted backend leest de schema uit de prompt");
+        // De ingebouwde regels blijven onveranderd staan naast de extra: de extra vervangt niets.
+        assert!(text.contains("{\"tool\": \"read_file\""));
     }
 }

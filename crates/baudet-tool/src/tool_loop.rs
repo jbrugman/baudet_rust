@@ -158,10 +158,19 @@ fn observation(call: &ToolCall, result: &ToolResult) -> String {
 ///
 /// De methods zijn uitdrukkelijk `&self` en niet `&mut self`: de streaming-haken van [`TurnRequest`] komen
 /// vanaf de bron — in een echte backend vanaf diens eigen taak — dus een sink mag geen uniek eigendom van de
-/// loop vergen. In de origineler *opent* en *sluit* een sink een rij (`commandStarted`/`commandCompleted`);
-/// hier is één methode per afronding genoeg, omdat de rij-id uit [`ItemSink::next_item_id`] komt en de loop
-/// een rij in één adempauze opent en sluit. De map-inhoud is dan identiek, en er is geen halve rij die een
-/// afgebroken run achterlaat.
+/// loop vergen. De origineler *opent* en *sluit* een sink een rij (`commandStarted`/`commandCompleted`), en
+/// deze loop doet dat nu ook, om één reden die niet uit te stellen is: een tool vraagt binnen `execute` om
+/// goedkeuring, en de goedkeuringskaart hoort op de rij die de lezer dan al ziet. Een rij die pas ná de run
+/// ontstaat, kan die vraag niet dragen — dan staat de beslissing op een rij die er nog niet was.
+///
+/// Eén afwijking van de origineler is hier bewust: hij verdeelt twee id's (`nextId()` bij openen, `nextId()`
+/// bij sluiten) en laat zijn emitter de opening daarmee vervangen. Deze loop verdeelt **één** id, bij openen,
+/// en draagt die over aan de sluiting — `report` vraagt er dus geen nieuwe aan. Dat is geen versiering: een
+/// vraag die op een ander id landt dan de rij die haar toont, is een knop die op niets reageert, en bij één
+/// id per call kan dat niet gebeuren. De map-inhoud blijft identiek aan die van de origineler — één rij per
+/// call — en de id-reeks blijft alsof er vóór de afronding niets verdeeld was, want wat een rij opent, is
+/// dezelfde rij die hem sluit. Een afgebroken run laat geen halve rij achter, want `AppState::cancel_turn`
+/// sluit élke open rij.
 pub trait ItemSink: Send + Sync {
     /// Een uniek id voor één rij. De loop verzinnet ze niet zelf, want de persistentielaag is degene die
     /// weet welke ids er al bestaan.
@@ -184,6 +193,67 @@ pub trait ItemSink: Send + Sync {
     fn file_change_completed(&self, _item: FileChangeItem) {}
     /// De generieke call-kaart: `read_file` en het alleen-lezen `git`.
     fn tool_call_completed(&self, _item: ToolCallItem) {}
+
+    // ---- De drie open-methoden: de kaart zoals die vóór de run staat --------------------
+    //
+    // De kaarten zijn hier al volledig opgemaakt — status `InProgress`, de uitvoervelden nog ledig — in
+    // plaats van losse argumenten zoals bij de origineler (`commandStarted(command, cwd, timeout)`), omdat
+    // de rijsoorten in deze repo structs zijn die de producer toebehoren. Wat de origineler in zijn emitter
+    // ineenzet, zet deze loop hier ineen, en de *completed*-kaart vult dezelfde rij daarna.
+    //
+    // `cwd` ontbreekt in de geopende commandokaart, net als bij de origineler: de tool lost het echte pad
+    // pas op tijdens de run, en een kaart die dat vóór de run noemt, noemt een gok.
+
+    /// Een commando staat op het punt te draaien.
+    fn command_started(&self, _item: CommandExecutionItem) {}
+    /// Er wordt naar `path` geschreven.
+    fn file_change_started(&self, _item: FileChangeItem) {}
+    /// Een call zonder eigen kaart is begonnen, bijvoorbeeld een leesbeurt.
+    fn tool_call_started(&self, _item: ToolCallItem) {}
+}
+
+/// De geopende commandokaart: wat de call belooft, met een uitvoering die nog loopt. Alleen `command` en
+/// `timeout_seconds` zijn bekend — de rest komt uit het resultaat, en een kaart mag geen uitkomst verzinnen
+/// die er nog niet is.
+fn started_command_card(item_id: String, call: &ToolCall) -> CommandExecutionItem {
+    CommandExecutionItem {
+        item_id,
+        command: call.arg_str("command").unwrap_or_default().to_string(),
+        cwd: None,
+        timeout_seconds: timeout_of(&call.arguments),
+        status: ItemStatus::InProgress,
+        exit_code: None,
+        timed_out: false,
+        duration_ms: 0,
+        output: String::new(),
+        approval: None,
+    }
+}
+
+/// De geopende schrijfkaart: het pad en de status, zonder diff en zonder tellingen. Zelfde Update-keuze als
+/// [`file_change_card`]: `edit_file` patched tekst in een bestand dat het eerst leest.
+fn started_file_change_card(item_id: String, call: &ToolCall) -> FileChangeItem {
+    FileChangeItem {
+        item_id,
+        path: call.arg_str("file").unwrap_or_default().to_string(),
+        change: FileChangeKind::Update,
+        status: ItemStatus::InProgress,
+        diff: None,
+        additions: 0,
+        deletions: 0,
+    }
+}
+
+/// De geopende generieke kaart: welke tool, met welk argument, in uitvoering.
+fn started_tool_call_card(item_id: String, call: &ToolCall) -> ToolCallItem {
+    ToolCallItem {
+        item_id,
+        tool: call.tool.clone(),
+        detail: detail_of(&call.arguments),
+        status: ItemStatus::InProgress,
+        ok: false,
+        output: String::new(),
+    }
 }
 
 /// De kaart van één commandorun, vanuit precies die run. `cwd` en `duration_ms` komen uit het resultaat en
@@ -608,8 +678,9 @@ impl<'a> ToolLoop<'a> {
         for call in calls {
             // Vóór de run gemeld en niet erna: een tool vraagt binnen `execute` om goedkeuring, dus een kaart
             // die daarna opkomt, meldt een beslissing die de lezer al nam op een rij die hij nog niet zag.
+            let item_id = self.announce(run, call);
             let mut result = self.runner.run(call, run.ctx);
-            self.report(run, call, &result);
+            self.report(run, call, &result, item_id);
             if let Some(undo) = result.undo.take() {
                 undos.push(undo);
             }
@@ -717,7 +788,13 @@ impl<'a> ToolLoop<'a> {
             let mut result = slots[index].take().unwrap_or_else(|| {
                 ToolResult::fail(format!("tool `{}` produced no result", call.tool))
             });
-            self.report(run, call, &result);
+            // De opening volgt de volgorde van het model en niet die van de pool, en staat — zoals bij de
+            // origineler — direct vóór de sluiting: deze pad voert geen goedkeuring uit, want samen draaien
+            // mag alleen zonder neveneffecten, dus hier hoeft de vraag niet vóór het werk op te duiken. De
+            // opening blijft staan omdat een rij die geopend wordt, geopend moet worden: ook deze kaarten
+            // bestaan even in uitvoering, en `cancel_turn` leest precies die status.
+            let item_id = self.announce(run, call);
+            self.report(run, call, &result, item_id);
             if let Some(undo) = result.undo.take() {
                 undos.push(undo);
             }
@@ -727,14 +804,32 @@ impl<'a> ToolLoop<'a> {
         ordered
     }
 
+    /// Open de rij die één call gaat vullen. De kaart komt uit de `item_kind` van de tool zelf, zodat een
+    /// hernoeming een run niet stil in de verkeerde rij zet, en een niet te resolven tool krijgt de generieke
+    /// kaart: een call die de loop niet kon dispatchen, is precies het evenement dat de mens mag zien. De id
+    /// komt hier uit de sink, en de sink is eigenaar van de vorm ervan: zet hij opening en sluiting op één
+    /// teller, dan staat élke goedkeuringsvraag op de rij die haar toont.
+    fn announce(&self, run: &LoopRun<'_>, call: &ToolCall) -> String {
+        let sink = run.sink;
+        let id = sink.next_item_id();
+        match self.registry.get(&call.tool).map(|tool| tool.item_kind()).unwrap_or(ItemKind::ToolCall) {
+            // `id` gaat mee naar de sluiting, dus de kaart krijgt een kopie; de rij-id is één kort
+            // id-per-rij-woord en geen buffer, dus dit is dekopie die de API vraagt en niet de interface.
+            ItemKind::CommandExecution => sink.command_started(started_command_card(id.clone(), call)),
+            ItemKind::FileChange => sink.file_change_started(started_file_change_card(id.clone(), call)),
+            _ => sink.tool_call_started(started_tool_call_card(id.clone(), call)),
+        }
+        id
+    }
+
     /// De kaart van één call, met wat de run ervoor terugbracht. De kaart komt uit de `item_kind` van de
     /// tool zelf, zodat een hernoeming een run niet stil in de verkeerde rij zet. Een tool die niet te
     /// resolven is, krijgt de generieke kaart: een call die de loop niet kon dispatchen, is precies het
     /// evenement dat de mens mag zien, en de runner maakt er al een mislukt resultaat van — verbergen zou de
     /// mens een mislukking laten zien die het model zag, zonder uitleg.
-    fn report(&self, run: &LoopRun<'_>, call: &ToolCall, result: &ToolResult) {
+    fn report(&self, run: &LoopRun<'_>, call: &ToolCall, result: &ToolResult, item_id: String) {
         let sink = run.sink;
-        let id = sink.next_item_id();
+        let id = item_id;
         match self.registry.get(&call.tool).map(|tool| tool.item_kind()).unwrap_or(ItemKind::ToolCall) {
             ItemKind::CommandExecution => sink.command_completed(command_card(id, call, result)),
             ItemKind::FileChange => sink.file_change_completed(file_change_card(id, call, result)),
@@ -875,11 +970,16 @@ mod tests {
     /// eigenschap die dan getest wordt.
     #[derive(Default)]
     struct RecordingSink {
-        lines: Mutex<Vec<String>>,
+        lines: std::sync::Arc<Mutex<Vec<String>>>,
         ids: AtomicUsize,
     }
 
     impl RecordingSink {
+        /// De gedeelde greep op dezelfde stroom, voor een tool die er tijdens `execute` op moet schrijven.
+        fn shared(&self) -> std::sync::Arc<Mutex<Vec<String>>> {
+            self.lines.clone()
+        }
+
         fn record(&self, line: impl Into<String>) {
             self.lines.lock().unwrap().push(line.into());
         }
@@ -890,6 +990,17 @@ mod tests {
 
         fn count(&self, needle: &str) -> usize {
             self.lines().iter().filter(|line| line.contains(needle)).count()
+        }
+
+        /// Hoevaak een kaartsoort geopend werd: de openingsregel begint met `"open <marker> "`.
+        fn count_opened(&self, marker: &str) -> usize {
+            self.lines().iter().filter(|line| line.starts_with(&format!("open {marker} "))).count()
+        }
+
+        /// Hoevaak een kaartsoort afgerond werd. De gesloten regel begint met de marker zelf en het id
+        /// komt direct daarna, dus `"open …"` telt hier niet mee.
+        fn count_closed(&self, marker: &str) -> usize {
+            self.lines().iter().filter(|line| line.starts_with(&format!("{marker} item-"))).count()
         }
     }
 
@@ -917,6 +1028,45 @@ mod tests {
         }
         fn tool_call_completed(&self, item: ToolCallItem) {
             self.record(format!("toolcall {} {}", item.item_id, item.tool));
+        }
+        fn command_started(&self, item: CommandExecutionItem) {
+            self.record(format!("open command {} {}", item.item_id, item.command));
+        }
+        fn file_change_started(&self, item: FileChangeItem) {
+            self.record(format!("open filechange {} {}", item.item_id, item.path));
+        }
+        fn tool_call_started(&self, item: ToolCallItem) {
+            self.record(format!("open toolcall {} {}", item.item_id, item.tool));
+        }
+    }
+
+    /// Een tool die tijdens `execute` iets op de sink schrijft en pas daarna terugkeert. Dat is precies
+    /// het moment waarop de origineler een goedkeuringskaart opent, dus het is het moment dat getest
+    /// wordt. Alleen-lezen, zodat hij ook in een fan-out-batch mag en daarmee aan het andere pad draait.
+    struct SinkWitnessTool {
+        lines: std::sync::Arc<Mutex<Vec<String>>>,
+        item: ItemKind,
+    }
+
+    impl Tool for SinkWitnessTool {
+        fn name(&self) -> &str {
+            "witness"
+        }
+        fn description(&self) -> &str {
+            "stub that reports into the sink"
+        }
+        fn parameters(&self) -> Value {
+            json!({"type": "object"})
+        }
+        fn item_kind(&self) -> ItemKind {
+            self.item
+        }
+        fn can_run_parallel(&self, _args: &Value, _ctx: &ToolContext) -> bool {
+            true
+        }
+        fn execute(&self, _args: &Value, _ctx: &ToolContext) -> ToolResult {
+            self.lines.lock().unwrap().push("inside-execute".to_string());
+            ToolResult::ok("ok")
         }
     }
 
@@ -1225,6 +1375,89 @@ mod tests {
     // ---- de loop ---------------------------------------------------------------------
 
     #[tokio::test]
+    async fn a_card_is_open_while_the_tool_runs_and_closes_the_same_row() {
+        // De eigenschap die een goedkeuringskaart nodig heeft: de rij staat er al tijdens het werk, en
+        // opening en sluiting gaan over dezelfde rij. Landt de vraag op een rij die de lezer nog niet zag,
+        // dan reageert de knop op niets — precies wat de origineler voorkomt door `announce` vóór `runner.run` te zetten.
+        let reader = StubTool::new("read_file");
+        let reg = ToolRegistry::new(vec![Box::new(reader)]);
+        let src = source(vec![StubSource::calls_for("kijk", &[("read_file", json!({"file": "a"}))]), StubSource::prose("klaar")]);
+        let sink = RecordingSink::default();
+        let outcome = drive_into(&reg, &src, &[Msg::user("vraag")], &ctx(), 4, |l| l, &sink).await;
+        assert!(matches!(outcome, LoopOutcome::Completed { .. }));
+        let lines = sink.lines();
+        let opened = lines.iter().position(|l| l.starts_with("open toolcall")).expect("rij geopend");
+        let closed = lines.iter().position(|l| l.starts_with("toolcall item")).expect("rij gesloten");
+        assert!(opened < closed, "kaart open vóór de afronding: {lines:?}");
+        // Het id verbindt de vraag met de kaart die haar toont, dus beide regels moeten erover overeenkomen.
+        assert_eq!(id_of(&lines[opened]), id_of(&lines[closed]), "één rij per call: {lines:?}");
+    }
+
+    #[tokio::test]
+    async fn a_decision_asked_inside_execute_finds_its_card_already_open() {
+        // Dezelfde eigenschap vanbinnen bekeken: de tool meldt tijdens `execute`, en de geopende kaart moet
+        // er dan al staan. De kaartsoort komt uit `item_kind` van de tool, dus een schrijf-tool opent een
+        // schrijfkaart en niet de generieke.
+        let sink = RecordingSink::default();
+        let witness = SinkWitnessTool { lines: sink.shared(), item: ItemKind::FileChange };
+        let reg = ToolRegistry::new(vec![Box::new(witness)]);
+        let src = source(vec![StubSource::calls_for("schrijf", &[("witness", json!({"file": "b"}))]), StubSource::prose("klaar")]);
+        let outcome = drive_into(&reg, &src, &[Msg::user("vraag")], &ctx(), 4, |l| l, &sink).await;
+        assert!(matches!(outcome, LoopOutcome::Completed { .. }));
+        let lines = sink.lines();
+        let opened = lines.iter().position(|l| l.starts_with("open filechange")).expect("schrijfkaart geopend");
+        let inside = lines.iter().position(|l| l == "inside-execute").expect("de tool heeft gewerkt");
+        let closed = lines.iter().position(|l| l.starts_with("filechange item")).expect("gesloten");
+        assert!(opened < inside, "gemeld aan een rij die er al stond: {lines:?}");
+        assert!(inside < closed, "dezelfde rij sluit ná het werk: {lines:?}");
+        assert!(lines[opened].contains('b'), "de kaart noemt het pad dat de call vroeg: {lines:?}");
+        assert_eq!(id_of(&lines[opened]), id_of(&lines[closed]), "openen en sluiten gaan over één rij");
+    }
+
+    #[tokio::test]
+    async fn a_fanned_out_batch_opens_one_card_per_call() {
+        // Het fan-out-pad werkt de calls in willekeurige volgorde af; de rijen blijven nonetheless de
+        // callvolgorde van het model volgen en élke call krijgt een opening én een sluiting.
+        let mut a = StubTool::new("read_file");
+        a.parallel = true;
+        a.delay = Some(std::time::Duration::from_millis(40));
+        let mut b = StubTool::new("grep");
+        b.parallel = true;
+        let reg = ToolRegistry::new(vec![Box::new(a), Box::new(b)]);
+        let src = source(vec![StubSource::calls_for("twee lezingen", &[("read_file", json!({"file": "a"})), ("grep", json!({"file": "b"}))]), StubSource::prose("klaar")]);
+        let sink = RecordingSink::default();
+        let outcome = drive_into(&reg, &src, &[Msg::user("vraag")], &ctx(), 4, |l| l, &sink).await;
+        assert!(matches!(outcome, LoopOutcome::Completed { .. }));
+        let lines = sink.lines();
+        let opened: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| l.starts_with("open ")).map(|(i, _)| i).collect();
+        assert_eq!(opened.len(), 2, "elke call opent een rij: {lines:?}");
+        assert!(lines[opened[0]].contains("read_file") && lines[opened[1]].contains("grep"), "de openingen volgen het model: {lines:?}");
+        // Opening en sluiting paren per kaartsoort: een opening zonder sluiting is een kaart die blijft
+        // draaien, en dat is precies wat `cancel_turn` later onschadelijk moet maken.
+        for marker in ["command", "filechange", "toolcall"] {
+            let opens: Vec<Option<String>> = lines
+                .iter()
+                .filter(|l| l.starts_with(&format!("open {marker} ")))
+                .map(|l| id_of(l))
+                .collect();
+            let closed: Vec<Option<String>> = lines
+                .iter()
+                .filter(|l| l.starts_with(&format!("{marker} item")))
+                .map(|l| id_of(l))
+                .collect();
+            assert_eq!(opens, closed, "elke opening sluit op dezelfde rij, in dezelfde volgorde: {marker} in {lines:?}");
+        }
+    }
+
+    /// Het rij-id van een regel uit de sink-stroom. Een openingsregel ("open filechange item-1 p") draagt
+    /// één marker-woord méér dan een gesloten regel („filechange item-1 p"), dus het id staat niet op een
+    /// vast indeks: het is het woord vóór de inhoud, dus van achteren het tweede.
+    fn id_of(line: &str) -> Option<String> {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        words.get(words.len().saturating_sub(2)).copied().map(str::to_string)
+    }
+
+    #[tokio::test]
     async fn a_prose_turn_ends_the_run_without_calling_a_tool() {
         let reg = two_readers();
         let src = source(vec![StubSource::prose("het antwoord")]);
@@ -1261,10 +1494,12 @@ mod tests {
         let obs = messages.iter().find(|m| m.role == "user").expect("observatie ontbreekt");
         assert!(obs.content.contains(" succeeded (ok=true): (read_file a.txt)"), "{}", obs.content);
         assert!(obs.content.contains("call-0-0"), "de call-id van de bron staat erin");
-        // Eén generieke kaart, in de callvolgorde, met het id dat de sink uitdeelde. De volgorde is wat de
-        // loop belooft en wat de UI nodig heeft: de beurt Gaat open, zijn tekst stroomt, de rij sluit, en pas
-        // daarna komen de kaarten van de calls die hij vroeg, vóór de rij van de volgende beurt. Een kaart
-        // binnen de slotrij zou een beslissing tonen die er nog niet was.
+        // Eén generieke kaart per call, in de callvolgorde, met het id dat de sink uitdeelde. De volgorde is
+        // wat de loop belooft en wat de UI nodig heeft: de beurt gaat open, zijn tekst stroomt, de rij sluit,
+        // en pas daarna komen de kaarten van de calls die hij vroeg, vóór de rij van de volgende beurt. Een
+        // kaart binnen de slotrij zou een beslissing tonen die er nog niet was. Elke call opent eerst zijn
+        // rij — de opening staat er dus bij, want een kaart die niet geopend wordt, kan geen goedkeuring
+        // dragen — en opening en sluiting delen id `item-1`.
         assert_eq!(
             sink.lines(),
             vec![
@@ -1272,6 +1507,7 @@ mod tests {
                 "delta vraag",
                 "reasoning denk",
                 "reply-completed  ik lees even",
+                "open toolcall item-1 read_file",
                 "toolcall item-1 read_file",
                 "reply-started",
                 "delta Tool observation for call call-0-0: `read_file` succeeded (ok=true): (read_file a.txt)",
@@ -1630,7 +1866,12 @@ mod tests {
             .iter()
             .map(|needle| lines.iter().position(|l| l.starts_with(needle)).unwrap_or_else(|| panic!("missing {needle} in {lines:?}")))
             .collect();
-        assert_eq!(positions, vec![positions[0], positions[0] + 1], "kaarten direct na elkaar, in modelvolgorde: {lines:?}");
+        // De afrondingen volgen de callvolgorde van het model, niet de afloop van de pool. Tussen beide
+        // afrondingen staat alleen de opening van de tweede call — die hoort bij diezelfde call — dus er
+        // mag niets anders tussen staan en de volgorde mag niet omgedraaid zijn.
+        assert!(positions[0] < positions[1], "de kaarten volgen het model: {lines:?}");
+        let between = &lines[positions[0] + 1..positions[1]];
+        assert!(between.iter().all(|l| l.starts_with("open toolcall item-2 ")), "geen vreemde rij tussen twee kaarten: {lines:?}");
         // De observaties in de werkende kop volgen dezelfde volgorde.
         let observations: Vec<&str> = outcome.messages().iter().filter(|m| m.role == "user").map(|m| m.content.as_str()).collect();
         assert_eq!(observations.len(), 2);
@@ -1652,10 +1893,22 @@ mod tests {
         let LoopOutcome::Completed { steps, .. } = &outcome else { panic!("got {outcome:?}") };
         assert_eq!(steps[0].results.len(), 4);
         assert_eq!(steps[0].results.iter().filter(|r| r.ok).count(), 4);
-        assert_eq!(sink.count("toolcall item-"), 4);
+        // Vier afrondingen — en dus, want élke opening wordt gesloten, vier openingen. `count` meet
+        // deelvlaggen en zou beide bij elkaar tellen, dus de volgorde van de kaarten wordt hier apart bekeken.
+        assert_eq!(sink.count_closed("toolcall"), 4);
+        assert_eq!(sink.count_opened("toolcall"), 4);
+        // De id's lopen op in de callvolgorde van het model, ook over de poolgrens heen. Dat is wat een
+        // rij aan de lezer belooft: `item-1` is de eerste call en niet de eerste die klaar kwam.
         // De modelvolgorde blijft de requestvolgorde, ook al komen de resultaten in willekeurige volgorde binnen.
         let files: Vec<String> = steps[0].results.iter().map(|r| r.output.clone()).collect();
         assert_eq!(files, vec!["(read_file f1)", "(read_file f2)", "(read_file f3)", "(read_file f4)"]);
+        let ids: Vec<String> = sink
+            .lines()
+            .into_iter()
+            .filter(|l| l.starts_with("toolcall item-"))
+            .map(|l| l.split_whitespace().nth(1).unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(ids, vec!["item-1", "item-2", "item-3", "item-4"], "de kaarten volgen het model");
     }
 
     #[tokio::test]
