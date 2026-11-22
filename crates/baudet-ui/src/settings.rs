@@ -538,30 +538,6 @@ impl SettingsView {
         }
     }
 
-    /// Use the model selected in the models tab: the same choice the picker's row would have stored,
-    /// sent through the same Save the Save button sends.
-    ///
-    /// Deliberately not a second command and not a direct write to the file. Two writers to
-    /// `~/.baudet/settings.json` would disagree the way two boolean owners of one panel did, and the
-    /// store's own refusal of a file it cannot rewrite (`WouldDiscard`) only protects a save that
-    /// goes through it. So a pick lands in the field here, and `draft()` — with its token-field check
-    /// and the store's write — stays the single path to disk. The session hears about it through the
-    /// `Adopted` report a save produces, which the window already forwards.
-    pub fn request_use_selected(&mut self, tx: &std::sync::mpsc::Sender<SettingsCommand>) {
-        if self.blocked {
-            // The panel's own button refuses in this state; a second door must agree with it rather
-            // than discover the store's refusal after a click that looked like a choice.
-            self.status = "Your settings file is unreadable. Saving is disabled until it is fixed.".to_string();
-            return;
-        }
-        match self.draft() {
-            Ok(settings) => {
-                self.status = "saving…".to_string();
-                let _ = tx.send(SettingsCommand::Save(settings));
-            }
-            Err(problem) => self.status = problem,
-        }
-    }
 }
 
 /// Het stabiele zout van het endpointveld.
@@ -573,18 +549,6 @@ impl SettingsView {
 /// daarom met een klik op de strip (`app.tab()`), niet met dit adres; het zout blijft nuttig voor de
 /// focusvolgorde en om een repaint het veld niet zijn toetsenbordfocus te laten verliezen.
 pub const FIELD_ENDPOINT: &str = "settings-endpoint-field";
-
-/// De `Fetch models`-knop van het modelstabblad, als vaste id zodat een test hem van buiten vindt.
-///
-/// Een widget met een expliciet `Id` registreert zijn response op exact dat adres, dus een test
-/// hoeft de lay-out van het middenvlak niet na te bouwen. Let met `FIELD_ENDPOINT` op: dat veld is
-/// `.id_salt`-vorm en dus juist níét van buiten adresseerbaar (gemeten, zie de noot erboven). Dit
-/// blad kiest de expliciete vorm omdat een test hier geen klik nodig heeft om te bewijzen dat het
-/// blad bestaat — één `read_response` volstaat.
-pub const MODELS_FETCH: &str = "models-fetch-button";
-
-/// De `Use this model`-knop van hetzelfde blad, op dezelfde manier vindbaar.
-pub const MODELS_USE: &str = "models-use-button";
 
 /// Het ingestformulier, getekend in de `Ui` van de aanroeper: het middenvlak van een tab, niet als
 /// venster boven het transcript.
@@ -829,79 +793,6 @@ fn describe_path(path: &std::path::Path) -> String {
     format!("{}", path.display())
 }
 
-/// Een knop op een vast, van buiten noembaar adres: de techniek van de tabstrip.
-///
-/// `egui::Button` heeft in deze bouw (0.36) géén `.id()`, dus een widget zelf kan geen adres dragen.
-/// Wat het wél kan is `app.rs`'s tabstrip: een `scope_builder`-wikkel met `UiBuilder::id(..)` en
-/// `Sense::click()` registreert zijn response op exact dat adres, en dát is wat een test terugvindt
-/// met één `read_response` — zonder de keten van `Panel::top` + `ScrollArea` na te bouwen. De tekst
-/// erin is een kaal label, want de klik leeft op de wikkel (idem `app.rs::TABSTRIP`).
-///
-/// De vorm nabootsen die hier gemeten werkt, is geen herontwerp: het is waarom `MODELS_FETCH` en
-/// `MODELS_USE` constanten zijn en geen `.id_salt`-zouten als `FIELD_ENDPOINT` (dat adres bleek van
-/// buiten onbereikbaar, gemeten).
-fn id_button(ui: &mut Ui, address: &'static str, text: &str) -> egui::Response {
-    ui.scope_builder(egui::UiBuilder::new().id(egui::Id::new(address)).sense(egui::Sense::click()), |ui| {
-        ui.add(egui::Button::new(text));
-    })
-    .response
-}
-
-/// Het modelstabblad: wat de endpoint heeft, en welke er gekozen wordt.
-///
-/// `ModelsPanel.kt` is de maat: een balk bovenaan met `Fetch models` en `Use this model`, de lijst
-/// in het midden, één statusregel onderaan. Wat hier anders is, is niets aan de vorm: de lijst komt
-/// uit hetzelfde `view.models` dat het ingestformulier vult, en de vraag gaat via `request_fetch` —
-/// de enige fetch-weg, dus één adres en één sleutel, geen tweede netwerkpad dat een ander antwoord
-/// kan geven dan het veld erboven.
-///
-/// De keuze wordt niet rechtstreeks op schijf gezet. `ModelsPanel.kt:80` doet dat (`saveConfig`) en
-/// dit blad roept daarom `pick_model` aan, die dezelfde save-pijplijn neemt: een instandbestand dat
-/// deze app niet kan lezen, blijft ook hier onaangeroerd, en de sessie hoort de keuze via `Adopted`.
-/// Een directe schrijver zou precies dat bestand vervangen dat deze port beloofd te ontzien.
-pub fn models_body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<SettingsCommand>) {
-    ui.set_width(ui.available_width().min(360.0));
-    ui.horizontal(|ui| {
-        // `request_fetch` is de enige wegbereider: hij zet `fetching` en zijn eigen status, zodat een
-        // klik en een scripted aanroep dezelfde achterlaten. Deze rij hoeft dus alleen te vragen.
-        if id_button(ui, MODELS_FETCH, if view.fetching { "fetching…" } else { "Fetch models" }).clicked() {
-            view.request_fetch(tx);
-        }
-        // `blocked` mag hier niet door een `add_enabled`-knop, want die techniek bestaat in deze
-        // bouw niet op een adres-wikkel: de knop tekent door, maar de klik vraagt niets en de status
-        // zegt waarom. Dat is dezelfde regel als de Save-knop erboven — een onleesbaar instandbestand
-        // blijft onaangeroerd — alleen hier in woorden in plaats van in een uitgebalanceerde vorm.
-        let use_now = id_button(ui, MODELS_USE, "Use this model").clicked();
-        if use_now && view.blocked {
-            view.status = "your settings file is unreadable; fix it before saving".to_string();
-        } else if use_now {
-            view.pick_model(tx);
-        }
-    });
-    // De lijst, in de volgorde die de server gaf, met dezelfde rijtekst als de plukknop (`row_for`) —
-    // dus twee bladen die nooit een andere naam kunnen tonen voor één model. Aangeklikt is gekozen,
-    // en de keuze landt in `view.model`: dezelfde plek als het ingestformulier schrijft.
-    egui::ScrollArea::vertical().id_salt("models-list").auto_shrink([false, false]).show(ui, |ui| {
-        if !view.fetching && view.models.is_empty() {
-            ui.label(dim(if view.fetched_for.is_some() {
-                "this endpoint lists none"
-            } else {
-                "press Fetch to ask this endpoint"
-            }));
-        }
-        for model in &view.models {
-            let chosen = view.model.as_deref() == Some(model.id.as_str());
-            if ui.selectable_label(chosen, row_for(model)).clicked() {
-                view.model = Some(model.id.clone());
-            }
-        }
-    });
-    // Eén status onderaan, zoals de referentie-app (`status` staat er ook). Leeg is geen regel.
-    if !view.status.is_empty() {
-        ui.separator();
-        ui.label(dim(&view.status));
-    }
-}
 
 /// The two rules this panel exists to enforce, tested where they are actually decided.
 ///

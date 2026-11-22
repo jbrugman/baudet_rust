@@ -16,7 +16,7 @@
 //!    uitglijden, precies zoals `App::ui` hem voor een persoon doet. `app.tab()` is de lezing van het
 //!    antwoord: hetzelfde veld dat de strip schrijft en de paint-pass leest.
 
-use baudet_ui::{root_ui_id, Tab, TranscriptApp, MODELS_FETCH, TABSTRIP};
+use baudet_ui::{root_ui_id, Tab, TranscriptApp, TABSTRIP};
 use eframe::egui;
 
 const SCREEN: [f32; 2] = [1200.0, 800.0];
@@ -115,31 +115,6 @@ fn een_klik_op_een_tabknop_wisselt_het_tabblad() {
 }
 
 #[test]
-fn het_modelstabblad_tekent_zijn_fetchknop() {
-    // Het blad bestaat pas sinds deze test het vraagt, dus dit is debewijzing dat de derde tab niet
-    // een leeg label is. Het adres komt uit `settings::MODELS_FETCH`: een knop met een expliciet
-    // `Id` registreert zijn response op exact dat adres, dus dit bewijst het blad zónder de keten van
-    // `Panel::top` + `ScrollArea` na te bouwen (wat bij `.id_salt`-velden juist niet lukt, zie de noot
-    // bij `FIELD_ENDPOINT`). Eerst een klik op de strip, want de knop leeft in het blad en niet in de
-    // strip: anders meet deze test slechts dat de tabknop bestaat — wat de test hierboven al doet.
-    let ctx = addressable_context();
-    let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
-    let center = tab_rect(&ctx, &mut app, Tab::Models).center();
-    click_tab(&ctx, &mut app, center);
-    assert_eq!(app.tab(), Tab::Models);
-    // Eén passive paint vóór het adres wordt opgevraagd. `read_response` leest in deze egui-versie
-    // (0.36) het *vorige* pass (`viewport().this_pass.widgets` is nog aan het vullen, zie
-    // `Context::read_response`), en de klik zette het tabblad pas in de laatste pass. Dus het lichaam
-    // dat bij dat tabblad hoort, stond in geen enkele daarvoor getekende pass — en zijn adres kan pas
-    // de pass erna worden gelezen. Deze pass tekent dus wat een persoon één frame later al ziet.
-    paint_once(&ctx, &mut app);
-    assert!(
-        ctx.read_response(egui::Id::new(MODELS_FETCH)).is_some(),
-        "modelstabblad tekent geen Fetch-knop op {MODELS_FETCH}"
-    );
-}
-
-#[test]
 fn de_chat_body_raakt_niet_over_andere_tabbladen() {
     // De regression die dit bestand echt waardevol maakt: `transcript` en de composer hangen aan
     // `tab == Tab::Chat`. Een derde tab mag daar geen vierde toestand van maken — noch de boom van
@@ -151,29 +126,5 @@ fn de_chat_body_raakt_niet_over_andere_tabbladen() {
         let center = tab_rect(&ctx, &mut app, target).center();
         click_tab(&ctx, &mut app, center);
         assert_eq!(app.tab(), target, "tabblad {} kwam niet aan", target.label());
-    }
-}
-
-#[test]
-fn debug_adres() {
-    let ctx = addressable_context();
-    let mut app = baudet_ui::TranscriptApp::new(baudet_ui::TranscriptApp::demo_backend());
-    let center = tab_rect(&ctx, &mut app, Tab::Models).center();
-    click_tab(&ctx, &mut app, center);
-    for a in ["models-fetch-button", "models-use-button"] {
-        let direct = ctx.read_response(egui::Id::new(a));
-        let rooted = ctx.read_response(root_ui_id(&ctx).with(a));
-        println!("MEET {a}: direct={} rooted={}", direct.is_some(), rooted.is_some());
-    }
-    // De child-Ui van de wikkel is expliciet-id dus same(id,id); de Body-Scopes childen aan de
-    // wortel met zout "body". Beide keten-variatiepen opvragen.
-    let root = root_ui_id(&ctx);
-    for a in ["models-fetch-button", "models-use-button"] {
-        println!(
-            "MEET2 {a}: with={with} body={body} bodybody={bb}",
-            with = ctx.read_response(root.with(a)).is_some(),
-            body = ctx.read_response(root.with("body").with(a)).is_some(),
-            bb = ctx.read_response(root.with("body").with("body").with(a)).is_some(),
-        );
     }
 }

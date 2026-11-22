@@ -104,21 +104,20 @@ struct Snapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Chat,
-    Models,
     Settings,
 }
 
 impl Tab {
     /// The order and the words of the strip. `const` so the tabstrip and a test enumerate the same
-    /// three without either owning a copy of the list. The order is the reference app's
-    /// (`Main.kt:131-134`: Chat, Modellen, Ingestellingen), because a person who used that app
-    /// reaches for the same place.
-    pub const ALL: [Tab; 3] = [Tab::Chat, Tab::Models, Tab::Settings];
+    /// two without either owning a copy of the list. Het voorbeeld heeft drie tabs
+    /// (`Main.kt:131-134`: Chat, Modellen, Ingestellingen); het models-tabblad laten we weg omdat de
+    /// Settings-plukknop ná een scan élk model al toont — een aparte modellenlijst was een tweede
+    /// weergave van dezelfde lijst voor niets (besluit van de gebruiker).
+    pub const ALL: [Tab; 2] = [Tab::Chat, Tab::Settings];
 
     pub fn label(self) -> &'static str {
         match self {
             Tab::Chat => "Chat",
-            Tab::Models => "Models",
             Tab::Settings => "Settings",
         }
     }
@@ -630,7 +629,6 @@ impl TranscriptApp {
                 .stick_to_bottom(transcript && self.stick)
                 .show(ui, |ui| match tab {
                     Tab::Chat => self.transcript(ui),
-                    Tab::Models => settings::models_body(ui, &mut self.settings, &self.settings_tx),
                     Tab::Settings => settings::body(ui, &mut self.settings, &self.settings_tx),
                 });
             if transcript {
