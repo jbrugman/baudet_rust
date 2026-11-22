@@ -121,7 +121,7 @@ writes/gepinde calls blijven serieel.
       nooit op tool-*naam* hoeft te matchen.
       Besluit: `ToolResult` verloor `Clone` en kreeg `Debug`/`PartialEq` met de hand, want een sluiting is noch
       kopieer- noch vergelijkbaar en `Debug` toont alleen of er een handgreep is — dezelfde keuze die
-      `ToolContext` al voor zijn callbacks maakte. commit `TODO-HASH`.
+      `ToolContext` al voor zijn callbacks maakte. commit `2660bf8`.
 - [ ] `ExecuteTool` + `SafeCommands` + `CommandSignature` + `ExecuteWorkspace` + `ProcessRunner` — shell in map, TMPDIR, read-only auto / altijd-vraag, family-pin. `tool/{ExecuteTool,SafeCommands,CommandSignature,ExecuteWorkspace,ProcessRunner}.kt` (embed 0.62).
 - [ ] `GitTool` — lezen standaard; schrijft verbs (add/commit/checkout/stash/push) opt-in + Write-recht + goedkeuring; force-push/rewrite geblokkeerd. `tool/GitTool.kt` + `git/`.
 - [ ] `ToolGate` (Active/Disabled/NoProject/NoFolder/NoWrite) + ToolMode-afdwinging — `app/ToolGate.kt`, turn-decision.puml.
