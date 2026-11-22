@@ -17,7 +17,7 @@
 //! frame clock that stops draining would otherwise be a second, subtly different turn loop.
 
 use crate::palette;
-use crate::panels::{self, Changes, SidebarIntent, Workspace};
+use crate::panels::{self, Changes, SidebarIntent, Workspace, NO_FOLDER, NO_READ};
 use crate::rows::Row;
 use crate::settings::{self, SettingsCommand, SettingsEvent, SettingsView};
 use crate::sidebar::SidebarModel;
@@ -661,6 +661,28 @@ impl TranscriptApp {
             Some(crate::sidebar::Selection::Session { project, .. }) => project.clone(),
             _ => None,
         };
+        // `Main.kt:156` doet precies dit ene: `onSelectionChanged = { files.showProject(it) }`. De
+        // boom is geen tweede waarheid over welke map er open staat, maar een lezing van de linker
+        // keus, en `showProject` kent drie uitkomsten — map tonen, of zeggen dat er geen map is, of
+        // zeggen dat lezen hier niet mag. De woorden zijn die van `Key.kt:381-388`, want een ander
+        // woord zou een ander Paneel suggereren dan de app die deze navolgt.
+        match self.sidebar.selected_project() {
+            Some(project) => match project.folder_path.as_deref().filter(|p| !p.trim().is_empty()) {
+                None => self.workspace.show_message(NO_FOLDER),
+                Some(folder) if project.is_granted(baudet_projects::FolderPermission::Read) => {
+                    // Dezelfde map nogmaals openen is wel een gebeurtenis, en de origineler doet
+                    // het: `loadRoot` herleest de schijf. De wacht blijft hier wel: `open()` zet
+                    // `probed` en zou anders per klik de git-vraag herhalen voor een map die al
+                    // staat — idem `loadRoot`->`refresh()` achter de `watcher`-wachts van de origineler.
+                    if self.workspace.cwd() != Some(folder) {
+                        self.workspace.open(folder);
+                    }
+                }
+                Some(_) => self.workspace.show_message(NO_READ),
+            },
+            // Inbox of geen selectie: er is geen map om te tonen, dus de reden van de leegte.
+            None => self.workspace.show_message(NO_FOLDER),
+        }
     }
 
     /// Het project van de huidige selectie, of `None` (inbox, of niets gekozen).
@@ -718,6 +740,7 @@ impl TranscriptApp {
 /// zelf (`egui::Button`, `selectable_label`) zou een eigen auto-adres dragen dat van buiten niet te
 /// reconstruëren is, dus de klik wordt op de wikkel geteld, niet op die knop.
 pub const TABSTRIP: &str = "tabstrip";
+
 
 /// Het stabiele zout van het vraagveld.
 ///

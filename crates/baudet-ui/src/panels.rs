@@ -27,6 +27,12 @@ use std::path::{Path, PathBuf};
 /// built, `target` alone held more entries than every source directory combined.
 const IGNORED_DIRS: &[&str] = &["target", "node_modules", "build", "dist", "out"];
 
+/// `Key.FileTreeNoFolder`: de selectie heeft geen map, dus er is niets te tonen.
+pub const NO_FOLDER: &str = "Select a project with a linked folder to see its files.";
+
+/// `Key.FileTreeNoRead`: er is wél een map, maar deze app mag er niet in lezen.
+pub const NO_READ: &str = "Read access is not granted for this project's folder.";
+
 /// Directories descended per listing. A panel four rows deep is already showing more than a person
 /// scans, and an unbounded walk of a large checkout is work nobody asked for.
 const MAX_DEPTH: usize = 4;
@@ -48,6 +54,14 @@ const KEEP_TAIL: usize = 22;
 pub struct Workspace {
     /// The folder under inspection. Empty means nothing has been chosen yet.
     cwd: String,
+    /// Waarom er niets staat, in de woorden van de referentie-app. Een lege `cwd` kan twee dingen
+    /// betekenen — er is geen project gekozen, of het project heeft wel een map maar die mag hier
+    /// niet gelezen worden — en die twee verdienen verschillende tekst: `Main.kt:156` koppelt de
+    /// boom aan de selectie en `FileTreePanel.showProject` kiest tussen die twee meldingen. Eén
+    /// "no folder linked" voor beide zou een rechtenontzegging verbergen als een afwezigheid, en
+    /// iemand dan op de verkeerde plek gaan zoeken (bij de ingest, niet bij de maprechten).
+    message: Option<&'static str>,
+
     /// Whether the current folder has been probed. Opening a folder and switching to another are
     /// one event -- "this folder is now the subject" -- so the caller refreshes on the first folder
     /// for the same reason it refreshes on the second, and `Workspace` stays the only owner of
@@ -78,6 +92,26 @@ impl Workspace {
     pub fn open(&mut self, path: &str) {
         self.cwd = path.trim().to_string();
         self.probed = false;
+        // Wie zelf een map noemt, hoeft geen uitleg meer waarom er niets stond.
+        self.message = None;
+    }
+
+    /// Laat de boom een reden tonen in plaats van een map: `FileTreePanel.showProject:211-219`.
+    ///
+    /// Onvoorwaardelijk, net als de origineler. `ProjectSidebar.kt:187` geeft bij élke echte
+    /// selectie door — de enige wacht is zijn `refreshing`-vlag tijdens een heropbouw — en
+    /// `showProject` toon daarna wat dat project heeft: zijn map, of de reden dat er geen is.
+    /// Een dedupe op project-id zou dat breken: een map die zojuist aan het al geselecteerde
+    /// project is gekoppeld, moet meteen tonen.
+    pub fn show_message(&mut self, text: &'static str) {
+        self.cwd.clear();
+        self.probed = false;
+        self.message = Some(text);
+    }
+
+    /// De uitleg die de boom moet tonen, of `None` wanneer er een map staat.
+    pub fn message(&self) -> Option<&'static str> {
+        self.message
     }
 
     /// The folder being shown, or `None` when nothing has been chosen.
@@ -273,8 +307,14 @@ pub fn file_tree_controls(
         // shown, because its paths are repository-relative to exactly that folder.
         let status = FileStatus::build(chosen.as_deref(), changes);
         match &chosen {
+            // De reden van de leegte, niet de afwezigheid: `FileTreePanel` wisselt tussen de boom en
+            // een melding (`cards`/`showMessage`), en die melding zegt wélk geval het is — geen map
+            // gekoppeld, of geen leestoegang. Zonder die tekst is "mag niet lezen" niet te
+            // onderscheiden van "vergeten te koppelen", en dat zijn twee verschillende plekken om te
+            // zoeken. Langere zinnen wrappen hier, dus de breedte gaat mee met de strook.
             None => {
-                ui.label(dim("No folder chosen."));
+                let text = workspace.message().unwrap_or("No folder chosen.");
+                ui.label(dim(text));
             }
             Some(cwd) => {
                 let root = PathBuf::from(cwd);
@@ -1184,6 +1224,56 @@ mod tests {
         assert_eq!(files, vec!["main.rs".to_string()], "the files of the level show, dot files do not");
     }
 
+    /// De koppeling van `Main.kt:156`: de boom is een lezing van de linkerselectie, dus
+    /// De koppeling van `Main.kt:156`: de boom is een lezing van de linkerselectie, dus
+    /// `apply_sidebar_intents` eindigt met wat `showProject` zou doen. Die drieling — map
+    /// tonen, 'geen map', of 'geen leestoegang' — leeft hier in `show_message`/`open` en is
+    /// hier bewezen in plaats van in pixels nagemeten.
+    #[test]
+    fn een_selectie_zonder_map_verduistert_de_boom_met_zijn_reden() {
+        let mut workspace = Workspace::default();
+        workspace.show_message(NO_FOLDER);
+        assert_eq!(workspace.cwd(), None, "een melding laat de map van een eerder project staan");
+        assert_eq!(workspace.message(), Some(NO_FOLDER), "de boom zegt dat er geen map is");
+    }
+
+    /// De selectie wint van de handmatige kiezer, zoals de origineler doet: `showProject` laadt
+    /// wat het gekozen project heeft, ook al bladerde de persoon daarvoor zelf elders. Dit is
+    /// precies het geval dat een dedupe op project-id stil zou laten falen: de map die zojuist
+    /// aan het al geselecteerde project is gekoppeld, moet meteen tonen.
+    #[test]
+    fn een_selectie_vervangt_de_handmatig_gekozen_map() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut workspace = Workspace::default();
+        workspace.open(&dir.path().to_string_lossy());
+        workspace.show_message(NO_FOLDER);
+        assert_eq!(workspace.cwd(), None, "het project zonder map vervangt de gebladerde map");
+        assert_eq!(workspace.message(), Some(NO_FOLDER));
+        workspace.open(&dir.path().to_string_lossy());
+        assert_eq!(workspace.cwd(), Some(dir.path().to_string_lossy().as_ref()), "de nieuwe koppeling toont");
+        assert_eq!(workspace.message(), None, "met een map is er niets meer te zeggen");
+    }
+
+    /// Twee opeenvolgende redenen: de jongste is wat de boom zegt, want de selectie is de bron.
+    #[test]
+    fn de_laatste_selectie_bepaalt_de_reden() {
+        let mut workspace = Workspace::default();
+        workspace.show_message(NO_READ);
+        assert_eq!(workspace.message(), Some(NO_READ), "geen leestoegang is een eigen reden");
+        workspace.show_message(NO_FOLDER);
+        assert_eq!(workspace.message(), Some(NO_FOLDER), "de jongste selectie is wat er staat");
+    }
+
+    /// Zelf een map noemen is geen projectgebeurtenis, maar wist wel de reden die er stond.
+    #[test]
+    fn een_geopende_map_houdt_geen_reden_meer_over() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut workspace = Workspace::default();
+        workspace.show_message(NO_FOLDER);
+        workspace.open(&dir.path().to_string_lossy());
+        assert_eq!(workspace.message(), None, "wie zelf een map kiest, hoeft geen uitleg meer");
+        assert_eq!(workspace.cwd(), Some(dir.path().to_string_lossy().as_ref()));
+    }
     #[test]
     fn folders_are_listed_before_files() {
         let dir = tempfile::TempDir::new().unwrap();

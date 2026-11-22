@@ -36,8 +36,8 @@ pub use app::{run, run_from, Startup, TranscriptApp};
 // `root_ui_id(ctx).with(..)`, zoals de tabknoppen (`TABSTRIP`) en de modelknop (`SELECTED_ROW`). Een
 // `.id_salt`-veld adresseert relatief aan zijn ouder-`Ui` en is die keten hier bewust níét: geen
 // enkele root-keten gaf dat adres (gemeten), dus de velden worden niet op adres getest.
-pub use app::{root_ui_id, TABSTRIP};
-pub use panels::FOLDER_OPEN;
+pub use app::{root_ui_id, Tab, TABSTRIP};
+pub use panels::{FOLDER_OPEN, NO_FOLDER, NO_READ};
 // De intenties en het adres van de `Add project`-knop: tests/folder_open.rs en tests/project_tree.rs
 // klikken op dat adres, dus het moet van buiten te noemen zijn, zoals `FOLDER_OPEN`.
 pub use palette::DiffLine;
@@ -48,7 +48,6 @@ pub use sidebar::{Confirm, NameAsk, Selection, SidebarModel, SidebarOutcome};
 // Het tabbladtype hoort bij de publiek testbare grens: tests/tabs.rs tekent er een na met dezelfde
 // knoppen die een persoon indrukt, en heeft daar zowel de startkeus (`with_tab`) als de lezing van
 // het antwoord (`tab()`) voor nodig.
-pub use app::Tab;
 pub use settings::{
     body as settings_body, models_body, SettingsCommand, SettingsEvent, SettingsView, MODELS_FETCH,
     MODELS_USE,
