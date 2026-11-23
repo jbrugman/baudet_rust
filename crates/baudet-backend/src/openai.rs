@@ -21,6 +21,7 @@ pub struct RequestShape<'a> {
     pub image: Option<&'a str>,
     pub max_output_tokens: Option<u32>,
     pub reasoning: Option<&'a str>,
+    pub enable_thinking: Option<bool>,
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub store: bool,
@@ -36,12 +37,16 @@ pub fn request_body(shape: &RequestShape<'_>) -> Map<String, Value> {
     body.insert("stream".into(), Value::Bool(true));
     body.insert("store".into(), Value::Bool(shape.store));
     insert_sampling(&mut body, shape);
+    insert_thinking_template(&mut body, shape.enable_thinking);
     if let Some(tokens) = shape.max_output_tokens.filter(|t| *t > 0) {
         body.insert("max_output_tokens".into(), Value::from(tokens));
     }
     if let Some(effort) = shape.reasoning.filter(|e| !e.is_empty()) {
         let mut reasoning = Map::new();
         reasoning.insert("effort".into(), effort.into());
+        if effort != REASONING_NONE {
+            reasoning.insert("summary".into(), "auto".into());
+        }
         body.insert("reasoning".into(), Value::Object(reasoning));
     }
     if let Some(tools) = shape.tools {
@@ -84,6 +89,12 @@ pub fn request_body(shape: &RequestShape<'_>) -> Map<String, Value> {
     });
     body.insert("input".into(), Value::Array(input));
     body
+}
+
+pub(crate) fn insert_thinking_template(body: &mut Map<String, Value>, enabled: Option<bool>) {
+    if let Some(enabled) = enabled {
+        body.insert("chat_template_kwargs".into(), serde_json::json!({ "enable_thinking": enabled }));
+    }
 }
 
 pub(crate) fn insert_sampling(body: &mut Map<String, Value>, shape: &RequestShape<'_>) {

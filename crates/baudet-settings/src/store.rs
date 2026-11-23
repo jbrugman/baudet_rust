@@ -157,6 +157,7 @@ mod tests {
             base_url: "http://studio:8000/v1".into(),
             model: Some("Qwen3.8-Flash".into()),
             reasoning: Some("high".into()),
+            thinking_template: true,
             max_output_tokens: Some(4096),
             api_key: Some("sk-local".into()),
             api_key_env_var: "SOME_OTHER_KEY".into(),

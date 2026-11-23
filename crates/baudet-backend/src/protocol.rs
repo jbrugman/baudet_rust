@@ -47,6 +47,7 @@ impl Protocol {
 pub fn chat_request_body(shape: &crate::openai::RequestShape<'_>) -> Map<String, Value> {
     let mut body = Map::new();
     crate::openai::insert_sampling(&mut body, shape);
+    crate::openai::insert_thinking_template(&mut body, shape.enable_thinking);
     body.insert("model".into(), shape.model.into());
     body.insert("stream".into(), Value::Bool(true));
     let mut stream_options = Map::new();
@@ -54,6 +55,9 @@ pub fn chat_request_body(shape: &crate::openai::RequestShape<'_>) -> Map<String,
     body.insert("stream_options".into(), Value::Object(stream_options));
     if let Some(tokens) = shape.max_output_tokens.filter(|t| *t > 0) {
         body.insert("max_tokens".into(), Value::from(tokens));
+    }
+    if let Some(effort) = shape.reasoning.filter(|effort| !effort.is_empty()) {
+        body.insert("reasoning_effort".into(), effort.into());
     }
 
     let mut messages = Vec::new();

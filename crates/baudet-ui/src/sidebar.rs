@@ -249,15 +249,6 @@ impl SidebarModel {
         self.catalog.rename_session(id, title).map_err(|error| error.to_string())
     }
 
-    pub fn delete_session(&mut self, id: &str) -> Result<(), String> {
-        let project = self.catalog.project_of_session(id);
-        self.catalog.delete_session(id).map_err(|error| error.to_string())?;
-        if self.selected_session_id() == Some(id) {
-            self.select_project(project.as_deref());
-        }
-        Ok(())
-    }
-
     pub fn delete_project(&mut self, id: &str) -> Result<(), String> {
         self.catalog.delete_project(id).map_err(|error| error.to_string())?;
         if self.selected_project().is_some_and(|project| project.id == id) {
@@ -327,7 +318,7 @@ impl SidebarModel {
         }
         match confirm {
             Confirm::DeleteProject(id, _) => self.delete_project(&id).ok().map(|_| SidebarOutcome::DeletedProject),
-            Confirm::DeleteSession(id) => self.delete_session(&id).ok().map(|_| SidebarOutcome::DeletedSession),
+            Confirm::DeleteSession(id) => Some(SidebarOutcome::DeleteSession(id)),
         }
     }
 
@@ -336,10 +327,10 @@ impl SidebarModel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarOutcome {
     DeletedProject,
-    DeletedSession,
+    DeleteSession(String),
 }
 
 impl SidebarModel {

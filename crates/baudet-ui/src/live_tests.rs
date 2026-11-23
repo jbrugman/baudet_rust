@@ -140,6 +140,57 @@ fn wait_for_snapshot(snapshots: &mut ampcc::UnboundedReceiver<Snapshot>, matches
 }
 
 #[test]
+fn deleting_the_active_conversation_waits_for_the_turn_and_keeps_the_next_draft() {
+    use baudet_backend::scripted::Step;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().to_owned();
+    let catalog = baudet_projects::Catalog::open(&root).unwrap();
+    let (release, released) = mpsc::channel();
+    let released = std::sync::Mutex::new(released);
+    let script = Script::new().step(Step::RawSse {
+        lines: vec!["data: finished".into(), String::new()],
+        to_event: Arc::new(move |_| {
+            released.lock().unwrap().recv_timeout(WAIT).unwrap();
+            None
+        }),
+    });
+    let state = Arc::new(AppState::new(Arc::new(ScriptedBackend::new(vec![script])), "test"));
+    let other = Arc::clone(&state);
+    let (intents, requests) = mpsc::channel();
+    let (snapshots, mut frames) = ampcc::unbounded_channel();
+    let (settings, _edits) = mpsc::channel();
+    let worker_catalog = catalog.clone();
+    let worker = std::thread::spawn(move || {
+        worker_loop(other, Some(root), requests, snapshots, Arc::default(), worker_catalog, settings);
+    });
+
+    intents.send(Intent::NewSession(None)).unwrap();
+    intents.send(Intent::Submit("turn in progress".into(), None)).unwrap();
+    wait_for_snapshot(&mut frames, |frame| frame.busy);
+    let id = state.session_id();
+    let (reply, result) = mpsc::channel();
+    intents.send(Intent::DeleteSession { id: id.clone(), reply }).unwrap();
+    assert!(matches!(result.recv_timeout(Duration::from_millis(50)), Err(mpsc::RecvTimeoutError::Timeout)));
+    assert_eq!(catalog.sessions_in(None)[0].id, id);
+
+    release.send(()).unwrap();
+    let deleted = result.recv_timeout(WAIT).unwrap().unwrap();
+    assert!(deleted.was_active && deleted.cleanup_warning.is_none());
+    assert!(catalog.sessions_in(None).is_empty());
+    assert!(state.session_id().is_empty());
+    assert!(baudet_store::Rollout::sessions(directory.path()).unwrap().is_empty());
+
+    intents.send(Intent::Submit("the next conversation".into(), None)).unwrap();
+    wait_for_snapshot(&mut frames, |frame| {
+        !frame.busy && frame.turns.0 > 0 && frame.rows.iter().any(|row| row.body == "the next conversation")
+    });
+    assert_ne!(state.session_id(), id);
+    assert_eq!(catalog.sessions_in(None).len(), 1);
+    intents.send(Intent::Quit).unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
 fn stop_releases_a_silent_stream_and_the_next_turn_uses_the_saved_connection() {
     let (first, base_url) = listen();
     let (second, next_base_url) = listen();
@@ -151,6 +202,9 @@ fn stop_releases_a_silent_stream_and_the_next_turn_uses_the_saved_connection() {
         assert_eq!(auth, "Bearer first-test-key");
         assert_eq!(body["model"], "first-model");
         assert_eq!(body["instructions"], baudet_settings::DEFAULT_SYSTEM_PROMPT);
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["reasoning"]["summary"], "auto");
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
         assert_eq!(body["temperature"], 0.3);
         assert!(body.get("top_p").is_none());
         start_stream(&mut socket, r#"{"type":"response.output_text.delta","delta":"partial answer"}"#);
@@ -174,6 +228,8 @@ fn stop_releases_a_silent_stream_and_the_next_turn_uses_the_saved_connection() {
         base_url,
         protocol: Some("responses".into()),
         model: Some("first-model".into()),
+        reasoning: Some("low".into()),
+        thinking_template: true,
         api_key: Some("first-test-key".into()),
         temperature: 0.3,
         ..Default::default()
@@ -203,6 +259,7 @@ fn stop_releases_a_silent_stream_and_the_next_turn_uses_the_saved_connection() {
         protocol: Some("chat_completions".into()),
         api_key: Some("second-test-key".into()),
         model: Some("second-model".into()),
+        reasoning: Some("none".into()),
         temperature: 0.6,
         top_p: Some(0.8),
         ..initial
@@ -232,6 +289,8 @@ fn stop_releases_a_silent_stream_and_the_next_turn_uses_the_saved_connection() {
     assert_eq!(body["temperature"], 0.6);
     assert_eq!(body["top_p"], 0.8);
     assert_eq!(body["max_tokens"], 123);
+    assert_eq!(body["reasoning_effort"], "none");
+    assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
     assert_eq!(body["messages"][0]["role"], "system");
     assert_eq!(body["messages"][0]["content"], "Use the project glossary.\nKeep identifiers intact.");
     assert_eq!(body["messages"][2]["content"], "partial answer");

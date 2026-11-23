@@ -50,6 +50,7 @@ pub struct SettingsView {
     protocol: Option<String>,
     tool_mode: ToolMode,
     reasoning: Reasoning,
+    thinking_template: bool,
     max_output_tokens: String,
     max_tool_iterations: String,
     stored_max_tool_iterations: u32,
@@ -93,6 +94,7 @@ pub struct SettingsView {
 pub enum Reasoning {
     #[default]
     Unset,
+    Off,
     Minimal,
     Low,
     Medium,
@@ -100,12 +102,13 @@ pub enum Reasoning {
 }
 
 impl Reasoning {
-    const ALL: [Reasoning; 5] =
-        [Reasoning::Unset, Reasoning::Minimal, Reasoning::Low, Reasoning::Medium, Reasoning::High];
+    const ALL: [Reasoning; 6] =
+        [Reasoning::Unset, Reasoning::Off, Reasoning::Minimal, Reasoning::Low, Reasoning::Medium, Reasoning::High];
 
     fn as_str(self) -> Option<&'static str> {
         match self {
             Reasoning::Unset => None,
+            Reasoning::Off => Some(baudet_backend::openai::REASONING_NONE),
             Reasoning::Minimal => Some("minimal"),
             Reasoning::Low => Some("low"),
             Reasoning::Medium => Some("medium"),
@@ -116,6 +119,7 @@ impl Reasoning {
     fn label(self) -> &'static str {
         match self {
             Reasoning::Unset => "default",
+            Reasoning::Off => Texts::get(Key::ReasoningOff),
             Reasoning::Minimal => "minimal",
             Reasoning::Low => "low",
             Reasoning::Medium => "medium",
@@ -125,6 +129,7 @@ impl Reasoning {
 
     pub(crate) fn from_stored(stored: Option<&str>) -> Reasoning {
         match stored.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(baudet_backend::openai::REASONING_NONE) => Reasoning::Off,
             Some("minimal") => Reasoning::Minimal,
             Some("low") => Reasoning::Low,
             Some("medium") => Reasoning::Medium,
@@ -168,6 +173,7 @@ impl SettingsView {
         self.base_url = settings.base_url.clone();
         self.model = settings.model.clone();
         self.reasoning = Reasoning::from_stored(settings.reasoning.as_deref());
+        self.thinking_template = settings.thinking_template;
         self.max_output_tokens = settings.max_output_tokens.map(|n| n.to_string()).unwrap_or_default();
         self.max_tool_iterations = settings.max_tool_iterations.to_string();
         self.stored_max_tool_iterations = settings.max_tool_iterations;
@@ -234,6 +240,7 @@ impl SettingsView {
             base_url: self.base_url.trim().to_string(),
             model: self.model.clone().filter(|m| !m.trim().is_empty()),
             reasoning: self.reasoning.as_str().map(str::to_string),
+            thinking_template: self.thinking_template,
             max_output_tokens,
             api_key: Some(self.api_key.clone()).filter(|k| !k.trim().is_empty()),
             api_key_env_var: self.api_key_env_var.trim().to_string(),
@@ -758,6 +765,7 @@ fn reasoning_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
         reasoning.on_hover_text(Texts::get(Key::TipReasoning));
         view.reasoning = current;
     });
+    ui.checkbox(&mut view.thinking_template, Texts::get(Key::ThinkingTemplate));
 }
 
 fn toggle_rows(ui: &mut Ui, view: &mut SettingsView) {
@@ -1386,7 +1394,7 @@ git com"
 
     #[test]
     fn a_stored_level_survives_the_panel_and_an_unknown_one_does_not_become_a_level() {
-        for level in [Reasoning::Minimal, Reasoning::Low, Reasoning::Medium, Reasoning::High] {
+        for level in [Reasoning::Off, Reasoning::Minimal, Reasoning::Low, Reasoning::Medium, Reasoning::High] {
             let stored = level.as_str();
             assert_eq!(Reasoning::from_stored(stored), level, "round trip for {stored:?}");
         }
@@ -1408,6 +1416,12 @@ git com"
         assert_eq!(settings.model.as_deref(), Some("DeepSeek-V4-Flash"));
         assert_eq!(settings.api_key.as_deref(), Some("typed-by-hand"));
         assert_eq!(settings.base_url, "http://127.0.0.1:8000/v1");
+
+        panel.adopt(&baudet_settings::Settings { reasoning: Some("none".into()), thinking_template: true, ..settings });
+        assert_eq!(panel.reasoning, Reasoning::Off);
+        let settings = panel.draft().unwrap();
+        assert_eq!(settings.reasoning.as_deref(), Some("none"));
+        assert!(settings.thinking_template);
     }
 
     #[test]

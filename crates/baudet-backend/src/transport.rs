@@ -54,6 +54,7 @@ pub struct Endpoint {
     pub protocol: Protocol,
     pub model: String,
     pub store: bool,
+    pub thinking_template: bool,
 }
 
 impl Endpoint {
@@ -173,6 +174,8 @@ impl Shared {
         state: &mut StreamState,
     ) -> Result<Turn, BackendError> {
         let reasoning = request.reasoning.as_deref().or(self.reasoning.as_deref());
+        let enable_thinking = reasoning.filter(|effort| self.endpoint.thinking_template && !effort.is_empty())
+            .map(|effort| effort != crate::openai::REASONING_NONE);
         let model = request.model.as_deref().filter(|m| !m.trim().is_empty()).unwrap_or(&self.endpoint.model);
         if model.trim().is_empty() {
             return Err(BackendError::Core(CoreError::Unanswered { request: "no model chosen; pick one in settings" }));
@@ -188,6 +191,7 @@ impl Shared {
             image: request.image.as_deref(),
             max_output_tokens: request.max_output_tokens,
             reasoning,
+            enable_thinking,
             temperature: self.temperature,
             top_p: self.top_p,
             store: self.endpoint.store,
@@ -323,6 +327,7 @@ impl Shared {
             body = request_body(&shape);
             body.insert("stream".into(), Value::Bool(false));
         }
+        crate::openai::insert_thinking_template(&mut body, self.endpoint.thinking_template.then_some(false));
         let mut call = self
             .client
             .post(self.endpoint.url_for(self.endpoint.protocol))

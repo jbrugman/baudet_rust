@@ -97,6 +97,7 @@ fn a_stream_that_ends_closes_the_row_it_opened() {
         protocol: Protocol::ChatCompletions,
         model: "fixture-model".into(),
         store: false,
+        thinking_template: false,
     };
     let backend = ResponsesBackend::new(endpoint, None).expect("the fixture speaks this dialect");
     let request = SendRequest { system: "sys".into(), user_text: "vraag".into(), ..Default::default() };
@@ -136,6 +137,7 @@ fn a_closed_row_carries_the_turn_it_belongs_to() {
         protocol: Protocol::ChatCompletions,
         model: "fixture-model".into(),
         store: false,
+        thinking_template: false,
     };
     let backend = ResponsesBackend::new(endpoint, None).expect("the fixture speaks this dialect");
     let mut handle = backend

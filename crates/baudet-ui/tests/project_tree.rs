@@ -1,8 +1,8 @@
 
-use baudet_i18n::{Language, Texts};
+use baudet_i18n::{Key, Language, Texts};
 use baudet_projects::{FolderPermission, Permissions};
 use baudet_ui::sidebar::{Confirm, NameAsk, Selection, SidebarModel, SidebarOutcome};
-use baudet_ui::{root_ui_id, TranscriptApp, ASK_OK, SIDEBAR_ADD};
+use baudet_ui::{root_ui_id, TranscriptApp, ASK_OK, CONFIRM_YES, SIDEBAR_ADD};
 use eframe::egui;
 use std::sync::{Mutex, MutexGuard};
 use tempfile::TempDir;
@@ -40,6 +40,16 @@ fn click_at(ctx: &egui::Context, app: &mut TranscriptApp, center: egui::Pos2, bu
         });
         ctx.run_ui(frame, |ui| app.paint(ui)).drop_without_applying_deltas();
     }
+}
+
+fn label_at(ctx: &egui::Context, app: &mut TranscriptApp, label: &str) -> egui::Pos2 {
+    let output = ctx.run_ui(input(), |ui| app.paint(ui));
+    let pos = output.shapes.iter().find_map(|shape| match &shape.shape {
+        egui::Shape::Text(text) if text.galley.text() == label => Some(text.pos + text.galley.size() / 2.0),
+        _ => None,
+    });
+    output.drop_without_applying_deltas();
+    pos.unwrap_or_else(|| panic!("missing label: {label}"))
 }
 
 fn private_data_home() -> (MutexGuard<'static, ()>, TempDir) {
@@ -242,17 +252,61 @@ fn een_wissel_van_map_houdt_de_rechten_die_er_stonden() {
 }
 
 #[test]
-fn een_sessie_verwijderen_lat_het_project_en_zijn_map_staan() {
-    let (_guard, _home, mut model) = model_in_tempdir();
+fn a_project_right_click_opens_its_menu_in_release_too() {
+    let (_guard, _data, mut model) = model_in_tempdir();
+    model.add_project("Menu project").unwrap();
+    let ctx = addressable_context();
+    let mut app = TranscriptApp::new(TranscriptApp::demo_backend()).with_sidebar_model(model);
+    paint_once(&ctx, &mut app);
+    let project = label_at(&ctx, &mut app, "Menu project");
+    click_at(&ctx, &mut app, project, egui::PointerButton::Secondary);
+    label_at(&ctx, &mut app, Texts::get(Key::LinkFolderButton));
+}
+
+#[test]
+fn deleting_a_conversation_removes_its_files_and_keeps_the_project() {
+    use baudet_store::{Rollout, SessionMeta};
+    let (_guard, data, mut model) = model_in_tempdir();
+    let linked = TempDir::new().unwrap();
+    let source = linked.path().join("keep.txt");
+    std::fs::write(&source, "project content").unwrap();
     let project = model.add_project("Blijft").unwrap();
-    model.link_folder(&project.id, Some("/tmp")).unwrap();
+    model.link_folder(&project.id, linked.path().to_str()).unwrap();
     let session = model.add_session(Some(&project.id)).unwrap();
-    model.start_confirm(Confirm::DeleteSession(session.id.clone()));
-    assert_eq!(model.answer_confirm(true), Some(SidebarOutcome::DeletedSession));
-    assert_eq!(model.catalog().list_projects().len(), 1);
-    assert!(stored(&model, &project.id).folder_path.is_some(), "het gesprek nam de map van het project mee");
-    assert!(model.catalog().sessions_in(Some(&project.id)).is_empty());
-    assert_eq!(model.selection(), Some(&Selection::Project(project.id.clone())));
+    model.rename_session(&session.id, "Delete me").unwrap();
+    let sibling = model.add_session(Some(&project.id)).unwrap();
+    model.select_session(&session.id);
+    let mut rollout = Rollout::create(data.path(), &SessionMeta::new(&session.id)).unwrap();
+    rollout.append_msg(&baudet_core::Msg::user("conversation message")).unwrap();
+    let removed = rollout.path().to_owned();
+    drop(rollout);
+    let kept = Rollout::create(data.path(), &SessionMeta::new(&sibling.id)).unwrap().path().to_owned();
+
+    let ctx = addressable_context();
+    let mut app = TranscriptApp::new(TranscriptApp::demo_backend()).with_sidebar_model(model);
+    paint_once(&ctx, &mut app);
+    let row = label_at(&ctx, &mut app, "Delete me");
+    click_at(&ctx, &mut app, row, egui::PointerButton::Secondary);
+    let delete = label_at(&ctx, &mut app, Texts::get(Key::DeleteConversationButton));
+    click_at(&ctx, &mut app, delete, egui::PointerButton::Primary);
+    paint_once(&ctx, &mut app);
+    let confirm = ctx.read_response(root_ui_id(&ctx).with((CONFIRM_YES, "yes"))).unwrap().rect.center();
+    click_at(&ctx, &mut app, confirm, egui::PointerButton::Primary);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !app.header_status().contains("conversation deleted") && std::time::Instant::now() < deadline {
+        paint_once(&ctx, &mut app);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(app.header_status(), "conversation deleted");
+    assert!(!removed.exists());
+    assert!(kept.is_dir());
+    assert_eq!(std::fs::read_to_string(source).unwrap(), "project content");
+    assert_eq!(stored(app.sidebar(), &project.id).folder_path.as_deref(), linked.path().to_str());
+    let reopened = baudet_projects::Catalog::open(data.path()).unwrap();
+    let remaining = reopened.sessions_in(Some(&project.id));
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, sibling.id);
+    assert_eq!(app.sidebar().selection(), Some(&Selection::Project(project.id)));
 }
 
 #[test]

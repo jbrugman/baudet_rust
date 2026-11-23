@@ -51,6 +51,11 @@ Terminal. Voor een macOS-app in Programma’s kan dat met
 `/Applications/Baudet.app/Contents/MacOS/baudet-ui`. Een start vanuit Finder erft
 de variabelen van je Terminal niet.
 
+Bij **reasoning-effort** laat **Default** de server kiezen. Met **Uit** vraag je de
+server om redenering uit te schakelen. Bij een gekozen niveau vraagt Baudet redenering
+aan. Vink voor een compatibele server zoals oMLX **Gebruik de thinking-schakelaar van
+de server** aan om redenering expliciet aan of uit te zetten bij een gemaakte keuze.
+
 ### Datamap
 
 Baudet bewaart instellingen, projecten en gesprekken lokaal. Met `--home <map>` kies je

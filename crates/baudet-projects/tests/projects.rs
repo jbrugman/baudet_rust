@@ -5,6 +5,30 @@ use std::fs;
 use tempfile::TempDir;
 
 #[test]
+fn failed_catalogue_write_restores_the_conversation_rollout() {
+    use baudet_store::{Rollout, SessionMeta};
+    let root = TempDir::new().unwrap();
+    let catalog = Catalog::open(root.path()).unwrap();
+    let id = baudet_projects::new_session_id();
+    catalog.upsert_session(&id, None, None, 1).unwrap();
+    let mut rollout = Rollout::create(root.path(), &SessionMeta::new(&id)).unwrap();
+    rollout.append_msg(&Msg::user("keep this message")).unwrap();
+    let path = rollout.path().to_owned();
+    drop(rollout);
+    let index = root.path().join("projects.json");
+    fs::remove_file(&index).unwrap();
+    fs::create_dir(index).unwrap();
+
+    assert!(catalog.delete_session(&id, root.path()).is_err());
+    assert_eq!(catalog.sessions_in(None)[0].id, id);
+    assert!(path.is_dir());
+    assert_eq!(
+        baudet_store::Transcript::open_or_create(root.path(), &id, None, None).unwrap().message_count().unwrap(),
+        1
+    );
+}
+
+#[test]
 fn catalogus_leeft_een_herstart_en_bewaart_projectvolgorde() {
     let root = TempDir::new().unwrap();
     let catalog = Catalog::open(root.path()).unwrap();

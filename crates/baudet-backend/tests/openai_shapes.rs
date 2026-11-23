@@ -27,9 +27,39 @@ fn reasoning_default_sends_nothing_and_a_named_effort_names_it() {
     assert!(plain.get("reasoning").is_none());
     let effort = body(baudet_backend::openai::RequestShape { reasoning: Some("low"), ..shape("m", "hi") });
     assert_eq!(effort["reasoning"]["effort"], "low");
+    assert_eq!(effort["reasoning"]["summary"], "auto");
     let summarising =
         body(baudet_backend::openai::RequestShape { reasoning: Some(REASONING_NONE), ..shape("m", "hi") });
     assert_eq!(summarising["reasoning"]["effort"], "none");
+    assert!(summarising["reasoning"].get("summary").is_none());
+}
+
+#[test]
+fn chat_completions_sends_the_selected_reasoning_effort() {
+    use baudet_backend::{openai::RequestShape, protocol::chat_request_body};
+
+    assert!(!chat_request_body(&shape("m", "hi")).contains_key("reasoning_effort"));
+    for effort in ["minimal", "low", "medium", "high"] {
+        let body = chat_request_body(&RequestShape { reasoning: Some(effort), ..shape("m", "hi") });
+        assert_eq!(body["reasoning_effort"], effort);
+    }
+}
+
+#[test]
+fn each_protocol_can_send_a_thinking_override() {
+    use baudet_backend::{openai::RequestShape, protocol::chat_request_body};
+
+    for serialize in [request_body, chat_request_body] {
+        assert!(!serialize(&shape("m", "hi")).contains_key("chat_template_kwargs"));
+        for (effort, enabled) in [("low", true), (REASONING_NONE, false)] {
+            let body = serialize(&RequestShape {
+                reasoning: Some(effort),
+                enable_thinking: Some(enabled),
+                ..shape("m", "hi")
+            });
+            assert_eq!(body["chat_template_kwargs"]["enable_thinking"], enabled);
+        }
+    }
 }
 
 #[test]

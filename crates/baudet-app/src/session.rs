@@ -527,6 +527,11 @@ impl AppState {
         self.active.lock().unwrap().session_id.clone()
     }
 
+    pub fn clear_session(&self) {
+        *self.transcript.lock().unwrap() = None;
+        self.adopt(Session::new("", self.model()));
+    }
+
     pub fn disk_items(&self) -> Option<usize> {
         let transcript = self.transcript.lock().unwrap();
         let transcript = transcript.as_ref()?;

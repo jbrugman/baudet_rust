@@ -214,6 +214,7 @@ pub const FOLDER_NONE: &str = "no folder linked";
 pub enum SidebarIntent {
     OpenSession(String),
     StartChat(Option<String>),
+    DeleteSession(String),
     Deleted,
 }
 
@@ -322,7 +323,6 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: &mut f32, m
                     model.select_project(Some(&project.id));
                     intents.push(SidebarIntent::StartChat(Some(project.id.clone())));
                 }
-                #[cfg(debug_assertions)]
                 row_menu(ui, &response.header_response, model, Some(project.id.clone()), None, &mut intents);
             }
 
@@ -483,8 +483,12 @@ fn ask_and_confirm(ui: &mut Ui, model: &mut SidebarModel, intents: &mut Vec<Side
                 )
                 .response
                 .clicked();
-            if yes && model.answer_confirm(true).is_some() {
-                intents.push(SidebarIntent::Deleted);
+            if yes {
+                match model.answer_confirm(true) {
+                    Some(crate::sidebar::SidebarOutcome::DeleteSession(id)) => intents.push(SidebarIntent::DeleteSession(id)),
+                    Some(crate::sidebar::SidebarOutcome::DeletedProject) => intents.push(SidebarIntent::Deleted),
+                    None => {}
+                }
             }
             if ui.button(Texts::get(Key::No)).clicked() {
                 model.cancel_confirm();

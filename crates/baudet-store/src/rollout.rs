@@ -29,7 +29,52 @@ pub struct Rollout {
     detail_file: fs::File,
 }
 
+pub struct StagedRolloutDeletion {
+    original: PathBuf,
+    staging: PathBuf,
+}
+
+impl StagedRolloutDeletion {
+    pub fn restore(self) -> std::io::Result<()> {
+        fs::rename(self.staging.join("rollout"), &self.original)?;
+        let _ = fs::remove_dir(self.staging);
+        Ok(())
+    }
+
+    pub fn finish(self) -> std::io::Result<()> {
+        fs::remove_dir_all(self.staging)
+    }
+}
+
 impl Rollout {
+    pub fn stage_deletion(root: &Path, id: &str) -> std::io::Result<Option<StagedRolloutDeletion>> {
+        use std::io::{Error, ErrorKind};
+
+        if Path::new(id).file_name() != Some(std::ffi::OsStr::new(id)) {
+            return Err(Error::new(ErrorKind::InvalidInput, "invalid conversation ID"));
+        }
+        let day = root.join(sessions_root(id));
+        let original = day.join(id);
+        for dir in [&day, &original] {
+            match fs::symlink_metadata(dir) {
+                Ok(meta) if meta.is_dir() => {}
+                Ok(_) => return Err(Error::new(ErrorKind::InvalidData, "conversation path is not a directory")),
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+        if !read_meta(&original)?.is_some_and(|meta| meta.session_id == id) {
+            return Err(Error::new(ErrorKind::InvalidData, "conversation metadata does not match its ID"));
+        }
+        let staging = day.join(format!(".{id}.deleting"));
+        fs::create_dir(&staging)?;
+        if let Err(error) = fs::rename(&original, staging.join("rollout")) {
+            let _ = fs::remove_dir(&staging);
+            return Err(error);
+        }
+        Ok(Some(StagedRolloutDeletion { original, staging }))
+    }
+
     pub fn create(root: &Path, meta: &SessionMeta) -> Result<Rollout, std::io::Error> {
         let dir = session_dir(root, &meta.session_id);
         fs::create_dir_all(&dir)?;

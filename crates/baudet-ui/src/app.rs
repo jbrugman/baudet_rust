@@ -44,7 +44,15 @@ enum Intent {
         project: Option<String>,
     },
     NewSession(Option<String>),
+    DeleteSession { id: String, reply: mpsc::Sender<Result<DeletedConversation, String>> },
     LoadOlder,
+}
+
+struct DeletedConversation {
+    id: String,
+    project: Option<String>,
+    was_active: bool,
+    cleanup_warning: Option<String>,
 }
 
 struct Snapshot {
@@ -108,6 +116,7 @@ pub struct TranscriptApp {
     sidebar: SidebarModel,
     current_project: Option<String>,
     current_session: Option<String>,
+    deletion: Option<mpsc::Receiver<Result<DeletedConversation, String>>>,
     data_root: Option<std::path::PathBuf>,
     loading: bool,
     more_older: bool,
@@ -182,6 +191,7 @@ impl TranscriptApp {
             sidebar,
             current_project: None,
             current_session: None,
+            deletion: None,
             data_root: root,
             loading: false,
             more_older: false,
@@ -404,6 +414,7 @@ impl TranscriptApp {
                 (None, _, _, false) => self.status_line(report.stored, report.turns),
             };
         }
+        self.poll_deletion();
 
         // egui paints the header separator on the parent. Clip it to the middle column.
         let clip = ui.clip_rect();
@@ -538,7 +549,7 @@ impl TranscriptApp {
         for intent in intents {
             match intent {
                 SidebarIntent::OpenSession(id) => {
-                    if self.busy || self.loading {
+                    if self.busy || self.loading || self.deletion.is_some() {
                         self.status = "busy — finish the turn first".to_string();
                         continue;
                     }
@@ -550,7 +561,7 @@ impl TranscriptApp {
                     self.status = "loading session".to_string();
                 }
                 SidebarIntent::StartChat(project) => {
-                    if self.busy || self.loading {
+                    if self.busy || self.loading || self.deletion.is_some() {
                         self.status = "busy — finish the turn first".to_string();
                         continue;
                     }
@@ -559,6 +570,17 @@ impl TranscriptApp {
                     self.current_project = project.clone();
                     let _ = self.intents.send(Intent::NewSession(project));
                     self.status = "new conversation".to_string();
+                }
+                SidebarIntent::DeleteSession(id) => {
+                    if self.deletion.is_none() {
+                        let (reply, result) = mpsc::channel();
+                        if self.intents.send(Intent::DeleteSession { id, reply }).is_ok() {
+                            self.deletion = Some(result);
+                            self.status = "deleting conversation".into();
+                        } else {
+                            self.status = "could not start conversation deletion".into();
+                        }
+                    }
                 }
                 SidebarIntent::Deleted => {
                     self.compaction = None;
@@ -584,6 +606,29 @@ impl TranscriptApp {
                 Some(_) => self.workspace.show_message(NO_READ),
             },
             None => self.workspace.show_message(NO_FOLDER),
+        }
+    }
+
+    fn poll_deletion(&mut self) {
+        let Some(result) = self.deletion.as_ref().map(mpsc::Receiver::try_recv) else { return };
+        let result = match result {
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("conversation deletion was interrupted".into()),
+            Ok(result) => result,
+        };
+        self.deletion = None;
+        match result {
+            Ok(deleted) => {
+                if self.sidebar.selected_session_id() == Some(&deleted.id) {
+                    self.sidebar.select_project(deleted.project.as_deref());
+                }
+                if deleted.was_active {
+                    self.current_session = None;
+                    self.compaction = None;
+                }
+                self.status = deleted.cleanup_warning.unwrap_or_else(|| "conversation deleted".into());
+            }
+            Err(error) => self.status = format!("could not delete conversation: {error}"),
         }
     }
 
@@ -768,7 +813,7 @@ impl TranscriptApp {
                 }
             });
         }
-        let can_start = self.server_beurt && !self.busy && !self.loading;
+        let can_start = self.server_beurt && !self.busy && !self.loading && self.deletion.is_none();
         let (send_clicked, compact_clicked, stop_clicked) = ui
             .horizontal_wrapped(|ui| {
                 let send = ui.add_enabled(can_start, egui::Button::new(Texts::get(Key::SendButton))).clicked();
@@ -891,7 +936,7 @@ impl eframe::App for TranscriptApp {
             self.geometry_saved = true;
             self.save_geometry(&ctx);
         }
-        if self.busy || self.loading {
+        if self.busy || self.loading || self.deletion.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
     }
@@ -1129,6 +1174,7 @@ fn worker_loop(
         .unwrap_or_else(baudet_settings::SettingsFile::default_location);
     let mut connection_problem: Option<String> = None;
     let mut disk: Option<usize> = None;
+    let mut draft_after_delete = false;
     let mut catalog = Some(catalog);
     let publish = |state: &AppState, busy: bool, disk: Option<usize>, reason, rejected_draft| {
         let rows = state.rows().iter().map(Row::from).collect::<Vec<_>>();
@@ -1148,7 +1194,8 @@ fn worker_loop(
     publish(&state, false, None, None, None);
     let mut learned_windows = std::collections::BTreeMap::new();
     let servers = Arc::new(std::sync::Mutex::new(baudet_tool::mcp::McpServers::default()));
-    while let Ok(intent) = intents.recv() {
+    let mut deferred = std::collections::VecDeque::new();
+    while let Some(intent) = deferred.pop_front().or_else(|| intents.recv().ok()) {
         if matches!(intent, Intent::LoadSession { .. }) {
             loading.store(true, Ordering::SeqCst);
         }
@@ -1191,6 +1238,20 @@ fn worker_loop(
                     publish(&state, false, disk, Some(reason.clone()), Some((text, image)));
                     continue;
                 }
+                if draft_after_delete && state.session_id().is_empty() {
+                    let id = baudet_projects::new_session_id();
+                    let project = state.project();
+                    let opened = root.as_deref().ok_or_else(|| "conversation storage unavailable".to_owned())
+                        .and_then(|root| state.open_store(root, &id, &state.model(), project.as_deref()));
+                    match opened {
+                        Ok((transcript, session)) => { state.switch_to(transcript, session); }
+                        Err(reason) => {
+                            publish(&state, false, disk, Some(reason), Some((text, image)));
+                            continue;
+                        }
+                    }
+                }
+                draft_after_delete = false;
                 let current = settings_file.read();
                 let mut settings = current.settings().clone();
                 let context_key = state.context_key();
@@ -1275,6 +1336,7 @@ fn worker_loop(
                             let backend = backend.or_else(|| pending_configuration.take().and_then(|(backend, _)| backend));
                             pending_configuration = Some((backend, settings));
                         }
+                        Ok(intent @ Intent::DeleteSession { .. }) => deferred.push_back(intent),
                         Ok(Intent::LoadSession { .. } | Intent::NewSession(_) | Intent::LoadOlder) => {
                         }
                         Err(_) => {}
@@ -1339,6 +1401,28 @@ fn worker_loop(
                     None => state.adopt(baudet_store::session::Session::new("", state.model())),
                 }
                 disk = state.disk_items();
+            }
+            Intent::DeleteSession { id, reply } => {
+                let result = (|| {
+                    let root = root.as_deref().ok_or_else(|| "conversation storage unavailable".to_owned())?;
+                    let catalog = catalog.as_ref().ok_or_else(|| "project catalogue unavailable".to_owned())?;
+                    let project = catalog.project_of_session(&id);
+                    let cleanup_warning = match catalog.delete_session(&id, root) {
+                        Ok(()) => None,
+                        Err(error @ baudet_projects::CatalogError::SessionCleanup(_)) => Some(error.to_string()),
+                        Err(error) => return Err(error.to_string()),
+                    };
+                    let was_active = state.session_id() == id;
+                    if was_active {
+                        state.clear_session();
+                        draft_after_delete = true;
+                        disk = None;
+                    }
+                    Ok(DeletedConversation { id, project, was_active, cleanup_warning })
+                })();
+                publish(&state, false, disk, None, None);
+                let _ = reply.send(result);
+                continue;
             }
             Intent::LoadOlder => {
                 let (has_more_older, cursor, _) = state.paging();
@@ -2071,6 +2155,7 @@ fn endpoint_from_settings(settings: &baudet_settings::Settings) -> Result<Endpoi
         protocol: dialect,
         model: settings.model.clone().unwrap_or_default(),
         store: false,
+        thinking_template: settings.thinking_template,
     })
 }
 

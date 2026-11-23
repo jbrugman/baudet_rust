@@ -61,6 +61,8 @@ pub enum CatalogError {
     Io(#[from] std::io::Error),
     #[error("catalogus is niet leesbaar als JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("conversation removed from the catalogue, but file cleanup failed: {0}")]
+    SessionCleanup(std::io::Error),
 }
 
 impl Catalog {
@@ -174,16 +176,26 @@ impl Catalog {
         self.write(&mut state)
     }
 
-    pub fn delete_session(&self, id: &str) -> Result<(), CatalogError> {
+    pub fn delete_session(&self, id: &str, rollout_root: &Path) -> Result<(), CatalogError> {
         let mut state = self.lock();
-        if Self::session_mut(&mut state.data, id).is_err() {
-            return Err(CatalogError::NotFound {
+        let index = state.data.sessions.iter().position(|session| session.id == id)
+            .ok_or_else(|| CatalogError::NotFound {
                 path: state.path.display().to_string(),
                 message: format!("sessie {id} bestaat niet"),
-            });
+            })?;
+        let staged = baudet_store::Rollout::stage_deletion(rollout_root, id)?;
+        let record = state.data.sessions.remove(index);
+        if let Err(error) = self.write(&mut state) {
+            state.data.sessions.insert(index, record);
+            if let Some(staged) = staged {
+                staged.restore().map_err(|rollback| std::io::Error::other(format!("{error}; could not restore conversation files: {rollback}")))?;
+            }
+            return Err(error);
         }
-        state.data.sessions.retain(|session| session.id != id);
-        self.write(&mut state)
+        if let Some(staged) = staged {
+            staged.finish().map_err(CatalogError::SessionCleanup)?;
+        }
+        Ok(())
     }
 
     pub fn sessions_in(&self, project_id: Option<&str>) -> Vec<SessionSummary> {
