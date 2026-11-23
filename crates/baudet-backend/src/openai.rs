@@ -126,6 +126,7 @@ pub struct TurnAccumulator {
     text: String,
     reasoning: String,
     calls: Vec<FunctionCall>,
+    chat_calls: std::collections::BTreeMap<u64, FunctionCall>,
     events: Vec<(String, u32)>,
     samples: Vec<(String, String)>,
     response_id: Option<String>,
@@ -214,14 +215,40 @@ impl TurnAccumulator {
             self.absorb(name, object);
             let choice =
                 object.get("choices").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_object);
+            let delta = choice.and_then(|c| c.get("delta").or_else(|| c.get("message"))).and_then(Value::as_object);
+            if let Some(calls) = delta.and_then(|d| d.get("tool_calls")).and_then(Value::as_array) {
+                for (position, call) in calls.iter().enumerate() {
+                    let index = call.get("index").and_then(Value::as_u64).unwrap_or(position as u64);
+                    let pending = self.chat_calls.entry(index).or_insert_with(|| FunctionCall {
+                        call_id: None,
+                        name: String::new(),
+                        arguments: String::new(),
+                    });
+                    if let Some(id) = call.get("id").and_then(Value::as_str) {
+                        pending.call_id = Some(id.to_owned());
+                    }
+                    if let Some(function) = call.get("function") {
+                        if let Some(name) = function.get("name").and_then(Value::as_str) {
+                            pending.name.push_str(name);
+                        }
+                        if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
+                            pending.arguments.push_str(arguments);
+                        }
+                    }
+                }
+            }
             if let Some(reason) = choice.and_then(|choice| string_field(choice, "finish_reason")) {
+                if reason == "tool_calls" {
+                    self.calls.extend(std::mem::take(&mut self.chat_calls).into_values().filter(|call| {
+                        !call.name.is_empty()
+                            && serde_json::from_str::<Value>(&call.arguments).is_ok_and(|args| args.is_object())
+                    }));
+                }
                 if !matches!(reason.as_str(), "stop" | "tool_calls" | "function_call") {
                     self.incomplete_reason = Some(reason);
                 }
             }
-            let delta = choice
-                .and_then(|c| c.get("delta").or_else(|| c.get("message")))
-                .and_then(Value::as_object)?;
+            let delta = delta?;
             let text = string_field(delta, "content");
             let reasoning = string_field(delta, "reasoning_content").or_else(|| string_field(delta, "reasoning"));
             return (text.is_some() || reasoning.is_some()).then_some(Delta { text, reasoning });

@@ -46,6 +46,44 @@ fn chat_completions_sends_the_selected_reasoning_effort() {
 }
 
 #[test]
+fn chat_completions_advertises_native_functions() {
+    use baudet_backend::{openai::RequestShape, protocol::chat_request_body};
+
+    let tools = serde_json::json!([{
+        "type": "function", "name": "generate_qwen_image", "description": "Generate an image",
+        "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}}}
+    }]);
+    let encoded = tools.to_string();
+    let request = chat_request_body(&RequestShape { tools: Some(&encoded), ..shape("m", "hi") });
+    let mut function = tools[0].clone();
+    function.as_object_mut().unwrap().remove("type");
+    assert_eq!(request["tools"], serde_json::json!([{"type": "function", "function": function}]));
+    assert!(!chat_request_body(&shape("m", "hi")).contains_key("tools"));
+}
+
+#[test]
+fn chat_completions_assembles_indexed_tool_calls_only_after_completion() {
+    let chunks = [
+        r#"{"object":"chat.completion.chunk","choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_2","function":{"name":"other","arguments":"{}"}},{"index":0,"id":"call_1","function":{"name":"generate_qwen_image","arguments":"{\"prompt\":"}}]}}]}"#,
+        r#"{"object":"chat.completion.chunk","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"elephant\"}"}},{"index":2,"function":{"name":"invalid","arguments":"{"}}]}}]}"#,
+    ];
+    let mut turn = TurnAccumulator::new();
+    let mut interrupted = TurnAccumulator::new();
+    for chunk in chunks {
+        turn.feed(None, chunk);
+        interrupted.feed(None, chunk);
+    }
+    assert!(interrupted.finish().function_calls.is_empty());
+    turn.feed(None, r#"{"object":"chat.completion.chunk","choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#);
+    let calls = turn.finish().function_calls;
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].call_id.as_deref(), Some("call_1"));
+    assert_eq!(calls[0].name, "generate_qwen_image");
+    assert_eq!(calls[0].arguments, r#"{"prompt":"elephant"}"#);
+    assert_eq!(calls[1].call_id.as_deref(), Some("call_2"));
+}
+
+#[test]
 fn each_protocol_can_send_a_thinking_override() {
     use baudet_backend::{openai::RequestShape, protocol::chat_request_body};
 

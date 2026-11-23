@@ -26,7 +26,7 @@ use std::time::Duration;
 pub type RequestApproval = dyn Fn(ApprovalRequest) -> ApprovalDecision + Send + Sync;
 
 pub struct ToolTurn<'a> {
-    pub project: &'a Project,
+    pub project: Option<&'a Project>,
     pub settings: &'a Settings,
     pub servers: &'a mut McpServers,
     pub approval: Arc<RequestApproval>,
@@ -35,11 +35,13 @@ pub struct ToolTurn<'a> {
 
 impl AppState {
     pub fn tools_active(settings: &Settings, project: Option<&Project>) -> bool {
-        tool_gate::decide(settings.tool_mode != ToolMode::Off, project).is_active()
+        settings.tool_mode != ToolMode::Off
+            && (tool_gate::decide(true, project).is_active()
+                || settings.mcp_servers.iter().any(|server| server.enabled && server.valid()))
     }
 
     pub fn run_tools(&self, text: &str, image: Option<&str>, run: ToolTurn<'_>) -> Result<Option<String>, TurnBusy> {
-        if !Self::tools_active(run.settings, Some(run.project)) {
+        if !Self::tools_active(run.settings, run.project) {
             return Err(TurnBusy);
         }
         self.live_turns.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).map_err(|_| TurnBusy)?;
@@ -69,11 +71,11 @@ impl AppState {
             (active.messages.clone(), active.summary.clone(), active.previous_response_id.clone())
         };
 
-        let project = run.project;
-        let root = project.folder_path.as_deref().expect("the tool gate requires a folder");
-        let read = project.is_granted(FolderPermission::Read);
-        let write = project.is_granted(FolderPermission::Write);
-        let exec = project.is_granted(FolderPermission::Execute);
+        let project = run.project.filter(|_| tool_gate::decide(true, run.project).is_active());
+        let root = project.and_then(|project| project.folder_path.as_deref());
+        let read = project.is_some_and(|project| project.is_granted(FolderPermission::Read));
+        let write = project.is_some_and(|project| project.is_granted(FolderPermission::Write));
+        let exec = project.is_some_and(|project| project.is_granted(FolderPermission::Execute));
         let s = run.settings;
         let mut tools: Vec<Box<dyn Tool + Send + Sync>> = Vec::new();
         if read {
@@ -152,8 +154,8 @@ impl AppState {
     }
 }
 
-fn tool_context(run: ToolTurn<'_>, root: &str, read: bool, write: bool, exec: bool) -> (ToolContext, Arc<AtomicBool>) {
-    let mut ctx = ToolContext::for_folder(root, read, write, exec);
+fn tool_context(run: ToolTurn<'_>, root: Option<&str>, read: bool, write: bool, exec: bool) -> (ToolContext, Arc<AtomicBool>) {
+    let mut ctx = root.map_or_else(ToolContext::default, |root| ToolContext::for_folder(root, read, write, exec));
     let s = run.settings;
     let approval = Arc::clone(&run.approval);
     let stopped = Arc::clone(&run.cancelled);

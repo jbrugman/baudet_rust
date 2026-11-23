@@ -39,10 +39,7 @@ enum Intent {
     Stop,
     Quit,
     Configure(Option<Result<Arc<dyn Backend>, String>>, Box<baudet_settings::Settings>),
-    LoadSession {
-        id: String,
-        project: Option<String>,
-    },
+    LoadSession(String),
     NewSession(Option<String>),
     DeleteSession { id: String, reply: mpsc::Sender<Result<DeletedConversation, String>> },
     LoadOlder,
@@ -555,8 +552,7 @@ impl TranscriptApp {
                     }
                     self.compaction = None;
                     self.current_session = Some(id.clone());
-                    let project = self.current_project.clone();
-                    let _ = self.intents.send(Intent::LoadSession { id, project });
+                    let _ = self.intents.send(Intent::LoadSession(id));
                     self.loading = true;
                     self.status = "loading session".to_string();
                 }
@@ -1196,7 +1192,7 @@ fn worker_loop(
     let servers = Arc::new(std::sync::Mutex::new(baudet_tool::mcp::McpServers::default()));
     let mut deferred = std::collections::VecDeque::new();
     while let Some(intent) = deferred.pop_front().or_else(|| intents.recv().ok()) {
-        if matches!(intent, Intent::LoadSession { .. }) {
+        if matches!(intent, Intent::LoadSession(_)) {
             loading.store(true, Ordering::SeqCst);
         }
         match intent {
@@ -1261,8 +1257,8 @@ fn worker_loop(
                     }
                 }
                 let project = state.project().and_then(|id| catalog.as_ref()?.project(&id));
-                let tool_project = project.filter(|project| AppState::tools_active(&settings, Some(project)));
-                let handle = if tool_project.is_none() {
+                let tools_active = AppState::tools_active(&settings, project.as_ref());
+                let handle = if !tools_active {
                     use baudet_app::session::SendError;
                     let sent = match state.send_with_context(&text, image.clone(), &settings) {
                         Ok(sent) => sent,
@@ -1288,10 +1284,10 @@ fn worker_loop(
                 let approvals = Arc::clone(&approvals);
                 let servers = Arc::clone(&servers);
                 let drain = std::thread::spawn(move || {
-                    let failure = if let Some(project) = tool_project {
+                    let failure = if tools_active {
                         let approval_cancelled = Arc::clone(&tool_cancelled);
                         folder.run_tools(&text, image.as_deref(), baudet_app::session::tool_turn::ToolTurn {
-                            project: &project,
+                            project: project.as_ref(),
                             settings: &settings,
                             servers: &mut servers.lock().unwrap(),
                             approval: Arc::new(move |request| approvals.request(request, &approval_cancelled)),
@@ -1337,7 +1333,7 @@ fn worker_loop(
                             pending_configuration = Some((backend, settings));
                         }
                         Ok(intent @ Intent::DeleteSession { .. }) => deferred.push_back(intent),
-                        Ok(Intent::LoadSession { .. } | Intent::NewSession(_) | Intent::LoadOlder) => {
+                        Ok(Intent::LoadSession(_) | Intent::NewSession(_) | Intent::LoadOlder) => {
                         }
                         Err(_) => {}
                     }
@@ -1362,7 +1358,12 @@ fn worker_loop(
             Intent::Configure(backend, settings) => {
                 apply_configuration(&state, backend, *settings, &mut connection_problem);
             }
-            Intent::LoadSession { id, project } => {
+            Intent::LoadSession(id) => {
+                let Some(project) = catalog.as_ref().and_then(|catalog| catalog.session_assignment(&id)) else {
+                    loading.store(false, Ordering::SeqCst);
+                    publish(&state, false, disk, Some("conversation no longer exists in the catalogue".into()), None);
+                    continue;
+                };
                 if !load_session(&state, root.as_deref(), &id, project.as_deref(), &loading, &snapshots) {
                     publish(&state, state.live_turns() > 0, disk, None, None);
                     continue;
@@ -1371,7 +1372,6 @@ fn worker_loop(
                 publish(&state, state.live_turns() > 0, disk, None, None);
             }
             Intent::NewSession(project) => {
-                state.switch_project(project.clone());
                 match root.as_deref() {
                     Some(root) => {
                         let id = baudet_projects::new_session_id();
@@ -1379,6 +1379,7 @@ fn worker_loop(
                         let opened = state.open_store(root, &id, &model, project.as_deref());
                         let _ = state.session_id();
                         if let Err(reason) = opened.map(|(transcript, session)| {
+                            state.switch_project(project.clone());
                             state.switch_to(transcript, session);
                         }) {
                             let _ = snapshots.send(Snapshot {
@@ -1398,7 +1399,10 @@ fn worker_loop(
                             catalog.upsert_session(&id, Some(&model), project.as_deref(), 0).ok();
                         }
                     }
-                    None => state.adopt(baudet_store::session::Session::new("", state.model())),
+                    None => {
+                        state.switch_project(project);
+                        state.adopt(baudet_store::session::Session::new("", state.model()));
+                    }
                 }
                 disk = state.disk_items();
             }
@@ -1414,6 +1418,7 @@ fn worker_loop(
                     };
                     let was_active = state.session_id() == id;
                     if was_active {
+                        state.switch_project(project.clone());
                         state.clear_session();
                         draft_after_delete = true;
                         disk = None;
@@ -1479,7 +1484,9 @@ fn load_session(
     let opened = state.open_store(root, id, &model, project);
     loading.store(false, Ordering::SeqCst);
     match opened {
-        Ok((transcript, session)) => {
+        Ok((transcript, mut session)) => {
+            session.project_id = project.map(str::to_owned);
+            state.switch_project(session.project_id.clone());
             state.switch_to(transcript, session);
             true
         }

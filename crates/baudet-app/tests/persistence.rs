@@ -353,7 +353,7 @@ fn a_tool_turn_feeds_the_observation_back_and_persists_the_final_answer() {
     project.permissions = Permissions::encode([FolderPermission::Read, FolderPermission::Write]);
     let settings = baudet_settings::Settings::default();
     state.run_tools("Read the file", None, ToolTurn {
-        project: &project,
+        project: Some(&project),
         settings: &settings,
         servers: &mut McpServers::default(),
         approval: Arc::new(|_| ApprovalDecision::Decline),
@@ -366,4 +366,91 @@ fn a_tool_turn_feeds_the_observation_back_and_persists_the_final_answer() {
     let reopened = state.build_session().unwrap();
     assert_eq!(reopened.messages.last().unwrap().content, "Read it.");
     assert!(reopened.messages.iter().any(|msg| msg.content.contains("known observation")));
+}
+
+#[test]
+fn mcp_echo_fixture() {
+    use serde_json::{json, Value};
+    use std::io::{BufRead, Write};
+
+    if std::env::var_os("BAUDET_MCP_ECHO_FIXTURE").is_none() {
+        return;
+    }
+    let mut stdout = std::io::stdout().lock();
+    for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+        let request: Value = serde_json::from_str(&line).unwrap();
+        let Some(id) = request.get("id") else { continue };
+        let result = match request["method"].as_str().unwrap() {
+            "initialize" => json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}}}),
+            "tools/list" => json!({"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}),
+            "tools/call" => json!({"content":[{"type":"text","text":"fixture observation"}]}),
+            method => panic!("unexpected MCP method: {method}"),
+        };
+        writeln!(stdout, "{}", json!({"jsonrpc":"2.0","id":id,"result":result})).unwrap();
+        stdout.flush().unwrap();
+    }
+}
+
+#[test]
+fn mcp_is_advertised_and_approved_without_project_write_access() {
+    use baudet_app::session::tool_turn::ToolTurn;
+    use baudet_projects::{FolderPermission, Permissions, Project};
+    use baudet_settings::{config::ToolMode, Settings};
+    use baudet_tool::mcp::McpServers;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let root = scratch("mcp-tool-turn");
+    let mut project = Project::new("read-only".into(), "Fixture", 0);
+    project.folder_path = Some(root.to_string_lossy().into_owned());
+    project.permissions = Permissions::encode([FolderPermission::Read]);
+    let mut settings = Settings::default();
+    settings.mcp_servers.push(baudet_core::mcp::McpServerConfig {
+        id: "fixture".into(),
+        command: std::env::current_exe().unwrap().to_str().unwrap().into(),
+        args: vec!["--exact".into(), "mcp_echo_fixture".into(), "--nocapture".into()],
+        env: [("BAUDET_MCP_ECHO_FIXTURE".into(), "1".into())].into_iter().collect(),
+        enabled: true,
+        timeout_seconds: Some(5),
+    });
+    let call = "```baudet-tool\n{\"tool\":\"mcp__fixture__echo\",\"arguments\":{}}\n```";
+    let completed = |turn_id: &str, text: &str| {
+        let mut events = answer(turn_id, text);
+        events.push(ThreadEvent::TurnCompleted {
+            thread_id: "th_1".into(),
+            turn_id: turn_id.into(),
+            response_id: None,
+            usage: None,
+            final_event: Some("response.completed".into()),
+            incomplete_reason: None,
+        });
+        events
+    };
+    for (name, project) in [("read-only", Some(&project)), ("unassigned", None)] {
+        let (backend, state) = persistent(&root.join(name), vec![completed("tu_1", call), completed("tu_2", "Done.")]);
+        let approved = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&approved);
+        assert!(AppState::tools_active(&settings, project));
+        state.run_tools("Call echo", None, ToolTurn {
+            project,
+            settings: &settings,
+            servers: &mut McpServers::default(),
+            approval: Arc::new(move |request| match request {
+                ApprovalRequest::McpTool { server_id, tool, .. } if server_id == "fixture" && tool == "echo" => {
+                    seen.store(true, Ordering::Relaxed);
+                    ApprovalDecision::Accept
+                }
+                _ => ApprovalDecision::Decline,
+            }),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }).unwrap();
+        assert!(approved.load(Ordering::Relaxed));
+        assert!(state.rows().iter().any(|item| matches!(item, Item::ToolCall(call) if call.output.contains("fixture observation"))));
+        let (request, _) = backend.last_request().unwrap();
+        let tools: serde_json::Value = serde_json::from_str(&request.tools.unwrap()).unwrap();
+        let names: Vec<_> = tools.as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["mcp__fixture__echo"]);
+    }
+    settings.tool_mode = ToolMode::Off;
+    assert!(!AppState::tools_active(&settings, Some(&project)));
+    assert!(!AppState::tools_active(&settings, None));
 }

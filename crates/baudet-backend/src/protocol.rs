@@ -59,6 +59,21 @@ pub fn chat_request_body(shape: &crate::openai::RequestShape<'_>) -> Map<String,
     if let Some(effort) = shape.reasoning.filter(|effort| !effort.is_empty()) {
         body.insert("reasoning_effort".into(), effort.into());
     }
+    if let Some(Ok(Value::Array(definitions))) = shape.tools.map(serde_json::from_str::<Value>) {
+        let tools = definitions
+            .into_iter()
+            .filter_map(|definition| {
+                let Value::Object(mut function) = definition else { return None };
+                if function.remove("type").as_ref().and_then(Value::as_str) != Some("function") {
+                    return None;
+                }
+                Some(serde_json::json!({ "type": "function", "function": function }))
+            })
+            .collect::<Vec<_>>();
+        if !tools.is_empty() {
+            body.insert("tools".into(), Value::Array(tools));
+        }
+    }
 
     let mut messages = Vec::new();
     if !shape.system.is_empty() {

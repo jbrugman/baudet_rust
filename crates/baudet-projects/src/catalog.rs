@@ -229,12 +229,16 @@ impl Catalog {
     }
 
     pub fn project_of_session(&self, session_id: &str) -> Option<String> {
+        self.session_assignment(session_id).flatten()
+    }
+
+    pub fn session_assignment(&self, session_id: &str) -> Option<Option<String>> {
         self.lock()
             .data
             .sessions
             .iter()
             .find(|session| session.id == session_id)
-            .and_then(|session| session.project_id.clone())
+            .map(|session| session.project_id.clone())
     }
 
     pub fn derived_title(first_user_message: Option<&Msg>, fallback_id: &str) -> String {
