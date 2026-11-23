@@ -76,6 +76,11 @@ impl ProcessRunner {
         let mut command = Command::new(program);
         command.args(&argv[1..]).current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         configure(&mut command);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         let mut child = command.spawn().map_err(|source| StartError { program: program.to_owned(), source })?;
 
         let out_thread = drain_thread(child.stdout.take(), "stdout");
@@ -87,7 +92,7 @@ impl ProcessRunner {
         let exit_code = match outcome {
             Some(status) => status.code(),
             None => {
-                let _ = child.kill();
+                kill_timed_out_process(&mut child);
                 let _ = child.wait();
                 None
             }
@@ -104,6 +109,24 @@ impl ProcessRunner {
             duration_ms: started_at.elapsed().as_millis() as u64,
         })
     }
+}
+
+fn kill_timed_out_process(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        const SIGKILL: std::ffi::c_int = 9;
+        unsafe extern "C" {
+            fn kill(pid: std::ffi::c_int, sig: std::ffi::c_int) -> std::ffi::c_int;
+        }
+
+        if let Ok(pid) = std::ffi::c_int::try_from(child.id()) {
+            // The unreaped child leads the group created at spawn.
+            if pid > 0 && unsafe { kill(-pid, SIGKILL) } == 0 {
+                return;
+            }
+        }
+    }
+    let _ = child.kill();
 }
 
 fn wait_with_timeout(child: &mut std::process::Child, timeout_ms: u64) -> Option<std::process::ExitStatus> {
@@ -189,6 +212,17 @@ mod tests {
     fn sh(script: &str, timeout: Duration) -> ProcessOutcome {
         let dir = std::env::temp_dir();
         ProcessRunner::run(&["/bin/sh", "-c", script], &dir, timeout).expect("sh moet hier starten")
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_timeout_closes_pipes_held_by_a_background_child() {
+        let result = sh("sleep 5 & echo stdout; echo stderr >&2; wait", Duration::from_millis(200));
+        assert!(result.timed_out);
+        assert_eq!(result.exit_code, None);
+        assert_eq!(result.stdout.text, "stdout\n");
+        assert_eq!(result.stderr.text, "stderr\n");
+        assert!(result.duration_ms < JOIN_MILLIS, "timeout took {} ms", result.duration_ms);
     }
 
     #[test]
