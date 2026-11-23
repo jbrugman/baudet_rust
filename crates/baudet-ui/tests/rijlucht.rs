@@ -37,16 +37,18 @@ const KADER_VRIJ: f32 = ROW_GAP;
 
 /// Het band waarin het instellingenformulier staat, op het metende scherm van 1200 pt breed.
 ///
-/// Gemeten op deze breedte: het middenpaneel loopt van x = 217 tot x = 1020, het formulier zelf is
-/// 360 pt en staat er gecentreerd in (velden en knopen beginnen op x = 389 of 397, en geen enkel
-/// veld reikt voorbij x ≈ 710). De grenzen zijn dus geen smaak maar een meting van deze opbouw, en
+/// Gemeten op deze breedte: het middenpaneel loopt van x = 217 tot x = 1020, en het formulier van
+/// 360 pt staat er gecentreerd in: het veld naast het etiket begint op x = 617, en een vol veld
+/// reikt tot x ≈ 977 (de rand van het middenpaneel). Sinds de centrering in het middenpaneel liggen
+/// de velden dus niet meer links in de kolom maar in het midden — de band volgt die meting en niet
+/// een oude "x = 389". De grenzen zijn dus geen smaak maar een meting van deze opbouw, en
 /// `de_twee_genoemde_buren_ademen` valt luide zodra de opbouw verandert — dan gaat deze band mee.
 ///
 /// Waarom een band en niet "x groter dan iets": de panelen van het venster staan links (t/m 216)
 /// én rechts (vanaf 1021) van het formulier, en het scroll-vlak van het midden omvat het hele
 /// formulier. Zo'n frame mag zijn inhoud omvatten; twee buren op dezelfde diepte mogen elkaar niet
 /// raken. Zonder deze band "overlapt" het rechterscherm elke rij van het formulier.
-const FORM_BREED: std::ops::Range<f32> = 300.0..800.0;
+const FORM_BREED: std::ops::Range<f32> = 300.0..1000.0;
 
 /// Het bovenste y dat tot het formulier behoort, op het metende scherm.
 ///
@@ -238,7 +240,7 @@ fn de_twee_genoemde_buren_ademen() {
     let veldkolom: Vec<egui::Rect> = vlakken.iter().copied().filter(|r| van_de_formulierkolom(r)).collect();
     assert!(veldkolom.len() >= 6, "te weinig velden in de kolom om de klachten te vinden: {veldkolom:?}");
     let adres =
-        *veldkolom.iter().find(|r| r.min.y < 150.0 && r.min.x < 420.0).expect("het adres-veld van het endpoint");
+        *veldkolom.iter().find(|r| r.min.y < 150.0 && r.min.x < 700.0).expect("het adres-veld van het endpoint");
     let ernaast = veldkolom
         .iter()
         .filter(|r| r.min.y >= adres.max.y - 40.0 && r.min.y < adres.max.y + 80.0 && **r != adres)
