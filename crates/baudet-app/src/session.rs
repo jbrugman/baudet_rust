@@ -561,6 +561,27 @@ impl AppState {
     /// Veilig uitsluitend als er geen beurt draait. Deze methode gooit de rijen van het vorige
     /// gesprek weg en schuift de nieuwe; de beurt die bezig is, schrijft in `transcript` en in
     /// `active`, en een beurt-einde is pas af als `persist` achter de rug is.
+    ///
+    /// Het hoogste beurtnummer dat de items van dit gesprek dragen, of 0 als er geen is.
+    ///
+    /// De beurtnamer is proces-breed en start bij 0, maar de id's van een geladen gesprek zijn al
+    /// namen (`tu_<n>/user`, `tu_<n>/msg`, `tu_<n>/reasoning`). Zonder deze pas botst een herstart:
+    /// een sessie die `tu_1` al draagt, krijgt van de frisse teller wéér `tu_1`, en de tweede
+    /// `tu_1/user` in het audit-spoor is de "twee keer opgeslaan"-assertie van de reductor. Eén
+    /// niet-parsbare rij (bwa `history/user` uit de draad) telt bewust niet mee: die heeft geen
+    /// `tu_<n>`-vorm en kan geen beurtnummer dupliceren.
+    fn highest_turn_index(items: &[Item]) -> usize {
+        items
+            .iter()
+            .filter_map(|item| {
+                let rest = item.item_id().strip_prefix("tu_")?;
+                let digits = rest.split('/').next()?;
+                digits.parse::<usize>().ok()
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     pub fn switch_to(&self, transcript: Transcript, mut session: Session) -> Option<String> {
         // Een gesprek zonder eigen project valt terug op wat dit handvat onthoudt: de persoon
         // die een project opende en daarna een gesprek zonder koppeling koos, staat niet
@@ -573,6 +594,10 @@ impl AppState {
         let project = session.project_id.clone();
         *self.project.lock().unwrap() = project.clone();
         let items = session.items.clone();
+        // De teller door nummeren waar dit gesprek ophield, vóórdat de ruil de actieve sessie draagt:
+        // de beurtnamer is proces-breed, de id's van het gesprek zijn al namen, en een herstart
+        // die opnieuw bij `tu_1` begint, raakt de "twee keer opgeslaan"-assertie van de reductor.
+        self.turn_counter.fetch_max(Self::highest_turn_index(&items), Ordering::SeqCst);
         *self.transcript.lock().unwrap() = Some(transcript);
         *self.active.lock().unwrap() = session;
         self.draw(&items);
@@ -707,6 +732,9 @@ impl AppState {
         // `currentProjectId = s.projectId`).
         *state.project.lock().unwrap() = active.project_id.clone();
         let items = active.items.clone();
+        // Zelfde pas als `switch_to`: een herstart nummert dóór waar dit gesprek ophield,
+        // zodat de volgende beurt nooit een `tu_<n>`-id hergebruikt dat de geladen items al dragen.
+        state.turn_counter.fetch_max(Self::highest_turn_index(&items), Ordering::SeqCst);
         *state.transcript.lock().unwrap() = Some(opened);
         *state.active.lock().unwrap() = active;
         state.draw(&items);

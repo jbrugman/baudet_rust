@@ -247,6 +247,52 @@ fn na_de_wissel_schrijft_de_beurt_in_het_nieuwe_spoor() {
     assert_eq!(count_lines_in(&root, &hier), 2, "het vorige gesprek houdt zijn eigen twee regels");
 }
 
+/// Een herstart nummert dóór waar het geladen gesprek ophield.
+///
+/// De beurtnamer is proces-breed en start bij 0, maar de id's van een geladen gesprek zijn al
+/// namen (`tu_1/user`, `tu_1/msg`). Zónder dat de teller bij het laden wordt bijgetrokken, gaf een
+/// herstart die een sessie met `tu_1` opende de volgende vraag wéér `tu_1` en panikte de
+/// "twee keer opgeslaan"-assertie van de reductor op de worker-thread -- wat daar bleef hangen
+/// als "blijft wachten, niets meer te sturen". De fix zaadt de teller tot boven het hoogste
+/// `tu_<n>` in de geladen items; deze test legt de beide kanten vast: de eerste beurt na de
+/// herstart overleeft, en de regel die hij opent draagt een beurtnummer dat nog niet bestond.
+///
+/// De scripted backend nummert zelf door (die met een verse speler telt weer vanaf `tu_1`), dus
+/// het antwoord dat hij voor de tweede beurt publiceert, hardcodeert `tu_2` -- de id die de
+/// gesprekseigenaar ná de fix kiest -- precies zoals de `answer`-fixture hierboven dat ook doet
+/// ("een script dat een andere id kiest dan de eigenaar, opent een rij die bij een andere beurt
+/// hoort").
+#[test]
+fn een_herstart_nummert_door_waar_het_gesprek_ophield() {
+    let root = scratch("dornummer");
+    let (_, state) = persistent(&root, vec![answer("tu_1", "het eerste antwoord")]);
+    run_turn(&state, "vraag een");
+    let id = state.session_id();
+
+    // De herstart: een fris handvat (teller 0) op dezelfde map, die `tu_1` al draagt.
+    let script = answer("tu_2", "het tweede antwoord")
+        .into_iter()
+        .fold(Script::new(), |s, event| s.event(event));
+    let reopened_backend = ScriptedBackend::new(vec![script]);
+    let reopened = Arc::new(
+        AppState::new(Arc::new(reopened_backend) as Arc<dyn Backend>, "systeem")
+            .on_session(&root, &id, "model-van-hier", None)
+            .expect("hetzelfde gesprek, dezelfde map"),
+    );
+    assert_eq!(reopened.rows().len(), 2, "de herstart draagt vraag en antwoord");
+
+    // De tweede beurt mag de eerste niet overnemen: zonder fix paniekte hij hier met
+    // "tu_1/user state twee keer opgeslaan".
+    run_turn(&reopened, "vraag twee");
+
+    let rows = reopened.rows();
+    let bodies: Vec<String> = rows.iter().map(baudet_app::reducer::streamed_text).collect();
+    assert_eq!(bodies.len(), 4, "vraag een + antwoord een + vraag twee + antwoord twee: {bodies:?}");
+    assert!(bodies.iter().any(|body| body == "vraag twee"), "de nieuwe vraag staat er: {bodies:?}");
+    assert!(bodies.iter().any(|body| body == "het tweede antwoord"), "het antwoord van de tweede beurt staat er: {bodies:?}");
+    assert_eq!(mentions_exact(&reopened, "vraag een"), 1, "de oude vraag blijft één keer: {bodies:?}");
+}
+
 /// Regelentelling in het spoor van één sessie-id, ongeacht welk dagbucket hem draagt.
 fn count_lines_in(root: &std::path::Path, session_id: &str) -> usize {
     let mut total = 0usize;
