@@ -1,20 +1,3 @@
-//! Een map die aan een project is linked, moet rechts de boom én de changes-band vullen.
-//!
-//! De klacht van de persoon was letterlijk: "ik had een folder gelinked, maar ik zie rechts geen
-//! tree of changed files". Wat er miste, was niet de boom — die stond er al — maar de selectie die de
-//! linkerbalk zelf wegwierp:
-//!
-//!  * `row_menu` riep `select_project`/`select_session` aan vóórdat `picked` werd bekeken, dus élke
-//!    pass met een open menu zette de selectie op de aangeklikte riem;
-//!  * de inbox-knoop selecteerde de inbox ook toen die leeg was.
-//!
-//! `apply_sidebar_intents` leest de map aan de hand van diezelfde selectie, dus de rechterstrook viel
-//! terug op de 'no folder'-melding en verloor boom én changes in één beweging.
-//!
-//! Sector-tests, gemaakt op vaste id's (`p-00000001`, `s-00000001`) en één vaste riemtekst, dus de
-//! boom van buitenaf is raakbaar zonder te raden. De rechtermuistest leest de selectie uit het model
-//! en niet uit een menu-item-adres: de item-id van `push_id` is in deze egui-build geen voorspelbare
-//! `(ROW_MENU, …)`-afgeleide (gemeten), en de beschermde eigenschap is model-staat, geen pixel.
 
 use baudet_i18n::{Language, Texts};
 use baudet_ui::sidebar::{Selection, SidebarModel};
@@ -26,11 +9,8 @@ use tempfile::TempDir;
 
 const SCREEN: [f32; 2] = [1200.0, 800.0];
 
-/// De riemtekst waar de muis op landt: één woord, damit de riem op één regel past in een balk van
-/// 280 pt en zijn middelpunt dus binnen de riem blijft.
 const RIEL: &str = "riem";
 
-/// Het slot rond `BAUDET_HOME`, gedeeld door de tests die de catalogus aanraken.
 static HOME_LOCK: Mutex<()> = Mutex::new(());
 
 fn input() -> egui::RawInput {
@@ -50,7 +30,6 @@ fn paint_once(ctx: &egui::Context, app: &mut TranscriptApp) {
     ctx.run_ui(input(), |ui| app.paint(ui)).drop_without_applying_deltas();
 }
 
-/// Muis naar een punt en daar één klik (in- en uitdrukken) van knop `button`.
 fn click_at(ctx: &egui::Context, app: &mut TranscriptApp, center: egui::Pos2, button: egui::PointerButton) {
     for pressed in [true, false] {
         let mut frame = input();
@@ -65,7 +44,6 @@ fn click_at(ctx: &egui::Context, app: &mut TranscriptApp, center: egui::Pos2, bu
     }
 }
 
-/// Een git-werkboom met één gewijzigd bestand, zodat de changes-band iets móet tonen.
 fn repo_with_a_change() -> TempDir {
     let repo = TempDir::new().expect("werpmap voor de git-repo");
     std::fs::write(repo.path().join("a.txt"), "een\n").expect("bronbestand");
@@ -84,8 +62,6 @@ fn repo_with_a_change() -> TempDir {
     repo
 }
 
-/// `BAUDET_HOME` op een werpmap met één project (`p-00000001`) met één sessie (`s-00000001`), zonder
-/// map. Slot en werpmap blijven in leven tot het einde van de test.
 fn seeded_home() -> (MutexGuard<'static, ()>, TempDir) {
     let guard = HOME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let home = TempDir::new().expect("werpmap voor BAUDET_HOME");
@@ -102,15 +78,9 @@ fn seeded_home() -> (MutexGuard<'static, ()>, TempDir) {
     (guard, home)
 }
 
-/// Het venster op die catalogus, met `folder` linked aan het project: de staat direct nadat iemand in
-/// het menu voor "Link folder…" koos. `pick_session` kiest de beginselectie: de sessie voor test 2
-/// (de nagespeelde breuk), het project voor test 1.
 fn app_on(folder: &Path, guard: MutexGuard<'static, ()>, pick_session: bool) -> TranscriptApp {
     let mut model = SidebarModel::open_default();
     model.link_folder("p-00000001", Some(&folder.to_string_lossy())).expect("de map linked aan het project");
-    // `linkFolder()` selecteert het project ná het koppelen (`selectProjectNode`, `ProjectSidebar.kt:378`),
-    // anders toont de rechterstrook 'no folder' bij een map die er net is. Een directe `link_folder` zet de
-    // selectie níét, dus deze test zet haar zelf neer — dezelfde volgorde als het rechtermuismenu in `row_menu`.
     if pick_session {
         model.select_session("s-00000001");
     } else {
@@ -139,7 +109,6 @@ fn een_gelinkte_map_toont_rechts_de_boom_en_blijft_staan() {
     );
     assert_eq!(app.workspace_message(), None, "er staat een map, dus geen 'no folder'-uitleg");
 
-    // En hij blijft staan over meerdere passen: de boom is geen een-frame-gratie.
     for _ in 0..3 {
         paint_once(&ctx, &mut app);
     }
@@ -148,12 +117,8 @@ fn een_gelinkte_map_toont_rechts_de_boom_en_blijft_staan() {
 
 #[test]
 fn een_rechtermuisklik_op_een_riem_laat_de_gelinkte_map_staan() {
-    // De gemeten breuk, nagespeeld met de muis. Vóór de fix zette precies die pass de selectie op de
-    // aangeklikte riem en viel het rechterpane terug op 'no folder': boom en changes samen weg.
     let (guard, _home) = seeded_home();
     let repo = repo_with_a_change();
-    // De echt gemeten stroom: een sessie staat gekozen en de map is gelinkt; de gebruiker rechtsklikt
-    // dáárna de project-riem. De selectie begint dus als een sessie, niet als een project.
     let mut app = app_on(repo.path(), guard, true);
     let ctx = addressable_context();
     Texts::set_language(Language::En);
@@ -168,22 +133,11 @@ fn een_rechtermuisklik_op_een_riem_laat_de_gelinkte_map_staan() {
     let map_voor = app.workspace_folder().map(str::to_string);
     assert_eq!(map_voor.as_deref(), Some(repo.path().to_string_lossy().as_ref()), "de map stond niet open");
 
-    // Een rechtermuisklik op de project-kop — de rij ná de separators onder de `Add project`-knop —
-    // opent het rijmenu. Dat mag nooit de selectie verzetten: het menu kiest een handeling, geen
-    // project. Vóór de fix stond het `select_project`/`select_session` in `row_menu` vóór `picked`
-    // werd gelezen, dus elke pass met een open menu gooide de geselecteerde sessie om, en `apply_
-    // sidebar_intents` las de boom uit diezelfde selectie en viel terug op 'no folder': boom en
-    // changes samen weg. Dit nagespeelde punt raakt de project-riem (gemeten: de project-kop ligt
-    // op deze riemhoogte rond y 32..50 in deze venstermaat), dus de klik is geen lege muisbeweging.
     let add_rect = ctx.read_response(root_ui_id(&ctx).with((SIDEBAR_ADD, "add"))).expect("de add-knop tekent").rect;
     let center = egui::pos2(add_rect.center().x, add_rect.max.y + 18.0);
     click_at(&ctx, &mut app, center, egui::PointerButton::Secondary);
-    // De popup tekent zijn inhoud één pass ná de klik; zonder deze pass is het menu nog leeg. De
-    // selectie is model-staat, dus die lezen we direct — niet uit een menu-item-adres (de item-id
-    // van `push_id` is in deze egui-build geen voorspelbare `(ROW_MENU, …)`-afgeleide, gemeten).
     paint_once(&ctx, &mut app);
 
-    // De selectie is niet verzet: dát was de breuk.
     assert_eq!(
         app.sidebar().selection(),
         Some(&Selection::Session { project: Some("p-00000001".to_string()), session: "s-00000001".to_string() }),

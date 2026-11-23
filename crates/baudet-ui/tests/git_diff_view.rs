@@ -91,7 +91,6 @@ fn a_double_click_in_either_list_opens_its_own_colored_patch() {
         (egui::Id::new(("change-row", "second.txt")), "+from the changes list"),
         (egui::Id::new(("change-row", "new.txt")), "+from an untracked file"),
     ] {
-        // Git metadata and the open folder settle before measuring the click target.
         for _ in 0..5 {
             time += 0.2;
             paint(&ctx, &mut app, time, Vec::new()).drop_without_applying_deltas();

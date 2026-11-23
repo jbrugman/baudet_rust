@@ -1,11 +1,4 @@
-# The GUI needs eframe/egui 0.36, the version the ArtCraft apps use. Its transitive tree
-# (moxcms behind egui_extras/svg, getrandom behind rand) is edition 2024 in every published
-# release, so no downward pin can help: cargo 1.82 cannot parse those manifests at all, not even
-# for a target it would never build. Pinned here rather than in ~/.rustup/settings.toml so the
-# machine default stays 1.82 and no other project on this machine changes behaviour.
-#
-# 1.95 is the rust-version ArtCraft itself declares; 1.90 already resolves and builds the tree,
-# but matching ArtCraft keeps their ui-egui patterns drop-in portable.
+# egui 0.36 requires this toolchain baseline.
 [toolchain]
 channel = "1.95.0"
 components = ["clippy", "rustfmt"]

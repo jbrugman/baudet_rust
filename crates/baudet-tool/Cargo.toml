@@ -4,21 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# De tool-laag: wat de assistent mag doen in een projectmap. Geen UI en geen transport — in de
-# origineler onderhandelt een tool met de mens uitsluitend via ToolContext, nooit via Swing
-# (`tool/Tool.kt`). Die grens is hier dezelfde: deze crate compileert zonder egui.
 [dependencies]
 baudet-core = { workspace = true }
-# Alleen voor `cost_chars`: de plafond-schatting mag niet op een eigen kopie van de som staan.
 baudet-store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-# Het stallings-script van run_command heeft een echt tijdelijk bestand nodig, dus tempfile is hier
-# geen test-hulpmiddel maar productiecode.
 tempfile = { workspace = true }
 
 [dev-dependencies]
-# Alleen de test heeft een runtime: `TurnFuture` belooft `Send`, en die belofte wil ik niet op een
-# aanname afkeuren. De crate zelf blijft zonder tokio compileren, wat de opmerking bovenaan deelt.
 tokio = { workspace = true }

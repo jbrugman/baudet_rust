@@ -1,8 +1,3 @@
-//! What a row looks like to a reader, protected without a window.
-//!
-//! The paint pass itself is egui's job; the decisions worth testing are the ones this crate owns:
-//! which body a row shows, whether it is worth an expander, and that a status never reads as
-//! colour alone. If one of these drifts, the transcript lies to the reader rather than crashing.
 
 use baudet_core::{Item, ItemKind, ItemStatus, PlanEntry, PlanEntryStatus, PlanItem};
 use baudet_ui::Row;
@@ -23,9 +18,7 @@ fn plan(status: ItemStatus) -> Item {
 fn a_plan_reads_as_a_checklist_in_order() {
     let row = Row::from(&plan(ItemStatus::InProgress));
     assert_eq!(row.kind, ItemKind::Plan);
-    // Markers, not colours: a plan's progress has to survive a grey screenshot.
     assert_eq!(row.body, "[x] kern\n[>] gui\n[ ] transport");
-    // Reading a plan inline is the point of a plan, so it never hides behind a disclosure.
     assert!(!row.collapsed);
     assert!(row.in_progress());
 }
@@ -55,8 +48,6 @@ fn prose_reads_inline_and_output_hides() {
         approval: None,
     });
     let row = Row::from(&command);
-    // The command is the heading and its output the detail: the reverse would hide which command
-    // ran behind however many lines it printed.
     assert_eq!(row.subject.as_deref(), Some("cargo test"));
     assert_eq!(row.body, "38 passed");
     assert!(row.collapsed);
@@ -80,8 +71,6 @@ fn a_file_change_names_the_path_and_its_counts() {
 
 #[test]
 fn every_status_has_its_own_word() {
-    // Four states, four distinct words. Two sharing one would make `failed` and `interrupted`
-    // indistinguishable, which is the distinction Baudet guards on the wire.
     let mut words = Vec::new();
     for status in [ItemStatus::InProgress, ItemStatus::Completed, ItemStatus::Failed, ItemStatus::Interrupted] {
         let item = Item::Error(baudet_core::ErrorItem { item_id: "x".into(), message: "m".into(), status });

@@ -1,23 +1,3 @@
-//! Append-only rollout files: the durability every other layer of this app currently lacks.
-//!
-//! Right now a restart loses the transcript, because nothing owns durability. Kotlin gets it from
-//! H2 (`store/H2Store.kt`), which would mean shipping a SQL database to persist a text log. The
-//! shape the harness actually uses is better suited and is what I measured: JSON Lines, one object
-//! per line, day folders, `session_meta` first. Flat text means the file is inspectable with
-//! `head`, survives a build that changes the type, and needs no migration step to read.
-//!
-//! Three rules carry the design, and each is load-bearing:
-//!
-//!  * **append only.** A turn adds lines at the end; nothing rewriting the file is offered. That
-//!    matches the app — the reducer produces facts, never edits — so the writer cannot invent an
-//!    inconsistent transcript the way a `rewriteMessages` call can.
-//!  * **a corrupt tail is tolerated, not an error.** A process killed mid-write leaves a partial
-//!    last line. Failing the whole read over that would make the one accident durability exists to
-//!    survive also destroy the transcript. An undecodable line is dropped; every whole line stays.
-//!  * **one file per kind.** Items go to `items.jsonl`, turns to `history.jsonl`, and the
-//!    conversation's identity leads `session.jsonl`. The harness interleaves kinds in one stream;
-//!    splitting them buys one decoder per file and makes the append-and-restart boundary exact.
-//!    A mixed rollout, if we ever want it, is a merger of these three in write order.
 
 use crate::records::{Record, Session, SessionDetail, SessionMeta};
 use baudet_core::{Item, Msg};
@@ -25,12 +5,6 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-/// Which file a record goes to.
-///
-/// `Meta` and `Detail` are named but never constructed: the identity line is written by
-/// [`Rollout::create`] and the head line by [`Rollout::write_detail`], each straight to its own
-/// file, because neither is an append. They stay in this enum so [`Rollout::file`] remains the
-/// only place that maps a kind to a handle, which is the whole reason the routing is a function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 enum Kind {
@@ -40,20 +14,11 @@ enum Kind {
     Detail,
 }
 
-/// The name of the file holding one kind. Kept as constants so a session directory written by one
-/// build is still recognisable to the next.
 const META_FILE: &str = "session.jsonl";
 const ITEMS_FILE: &str = "items.jsonl";
 const HISTORY_FILE: &str = "history.jsonl";
-/// The mutable head of a conversation: one rewritten line, deliberately not in `session.jsonl`.
 const DETAIL_FILE: &str = "detail.jsonl";
 
-/// A session transcript on disk, open for appending.
-///
-/// Holds one `File` per kind, each opened in append mode, so a writer cannot truncate a transcript
-/// by accident and a crashed process leaves only its own partial tail line.
-/// `Debug` deliberately omits the open files: a transcript window's state should print as a
-/// session, not as three descriptors.
 #[derive(Debug)]
 pub struct Rollout {
     dir: PathBuf,
@@ -65,19 +30,11 @@ pub struct Rollout {
 }
 
 impl Rollout {
-    /// Create a session directory and write its identity as the first and only line of
-    /// `session.jsonl`.
-    ///
-    /// Fails only when the directory cannot be created or the identity cannot be written: once a
-    /// session exists, every later write is best-effort by contract (see [`Rollout::append`]).
     pub fn create(root: &Path, meta: &SessionMeta) -> Result<Rollout, std::io::Error> {
         let dir = session_dir(root, &meta.session_id);
         fs::create_dir_all(&dir)?;
         let meta_path = dir.join(META_FILE);
         if meta_path.exists() {
-            // Refusing to create over an existing session is the honest answer: silently
-            // re-opening would either duplicate the identity line or overwrite it, and neither is
-            // something a caller asked for.
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 format!("session {} already has a rollout at {}", meta.session_id, dir.display()),
@@ -88,13 +45,6 @@ impl Rollout {
         Ok(rollout)
     }
 
-    /// Open an existing session for appending, reading back what it already holds so callers can
-    /// resume instead of starting from an empty transcript.
-    ///
-    /// A missing directory, a missing file and an empty session directory are all `Ok`: a session
-    /// can legitimately have no turns yet. What is *not* tolerated is a directory with no identity
-    /// line at all — that is not an empty session, it is a file we cannot name, and continuing
-    /// would write rows into a transcript whose provenance nobody knows.
     pub fn open(root: &Path, session_id: &str) -> Result<Rollout, std::io::Error> {
         let dir = session_dir(root, session_id);
         let meta = read_meta(&dir)?.ok_or_else(|| {
@@ -106,19 +56,14 @@ impl Rollout {
         open_in(&dir, meta.session())
     }
 
-    /// The session this rollout appends to, as recorded when it was created.
     pub fn session(&self) -> &Session {
         &self.meta
     }
 
-    /// The session directory, so a caller can show or archive the file it is looking at.
     pub fn path(&self) -> &Path {
         &self.dir
     }
 
-    /// Which of a session's files a record belongs to. Naming the kind rather than passing a
-    /// `File` keeps the routing in one place and makes an accidental item-in-history write
-    /// impossible at the call site.
     fn file(&mut self, kind: Kind) -> &mut fs::File {
         match kind {
             Kind::Meta => &mut self.meta_file,
@@ -128,55 +73,35 @@ impl Rollout {
         }
     }
 
-    /// Append one display row.
     pub fn append_item(&mut self, item: &Item) -> std::io::Result<()> {
         self.append(Kind::Item, &Record::Item(item.clone()))
     }
 
-    /// Append one turn of the model's vocabulary.
     pub fn append_msg(&mut self, msg: &Msg) -> std::io::Result<()> {
         self.append(Kind::Msg, &Record::Msg(msg.clone()))
     }
 
-    /// Append one turn and flush both files.
-    ///
-    /// The end of a turn is the one moment worth paying for: a flush makes everything before it
-    /// durable without costing a sync per streamed delta. A lost in-flight turn is one turn;
-    /// stalling a stream on every disk write is every turn.
     pub fn commit_turn(&mut self, msg: &Msg) -> std::io::Result<()> {
         self.append_msg(msg)?;
         self.flush()
     }
 
-    /// Push buffered records to the file, so a caller that appended several kinds can make them
-    /// durable together.
     pub fn flush(&mut self) -> std::io::Result<()> {
         self.items_file.flush()?;
         self.history_file.flush()
     }
 
+    // Route records by kind so display items cannot enter model history.
     fn append(&mut self, kind: Kind, record: &Record) -> std::io::Result<()> {
         write_line(self.file(kind), record)
     }
 
-    /// Replace the conversation's mutable head with [`SessionDetail`].
-    ///
-    /// This is the one write in this crate that is not an append, and the only place allowed to be
-    /// one. The reason it may be: `detail.jsonl` holds a single derived line — every value on it is
-    /// recomputable from the turns that are already durable — so a crash between truncate and write
-    /// loses a boundary marker and a summary, never a turn. A non-empty trailer is therefore torn,
-    /// not authoritative, and [`Rollout::detail`] says `None` for it rather than trusting a partial
-    /// record: the alternative is a resumed session appending its tail at the wrong sequence.
     pub fn write_detail(&mut self, detail: &SessionDetail) -> std::io::Result<()> {
         self.detail_file.set_len(0)?;
         self.detail_file.seek(SeekFrom::Start(0))?;
         write_line(&mut self.detail_file, &Record::SessionDetail(detail.clone()))
     }
 
-    /// The conversation's mutable head, or `None` when it has never been persisted.
-    ///
-    /// The *last* decodable `session_detail` line wins, so a store written by a build that appended
-    /// instead of replacing still reads correctly rather than freezing on its first value.
     pub fn detail(&self) -> std::io::Result<Option<SessionDetail>> {
         Ok(read_records(&self.dir, DETAIL_FILE)?
             .into_iter()
@@ -187,7 +112,6 @@ impl Rollout {
             .next_back())
     }
 
-    /// Every row in the trail, oldest first, undecodable lines skipped.
     pub fn items(&self) -> std::io::Result<Vec<Item>> {
         let mut out = Vec::new();
         for record in read_records(&self.dir, ITEMS_FILE)? {
@@ -198,40 +122,13 @@ impl Rollout {
         Ok(out)
     }
 
-    /// Een venster regels, van achteren gelezen, als `(reeks, regel)` van nieuw naar oud.
-    ///
-    /// De origineler (`H2Store.itemsWindow`) vraagt `ORDER BY seq DESC LIMIT limit + 1` en stopt
-    /// bij die plus-ene: de limiet is de kom, die ene regel erachter is het bewijs dat er nog ouder
-    /// voorafgaat. Deze lezer doet hetzelfde op een JSONL-bestand, en dat is de reden dat hij er is:
-    /// `items()` leest en decodeert het hele bestand, dus een gesprek van honderd beurten kost een
-    /// venster van tien regels honderd decoderingen. `read_lines_backwards` zoekt de staart op via
-    /// de index uit `tail_index` en leest alleen wat erbij hoort.
-    ///
-    /// `limit` is geen `Option<usize>` voor de lol: `None` is de volledige lezing die `items()`
-    /// altijd gaf, en `Some(limit)` is het venster, waarbij de +1 hier binnen de lezer zit zodat
-    /// de aanroeper zijn kom krijgt en het bewijs in `has_more_older` terugziet.
-    ///
-    /// **Een reeks is een regelnummer, geen byte.** Meten legde de vinger op de
-    /// aanname die hier eerder stond ("de positie in het bestand is de reeks"): die twee zijn
-    /// alleen aan elkaar gelijk als elke regel even lang is, en dat is zo niet. De cursor die deze
-    /// laag teruggeeft (`older_seq`) is bovendien de knip die de aanroeper teruggeeft
-    /// (`Session::load_older`), dus hij moet geldig blijven nadat een verdichting de kop van het
-    /// gesprek verving — een byte-offset wordt dan lukraak een ander regelnummer. Tellend lopen
-    /// houdt in dat de teller van de opslag en van `Session::oldest_loaded_seq` dezelfde taal
-    /// spreken, wat de tests eisen: vijfentwintig regels, tiende pagina, `older_seq` 15.
-    ///
-    /// Het tellen gebeurt op **gelezen** regels, niet op ontlede. Een regel die hier niet decodeert,
-    /// valt weg zoals in `read_records`, maar telt wél mee voor de knip — anders zou één kapotte
-    /// regel het venster laten overlezen en de cursor laten tekort schieten, precies waar de
-    /// opmerking bij `ItemWindow::from_newest_first` voor waarschuwt.
+    // Read from the tail so opening a large transcript only decodes the visible page.
     pub fn item_rows(
         &self,
         limit: Option<usize>,
         before_seq: Option<u64>,
     ) -> std::io::Result<Vec<(u64, Item)>> {
         let path = self.dir.join(ITEMS_FILE);
-        // De +1 van de origineler, hier binnen de lezer: de aanroeper vraagt zijn kom, hij hoeft
-        // het bewijs-rijtje niet te kennen.
         let want = limit.map(|limit| limit + 1);
         let mut out: Vec<(u64, Item)> = Vec::new();
         for (row, line) in read_lines_backwards(&path, want, before_seq)? {
@@ -242,15 +139,6 @@ impl Rollout {
         Ok(out)
     }
 
-    /// Hoeveel regels het spoor op schijf draagt, zonder er één te decoderen.
-    ///
-    /// De statusregel van het venster vraagt "hoeveel van de regels in de opslag staan in het
-    /// beeld" (de origineler telde hetzelfde met `COUNT(*)`, `H2Store.itemCount`), en die vraag
-    /// mag niet de volledige lezing van `items()` kosten: een gesprek van duizend beurten zou dan
-    /// duizend decoderingen betalen om er één getal te horen. `tail_index` telt regeleindes, en
-    /// `rows()` noemt precies die hele regels — dezelfde telling die `item_rows` als reeksnummer
-    /// gebruikt, dus tellen en knippen spreken één taal. Een bestand dat nog niet bestaat, is een
-    /// gesprek dat nog niets schreef: nul, geen fout.
     pub fn item_count(&self) -> std::io::Result<usize> {
         let path = self.dir.join(ITEMS_FILE);
         match tail_index(&path) {
@@ -260,51 +148,55 @@ impl Rollout {
         }
     }
 
-    /// Every turn, oldest first, undecodable lines skipped.
     pub fn messages(&self) -> std::io::Result<Vec<Msg>> {
-        let mut out = Vec::new();
-        for record in read_records(&self.dir, HISTORY_FILE)? {
-            if let Record::Msg(msg) = record {
-                out.push(msg);
-            }
-        }
-        Ok(out)
+        self.context().map(|(messages, _)| messages)
     }
 
-    /// The session directories under `root`, most recently active first.
-    ///
-    /// Ordering by activity means "resume the last conversation" costs one directory read and needs
-    /// no index to keep correct — the property an H2 table would have to maintain explicitly. The
-    /// figure is the session's last appended turn (see [`newest_activity`]); a never-written session
-    /// falls back to its own creation time, which is the most that can be said about it.
+    pub(crate) fn context(&self) -> std::io::Result<(Vec<Msg>, Option<String>)> {
+        let mut messages = Vec::new();
+        let mut summary = None;
+        for record in read_records(&self.dir, HISTORY_FILE)? {
+            match record {
+                Record::Msg(msg) => messages.push(msg),
+                Record::CompactionCheckpoint(text) => summary = Some(text),
+                _ => {}
+            }
+        }
+        Ok((messages, summary))
+    }
+
+    // Replace the retained context and summary together. The display trail is independent.
+    pub(crate) fn compact_context(&mut self, messages: &[Msg], summary: &str) -> std::io::Result<()> {
+        let path = self.dir.join(HISTORY_FILE);
+        let temp = path.with_extension("compact.tmp");
+        let mut file = fs::OpenOptions::new().create(true).write(true).truncate(true).open(&temp)?;
+        write_line(&mut file, &Record::CompactionCheckpoint(summary.to_owned()))?;
+        for msg in messages {
+            write_line(&mut file, &Record::Msg(msg.clone()))?;
+        }
+        file.sync_all()?;
+        let append = fs::OpenOptions::new().append(true).open(&temp)?;
+        fs::rename(&temp, &path)?;
+        self.history_file = append;
+        Ok(())
+    }
+
     pub fn sessions(root: &Path) -> std::io::Result<Vec<Session>> {
         let mut found: Vec<(std::time::SystemTime, Session)> = Vec::new();
-        // No data directory yet is an empty list, not a failure: the first run of the app is
-        // this path, and treating it as an error would make startup depend on a mkdir.
         let days = match fs::read_dir(root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
         for day in days.flatten() {
-            // Sessions live in a day bucket, not beside it: `session_dir` writes `<root>/<day>/<id>`,
-            // so a single scan of `root` finds day names and never a session. Reading one level
-            // deeper is what makes the listing agree with the writer; asserting the shallower shape
-            // yields an empty list, which is indistinguishable from a user who never had a chat.
             let day_dir = day.path();
             let sessions = match fs::read_dir(&day_dir) {
                 Ok(entries) => entries,
-                // Anything that is not a readable directory is not a day bucket. A stray file in
-                // the data directory costs a failed read, not the listing.
-                // Not a day bucket. A stray file in the data directory costs a failed read,
-                // not the listing.
                 Err(_) => continue,
             };
             for entry in sessions.flatten() {
                 let dir = entry.path();
                 if let Some(meta) = read_meta(&dir)? {
-                    // Newest file wins; a session that never had a turn has no file mtime to speak
-                    // of, and the directory's own time is all that is left.
                     let modified = newest_activity(&dir)
                         .or_else(|| fs::metadata(&dir).ok().and_then(|meta| meta.modified().ok()))
                         .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
@@ -317,30 +209,18 @@ impl Rollout {
     }
 }
 
-/// One record as one line.
-///
-/// Serialisation happens before any byte is written, so a record that cannot be encoded leaves the
-/// file untouched instead of appending a torn line — which matters because a torn line is precisely
-/// what the reader is taught to tolerate, and inventing one would erode that guarantee.
 fn write_line(file: &mut fs::File, record: &Record) -> std::io::Result<()> {
     let line = serde_json::to_string(record).map_err(std::io::Error::other)?;
     file.write_all(line.as_bytes())?;
     file.write_all(b"\n")
 }
 
-/// The directory for one session: a day folder holding one folder per session, mirroring the
-/// harness's `sessions/2026-11-03/rollout-…` layout without its filename-encoded timestamp.
 fn session_dir(root: &Path, session_id: &str) -> PathBuf {
     root.join(sessions_root(session_id)).join(session_id)
 }
 
-/// The day bucket for a session id, derived from the id rather than the clock so a session always
-/// lands in the same folder. Ids are `s-<RFC3339>+<suffix>` (see `baudet_core::session::new_id`),
-/// which means the id itself carries the date. Falling back to `unknown` keeps a hand-made id
-/// storable instead of rejected.
 fn sessions_root(session_id: &str) -> String {
     let id = session_id.strip_prefix("s-").unwrap_or(session_id);
-    // Expected shape: 2026-11-19T09-00-00Z-<suffix>.
     let day: String = id.chars().take(10).collect();
     let digits = day.chars().filter(|c| c.is_ascii_digit()).count();
     if digits == 8 && day.as_bytes().get(4) == Some(&b'-') && day.as_bytes().get(7) == Some(&b'-') {
@@ -365,22 +245,13 @@ fn append_to(path: &Path) -> Result<fs::File, std::io::Error> {
     fs::OpenOptions::new().create(true).append(true).open(path)
 }
 
-/// When this session last did something, or `None` when it never had a turn.
-///
-/// Only `history.jsonl` answers that. The measurement that settled it: in a three-session store,
-/// `session.jsonl` and `items.jsonl` carried the *same* mtime for every session — the instant the
-/// store was created — so their newest value cannot rank one conversation against another. The
-/// history file is the one that a turn appends to, which is the event being ordered.
 fn newest_activity(dir: &Path) -> Option<std::time::SystemTime> {
     fs::metadata(dir.join(HISTORY_FILE)).ok()?.modified().ok()
 }
 
-/// Read a whole file's records, skipping anything undecodable and any torn tail line.
 fn read_records(dir: &Path, name: &str) -> std::io::Result<Vec<Record>> {
     let mut out = Vec::new();
     for line in read_lines(&dir.join(name))? {
-        // Tolerance, not silence: an unknown kind is a newer build's record, and dropping it is
-        // what lets an old reader still open the file. A torn line lands here too.
         if let Ok(record) = serde_json::from_str::<Record>(&line) {
             out.push(record);
         }
@@ -388,9 +259,6 @@ fn read_records(dir: &Path, name: &str) -> std::io::Result<Vec<Record>> {
     Ok(out)
 }
 
-/// The identity line of a session directory, or `None` when there is no directory or no decodable
-/// identity. A whole-but-unknown-kind first line also yields `None`, which `open` reports as
-/// "cannot name this transcript" rather than guessing.
 fn read_meta(dir: &Path) -> std::io::Result<Option<SessionMeta>> {
     if !dir.is_dir() {
         return Ok(None);
@@ -403,12 +271,6 @@ fn read_meta(dir: &Path) -> std::io::Result<Option<SessionMeta>> {
     ))
 }
 
-/// Every whole line of a file, with a trailing partial line dropped.
-///
-/// Hand-rolled rather than `read_to_string` + `lines()` for one reason: the last line of a file
-/// left by a killed process has no newline, and keeping it would append half a JSON object to the
-/// transcript. The single-byte probe after the last delimiter settles whether that tail is a whole
-/// record or a torn one, and a file ending in `\n` — the normal case — keeps its final line.
 fn read_lines(path: &Path) -> std::io::Result<Vec<String>> {
     let mut file = match fs::File::open(path) {
         Ok(file) => file,
@@ -422,8 +284,6 @@ fn read_lines(path: &Path) -> std::io::Result<Vec<String>> {
     let mut start = 0usize;
     while let Some(offset) = buf[start..].iter().position(|byte| *byte == b'\n') {
         let line = &buf[start..start + offset];
-        // A blank line is written by nothing here, so skipping one cannot hide a record; it does
-        // keep a stray newline from looking like a corrupt one.
         if !line.is_empty() {
             lines.push(String::from_utf8_lossy(line).into_owned());
         }
@@ -436,30 +296,11 @@ fn read_lines(path: &Path) -> std::io::Result<Vec<String>> {
     Ok(lines)
 }
 
-/// De byte-posities van de regeleindes van een bestand, plus wat er ná het laatste staat.
-///
-/// Eén lezing van achteren in blokken, want een JSONL-bestand heeft geen index en de enige manier
-/// om aan de staart te beginnen, is zoeken. De posities staan van laag naar hoog, dus index `i` is
-/// de `i`-de regeleinde en regel `i` loopt van `newlines[i - 1] + 1` (of van 0) tot `newlines[i]`.
-///
-/// Een afgebroken laatste regel heeft geen regeleinde en staat daarom niet in de lijst: het aantal
-/// posities is het aantal hele regels, dezelfde uitspraak die `read_lines` doet wanneer het een
-/// halve record van een doodgeprikte processor weglaat. Er is dus geen vlag nodig om dat verschil
-/// te onthouden, en die vlag zou er twee moeten laten overeenkomen.
-///
-/// Meten leerde hier twee dingen. Een positielijst is **geen dichte reeks**: een regel van elf
-/// bytes levert één positie op en slaat er tien over, dus een lus die van `aantal` naar nul telt
-/// en in de lijst zoekt, mist elke regel. En `tail_is_whole` hieronder laat zijn descriptor op
-/// byte nul achter, dus elke bloklezing zonder eigen zoekopdracht leest nul bytes.
 struct TailIndex {
-    /// De posities van de regeleindes, van laag naar hoog.
     newlines: Vec<u64>,
 }
 
 impl TailIndex {
-    /// Het aantal hele regels in het bestand: zoveel regeleindes als er zijn. Een afgebroken staart
-    /// heeft er geen, dus die telt niet mee — precies zoals `read_lines` hem weglaat. Alles wat
-    /// hieronder aan posities overloopt, is daarom een bestaand regelnummer.
     fn rows(&self) -> u64 {
         self.newlines.len() as u64
     }
@@ -474,9 +315,6 @@ fn tail_index(path: &Path) -> std::io::Result<TailIndex> {
         let mut end = size;
         while end > 0 {
             let start = end.saturating_sub(BLOCK as u64) as usize;
-            // De zoekopdracht mag niet weg: `tail_is_whole` laat deze descriptor op byte nul
-            // achter, dus zonder zoekopdracht leest elke blok na de eerste nul bytes en houdt de
-            // index op met tellen zodra een bestand groter is dan `BLOCK`.
             file.seek(SeekFrom::Start(start as u64))?;
             let span = (end as usize) - start;
             let mut filled = 0usize;
@@ -496,25 +334,9 @@ fn tail_index(path: &Path) -> std::io::Result<TailIndex> {
         }
         newlines.reverse();
     }
-    // De staart hoeft hier niet onderzocht: zonder regeleinde komt hij niet in de lijst, en die
-    // lijst is het enige wat `rows` telt.
     Ok(TailIndex { newlines })
 }
 
-/// Elke hele regel van een bestand, van laat naar vroeg, als `(regelnummer, tekst)`.
-///
-/// Dit is `ORDER BY seq DESC LIMIT ? ORDER` voor een append-only JSONL-bestand. De lus loopt over
-/// de index zelf en niet over de getallen ernaarbinnen: `row` is de plaats in het bestand, en de
-/// bijbehorende byte-range is `newlines[row]` met links de vorige regeleinde. Een regel van twaalf
-/// bytes kost daardoor één stap in plaats van twaalf, en dat is wat deze lezer betaalbaar maakt.
-///
-/// `limit` is het aantal regels die mee mogen, `before_seq` de knip: de knip op `n` laat de regels
-/// met nummer lager dan `n` over, dus de lezing begint bij `n` en niet bij het einde van het
-/// bestand. Zonder knip begint hij bij de laatste regel. Het aantal dat hieruit komt, is wat
-/// `ItemWindow::from_newest_first` telt voor zijn bewijs dat er nog ouder voorafgaat.
-///
-/// Twee randen uit `read_lines` blijven dezelfde: een niet-afgesloten staart is geen regel, en de
-/// bytes worden met de hand gezocht — geen `lines()`, want die wil de hele tekst in het geheugen.
 fn read_lines_backwards(
     path: &Path,
     limit: Option<usize>,
@@ -526,8 +348,6 @@ fn read_lines_backwards(
         Err(error) => return Err(error),
     };
     let index = tail_index(path)?;
-    // De bovengrens is een regelnummer. De knip kan hoger zijn dan het bestand — een gesprek dat
-    // verdicht is, heeft minder regels dan zijn vorige cursor — dus knippen is hier ook inkorten.
     let bound = before_seq.unwrap_or_else(|| index.rows()).min(index.rows());
     let mut out: Vec<(u64, String)> = Vec::new();
     let mut row = bound;
@@ -538,13 +358,9 @@ fn read_lines_backwards(
             }
         }
         row -= 1;
-        // De byte-range van regel `row`: van het vorige regeleinde (of het begin) tot en met het
-        // byte vóór dit regeleinde, want de newline zelf is geen deel van de tekst.
         let stop = index.newlines[row as usize] as usize;
         let start = if row == 0 { 0usize } else { index.newlines[row as usize - 1] as usize + 1 };
         if stop == start {
-            // Een ledige regel. Niets hier schrijft die, maar een losse newline mag een venster
-            // niet laten mislopen: de regel telt als gelezen, zonder tekst.
             out.push((row, String::new()));
             continue;
         }
@@ -556,13 +372,8 @@ fn read_lines_backwards(
     Ok(out)
 }
 
-/// Hoeveel bytes per stap de achterwaartse index leest. Groot genoeg om een rolout in één of twee
-/// beurten te doorzoeken, klein genoeg om een gesprek van duizend regels niet in één keer op te
-/// eten; de index is het enige wat deze route ongevraagd in het geheugen zet.
 const BLOCK: usize = 64 * 1024;
 
-/// Whether everything after the last newline is a complete record. A file that ends in a newline,
-/// or is empty, ends whole; a non-empty tail without one means the writer died mid-record.
 fn tail_is_whole(file: &mut fs::File) -> std::io::Result<bool> {
     let len = file.metadata()?.len();
     if len == 0 {
@@ -581,8 +392,6 @@ mod tests {
     use super::*;
     use baudet_core::{AgentMessageItem, ItemStatus, Msg, ReasoningItem, ToolCallItem, UserMessageItem};
 
-    /// A throwaway data root, named for the test so a failure leaves inspectable files rather than
-    /// a temp dir that vanished with it.
     struct Root(PathBuf);
 
     impl Root {
@@ -638,7 +447,6 @@ mod tests {
         assert_eq!(reopened.items().unwrap().len(), 2);
         assert_eq!(reopened.messages().unwrap(), vec![Msg::user("hoi")]);
         assert_eq!(reopened.session().model.as_deref(), Some("qwen-local"));
-        // Two files, because the kinds decode separately; the trail and the turns differ by design.
         assert!(reopened.path().join(ITEMS_FILE).exists());
         assert!(reopened.path().join(HISTORY_FILE).exists());
     }
@@ -671,7 +479,6 @@ mod tests {
         }
         let history = session_dir(&root.0, id).join(HISTORY_FILE);
         let mut file = fs::OpenOptions::new().append(true).open(&history).unwrap();
-        // Exactly what a kill leaves: a valid record, then this partial one, with no newline.
         file.write_all(br#"{"type":"msg","payload":{"role":"user","conte"#).unwrap();
         file.flush().unwrap();
         drop(file);
@@ -683,8 +490,6 @@ mod tests {
 
     #[test]
     fn a_final_whole_line_is_not_mistaken_for_a_torn_one() {
-        // The failure mode of "drop the last line" is quiet and permanent: every session would
-        // lose its newest turn. Pinned explicitly because the check is byte-level.
         let root = Root::new("final-line");
         let id = "s-2026-11-19T09-00-03Z-dddd2222";
         {
@@ -716,10 +521,6 @@ mod tests {
 
     #[test]
     fn reasoning_and_tool_rows_are_stored_although_history_never_shows_them() {
-        // The audit trail records what the interface showed; what goes back to the model is a
-        // different vector on purpose. Storing both is not duplication — dropping the tool rows
-        // would flatten the transcript, and replaying them would send noise the model never asked
-        // for. This is the 587-versus-399 asymmetry, held open as a test.
         let root = Root::new("asymmetry");
         let id = "s-2026-11-19T09-00-05Z-bbbb4444";
         {
@@ -766,13 +567,6 @@ mod tests {
         assert_eq!(listed.iter().map(|s| s.session_id.as_str()).collect::<Vec<_>>(), expected);
     }
 
-    /// Move *every* file of a session into the past.
-    ///
-    /// All of them, deliberately: `sessions()` ranks by the last appended turn, and a fixture that
-    /// aged only one file while leaving the others at "now" would be asserting a shape the store
-    /// never has on disk. `FileTimes` is the standard-library way and is portable, where a
-    /// directory's mtime would need `libc` — and is the wrong figure anyway, since appending a file
-    /// leaves its directory's timestamp alone.
     fn touch_older(root: &Path, id: &str, seconds: u64) {
         let dir = session_dir(root, id);
         let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
@@ -785,7 +579,6 @@ mod tests {
     #[test]
     fn a_day_bucket_comes_from_the_id_and_not_the_clock() {
         assert_eq!(sessions_root("s-2026-11-19T09-00-00Z-abcd1234"), "2026-11-19");
-        // A hand-made id is still storable; only the bucket gives up, never the write.
         assert_eq!(sessions_root("s-abc"), "unknown");
     }
 
@@ -796,7 +589,6 @@ mod tests {
         Rollout::create(&root.0, &SessionMeta::new(id)).unwrap();
         let second = Rollout::create(&root.0, &SessionMeta::new(id));
         assert_eq!(second.err().map(|e| e.kind()), Some(std::io::ErrorKind::AlreadyExists));
-        // The first transcript is untouched by the refusal.
         assert_eq!(Rollout::open(&root.0, id).unwrap().session().session_id, id);
     }
 

@@ -1,21 +1,5 @@
-//! Elke tekst die een persoon ziet, in vier talen naast elkaar.
-//!
-//! Poort van `i18n/Key.kt`, `i18n/Language.kt` en `i18n/Texts.kt`. De vorm is dezelfde om dezelfde
-//! reden als daar: een enum-tabel en geen bronbestand. Een ontbrekende vertaling is dan een
-//! compileerfout in plaats van een verrassing tijdens het draaien, en er is niets om via reflectie
-//! te registreren of als bestand mee te nemen, wat een latere native-build vrijwaart van
-//! resource-padraden (`Key.kt:3-10`).
-//!
-//! Placeholders zijn positioneel: `{0}`, `{1}`, ... Vervang ze met [`Texts::fmt`].
-//!
-//! **Omvang: alleen wat de persoon leest.** Alles wat een model leest - de systeemprompt, de
-//! samenvattingsprompt, de labels die in een prompt vouwen - staat hier bewust NIET en blijft
-//! Engels, welke taal de UI ook draagt (`Key.kt:12-16`).
+//! Localized interface text. Model-facing instructions stay in English.
 
-/// De talen die de UI aanbiedt. Engels is de default (`Language.kt:4`).
-///
-/// Kleine namen op de draad, want de origineler zet `language = "nl"` in zijn bestand
-/// (`AppConfig.kt:24`), en `Language::parse` is de poort voor alles wat er anders in staat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {
@@ -27,10 +11,8 @@ pub enum Language {
 }
 
 impl Language {
-    /// De talen in de volgorde van de kiezer, zoals `SettingsPanel.kt:40` ze opsomt.
     pub const ALL: [Language; 4] = [Language::En, Language::Nl, Language::Fr, Language::De];
 
-    /// Het woord zoals het in het instellingenbestand staat. Klein, zoals `ToolMode::word`.
     pub fn word(self) -> &'static str {
         match self {
             Language::En => "en",
@@ -40,8 +22,6 @@ impl Language {
         }
     }
 
-    /// De naam van de taal in die taal zelf. Dit is de enige tekst die in alle talen gelijk blijft:
-    /// een kiezer die "Deutsch" tot "Duits" vertaalt, is onleesbaar voor iemand die Duits zoekt.
     pub fn native_name(self) -> &'static str {
         match self {
             Language::En => "English",
@@ -51,8 +31,6 @@ impl Language {
         }
     }
 
-    /// De byte voor de atomaal die de actieve taal bewaart, en zijn inverse. Een `u8` want een
-    /// taalwissel is één zet en een lege atoomwaarde — de toestand vóór elke zet — is En.
     pub(crate) fn as_code_byte(self) -> u8 {
         match self {
             Language::En => 0,
@@ -62,8 +40,6 @@ impl Language {
         }
     }
 
-    /// Elke andere byte dan de vier hierboven is en: een taal die een latere build toevoegt, mag
-    /// een oudere niet breken, precies zoals `parse` een onbekend woord niet laat falen.
     pub(crate) fn from_code_byte(byte: u8) -> Language {
         match byte {
             1 => Language::Nl,
@@ -73,9 +49,6 @@ impl Language {
         }
     }
 
-    /// Alles wat niet wordt herkend, valt terug op Engels in plaats van te falen
-    /// (`Texts.kt:27-33`): een half geschreven of met de hand aangepast instellingenbestand mag het
-    /// venster niet sluiten, en een taal die een latere build toevoegt mag een oudere niet breken.
     pub fn parse(stored: &str) -> Language {
         match stored.trim().to_ascii_lowercase().as_str() {
             "nl" => Language::Nl,
@@ -86,8 +59,6 @@ impl Language {
     }
 }
 
-/// De sleutel van elke zichtbare tekst. De namen zijn die van `Key.kt`, zodat een `.kt`-regel en
-/// een `.rs`-regel elkaar zonder woordenboek vinden.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Key {
     SendButton,
@@ -360,25 +331,13 @@ pub enum Key {
 
 }
 
-/// De accolades rond een placeholder, als los teken, zodat de zoekreeks in [`Texts::fmt`] uit
-/// [`format!`] in elkaar gezet wordt en deze broncode er zelf geen accolade in hoeft te zetten.
 const CHAR_OPEN: char = '\u{7b}';
 const CHAR_CLOSE: char = '\u{7d}';
 
-/// De actieve taal en de lezing ervan. Poort van `Texts` (`Texts.kt:7-31`).
-///
-/// Net als daar is dit bewust een globalie: `set_language` is één zet die de app naast het
-/// opgeslagen veld houdt, zodat elk onderdeel hier kan lezen zonder de instelling door elke
-/// handtekening mee te sleuren. De lezing geeft `&'static str`: geen allocatie per teken.
-///
-/// De taal staat proces-breed en niet per draad, want `thread_local` hier is meetbaar fout: de
-/// werker-draad die een beurt bouwt en een test-draad die een bevestiging leest, zijn andere
-/// draden dan de paint-draad, en per draad zou elk van die drie in een andere taal antwoorden
-/// zonder dat iemand dat kon zien. Een `AtomicU8` kost geen slot en geen allocatie.
+// Language is process-wide because the worker and UI both format messages.
 pub struct Texts;
 
 impl Texts {
-    /// De taal die de UI draagt. `Language::En` zolang niemand iets anders kiest.
     pub fn language() -> Language {
         Language::from_code_byte(LANGUAGE.load(std::sync::atomic::Ordering::Relaxed))
     }
@@ -387,7 +346,6 @@ impl Texts {
         LANGUAGE.store(language.as_code_byte(), std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// De tekst van `k` in de actieve taal (`Texts.kt:11-16`).
     pub fn get(k: Key) -> &'static str {
         match Self::language() {
             Language::En => en(k),
@@ -397,8 +355,6 @@ impl Texts {
         }
     }
 
-    /// Vervangt `{0}`, `{1}`, ... in de actieve taal (`Texts.kt:19-24`). Een `replace` per index,
-    /// in volgorde van argument, precies zoals `Texts.fmt` dat doet.
     pub fn fmt(k: Key, args: &[&dyn std::fmt::Display]) -> String {
         let mut out = Self::get(k).to_owned();
         for (i, arg) in args.iter().enumerate() {
@@ -408,10 +364,7 @@ impl Texts {
     }
 }
 
-/// De taal zelf: de kleine code van `Language`, één byte voor het hele proces. De UI zet hem uit
-/// de instelling vóór de eerste pass en bij het opslaan van die instelling.
 static LANGUAGE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-/// Het Engels: de taal waarnaar alles terugvalt.
 fn en(k: Key) -> &'static str {
     match k {
         Key::SendButton => r"Send  (ctrl+enter)",
@@ -727,7 +680,6 @@ By dropping cloud-first assumptions and putting real telemetry on screen, Baudet
     }
 }
 
-/// Het Nederlands.
 fn nl(k: Key) -> &'static str {
     match k {
         Key::SendButton => r"Verzenden  (ctrl+enter)",
@@ -1043,7 +995,6 @@ Door cloud-first aannames los te laten en echte telemetrie in beeld te brengen, 
     }
 }
 
-/// Het Frans.
 fn fr(k: Key) -> &'static str {
     match k {
         Key::SendButton => r"Envoyer  (ctrl+entrée)",
@@ -1359,7 +1310,6 @@ En abandonnant les réflexes cloud-first et en affichant une télémétrie réel
     }
 }
 
-/// Het Duits.
 fn de(k: Key) -> &'static str {
     match k {
         Key::SendButton => r"Senden  (Strg+Eingabe)",

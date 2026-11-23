@@ -1,13 +1,6 @@
-//! Finding a server on this machine, and what a listing is allowed to name in a probe.
-//!
-//! Both rules here were measured against real servers (2026-11-21) and both are about cost, not
-//! style: a probe names a model a server may have to page in, and a sweep that asks HTTP questions of
-//! closed ports pays a timeout per port. `scan` and `discover` take their network work as injected
-//! closures, so these tests hold the decision without holding a socket.
 
 use baudet_backend::protocol::{discover, judge_probe, likely_chat_model, scan, Discovery, Protocol, ScanOutcome};
 
-/// An outcome a caller could have got back, so a sweep test only has to say which endpoint it was.
 fn outcome(endpoint: &str, protocol: Option<Protocol>) -> ScanOutcome {
     ScanOutcome {
         endpoint: endpoint.to_string(),
@@ -19,10 +12,6 @@ fn outcome(endpoint: &str, protocol: Option<Protocol>) -> ScanOutcome {
 
 #[test]
 fn a_listing_of_embedders_alone_is_not_something_to_probe() {
-    // Measured: LM Studio lists `text-embedding-nomic-embed-text-v1.5` beside its gemma, and the
-    // gateway lists `bge-m3-mlx-fp16`, `chatterbox-*` and `whisper-*`. Naming one of those in a probe
-    // spends a request that cannot answer, and on a server that pages models in, a load that
-    // displaces the resident one.
     assert!(likely_chat_model("google/gemma-4-26b-a4b-qat"));
     assert!(!likely_chat_model("text-embedding-nomic-embed-text-v1.5"));
     assert!(!likely_chat_model("bge-m3-mlx-fp16"));
@@ -50,8 +39,6 @@ fn a_listing_of_embedders_alone_is_not_something_to_probe() {
 
 #[test]
 fn a_probe_names_a_chat_model_even_when_an_embedder_is_listed_first() {
-    // Order in a listing is not a statement about usefulness. `models.first()` was the bug this
-    // protects: it would have named the embedder merely because that server happened to list it first.
     let named = std::cell::RefCell::new(String::new());
     let outcome = scan(
         "http://127.0.0.1:9/v1",
@@ -67,8 +54,6 @@ fn a_probe_names_a_chat_model_even_when_an_embedder_is_listed_first() {
 
 #[test]
 fn a_closed_candidate_is_answered_without_a_request() {
-    // The gate exists because of a measurement: eighteen HTTP requests to closed ports cost 36 s on
-    // this machine, while the same ports answered `refused` at the socket layer in 0.00 s.
     let requests = std::cell::Cell::new(0);
     let discovery = discover(
         &["http://127.0.0.1:9/v1".into()],
@@ -85,8 +70,6 @@ fn a_closed_candidate_is_answered_without_a_request() {
 
 #[test]
 fn a_sweep_stops_at_the_first_server_that_answers() {
-    // Every probe names a model a server may page in, so candidates after the winner must cost
-    // nothing. This is what makes a sweep safe to run against a machine holding several local servers.
     let asked = std::cell::RefCell::new(Vec::new());
     let candidates = vec![
         "http://127.0.0.1:1234/v1".to_string(),
@@ -109,7 +92,6 @@ fn a_sweep_stops_at_the_first_server_that_answers() {
 
 #[test]
 fn a_sweep_that_finds_nothing_still_says_what_it_saw() {
-    // "No server" alone tells a person nothing to fix. Each candidate's own notes survive the sweep.
     let discovery = discover(
         &["http://127.0.0.1:1234/v1".to_string(), "http://127.0.0.1:8000/v1".to_string()],
         |_| true,
@@ -123,9 +105,6 @@ fn a_sweep_that_finds_nothing_still_says_what_it_saw() {
 
 #[test]
 fn a_refusal_and_an_answer_are_told_apart_by_the_body_not_the_status() {
-    // Both halves are measured: the gateway answers /v1/responses with 404 + {"error": …}, LM Studio
-    // with 200 + {"object":"response", "status":"completed"}. A status-code test would call the
-    // gateway a Responses server and LM Studio a refusal -- exactly backwards.
     let refusal = serde_json::json!({"error": "Model 'x' not found"});
     let (found, _) = judge_probe(Protocol::Responses, 404, &refusal);
     assert_eq!(found, None, "a 404 error body is not a responses answer");
@@ -136,10 +115,6 @@ fn a_refusal_and_an_answer_are_told_apart_by_the_body_not_the_status() {
 
 #[test]
 fn a_refusal_on_the_chat_path_is_read_the_same_way() {
-    // De andere helft van dezelfde meting (2026-11-21, gateway): `POST /v1/chat/completions` met een
-    // model dat de server niet heeft, geeft 404 + {"error": ...}. De scan noemt áltijd een model uit
-    // de listing van dezelfde server, dus dit is precies wat een 404-op-de-chat-pad daar betekent:
-    // geen dialect, en de notitie moet de words van de server houden in plaats van een gok.
     let refusal = serde_json::json!({"error": "Model 'x' not found"});
     let (found, note) = judge_probe(Protocol::ChatCompletions, 404, &refusal);
     assert_eq!(found, None, "een weigering noemt geen dialect");

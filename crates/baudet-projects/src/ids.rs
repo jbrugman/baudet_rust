@@ -1,20 +1,13 @@
-//! Lokale id's in de Kotlin-vorm: `p-` of `s-` plus acht kleine hex-tekens.
-//!
-//! UUID is hier niet nodig: de eis is lokale uniciteit, niet een niet-raadbare identifier. Een
-//! monotone klok en een procesloper voorkomen dat twee sessies in hetzelfde proces
-//! dezelfde id krijgen; de vertrouwde `s-...`-vorm van de rolloutlaag blijft behouden.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Een id voor een nieuw project.
 pub fn new_project_id() -> String {
     format!("p-{}", unique_suffix())
 }
 
-/// Een id voor een nieuw gesprek.
 pub fn new_session_id() -> String {
     format!("s-{}", unique_suffix())
 }

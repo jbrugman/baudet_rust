@@ -4,8 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# Durability only: no UI, no transport, no async. That is what keeps this crate testable without a
-# frame or a runtime, which is the same reason the Kotlin `store` package has no Swing import.
 [dependencies]
 baudet-core = { workspace = true }
 serde = { workspace = true }
@@ -13,6 +11,4 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-# Only for the git-probe fixtures, which need a real throwaway directory and must not reach into a
-# sibling test's temp path.
 tempfile = { workspace = true }

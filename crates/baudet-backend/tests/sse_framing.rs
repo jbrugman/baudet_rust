@@ -1,4 +1,3 @@
-//! Framing intents, translated from `SseFramerSpec`.
 
 use baudet_backend::sse::frame;
 
@@ -12,7 +11,6 @@ fn a_blank_line_ends_an_event() {
 
 #[test]
 fn several_data_lines_join_with_a_newline() {
-    // A payload spanning lines must read as ONE event, or it parses as broken JSON.
     let events = frame(["data: {", "data: \"a\":1}", ""]);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].data, "{\n\"a\":1}");

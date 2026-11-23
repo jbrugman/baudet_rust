@@ -1,3 +1,2 @@
-# The source is written at 120 columns; the Kotlin original it mirrors is too.
 max_width = 120
 use_small_heuristics = "Max"

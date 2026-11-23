@@ -1,65 +1,30 @@
-//! The wire shape of an OpenAI-compatible server, as data rather than as a connection.
-//!
-//! Translated from `dev.baudet.api.ResponsesClient.buildRequest` and `dev.baudet.api.TurnAccumulator`.
-//! Splitting the shape from the socket is what makes the interesting part testable: which event name
-//! carries a delta is precisely where local servers deviate from OpenAI's text, and a transport that
-//! also decides that would hide its guesses behind a server.
-//!
-//! Two rules carried over from the original, both earned against real backends:
-//!
-//!  * an unknown event is counted, never fatal -- at worst one delta is missed, and the census of
-//!    what did arrive still says so (see [`TurnAccumulator::events`]);
-//!  * a truncation is named. "No answer" and "budget exhausted before the answer started" look
-//!    identical on screen and only one of them is fixed by raising the ceiling.
 
 use baudet_core::{FunctionCall, ItemKind, ThreadEvent, Turn, Usage};
 use serde_json::{Map, Value};
 
-/// The Responses API path, relative to a base URL that ends in `/v1`.
 pub const RESPONSES_PATH: &str = "/responses";
 
-/// What the panel's "reasoning: default" means for a request: send nothing, so a server that
-/// reasons by default keeps doing that and one that does not stays quiet.
 pub const REASONING_DEFAULT: &str = "";
 
-/// The reasoning ask of a one-off summarising call. The compactor's fold deletes text, so it must
-/// not spend its ceiling on hidden thinking -- and the ask is unconditional, because a backend that
-/// reasons by default would otherwise eat the whole budget before the summary started.
 pub const REASONING_NONE: &str = "none";
 
-/// How much of a first payload is kept as the sample of an event type. Long enough to show the
-/// shape behind a name, short enough to print.
 pub const SAMPLE_LIMIT: usize = 700;
 
-/// Everything a request may name. Kept flat, so a caller sets only what it knows and the builder
-/// decides what the wire carries: `None` and an empty string both mean "the server decides", and
-/// neither is sent -- sending a zero ceiling is not the same as sending no ceiling, it caps the
-/// answer at nothing.
 #[derive(Debug, Clone, Default)]
 pub struct RequestShape<'a> {
     pub model: &'a str,
     pub system: &'a str,
-    /// Newest last, as `SendRequest::history` holds it. Skipped entirely when
-    /// `previous_response_id` is set, because then the server already has it.
     pub history: &'a [baudet_core::Msg],
     pub user_text: &'a str,
     pub previous_response_id: Option<&'a str>,
-    /// Enabled function definitions, already a JSON array as text.
     pub tools: Option<&'a str>,
-    /// A base64 data URL riding the first request of a turn.
     pub image: Option<&'a str>,
     pub max_output_tokens: Option<u32>,
-    /// One of `REASONING_*` or an effort the server names (`low`, `minimal`, ...).
     pub reasoning: Option<&'a str>,
-    /// Whether the server keeps the response for `previous_response_id` chaining.
     pub store: bool,
 }
 
-/// The whole body of a streaming `/responses` request, in one of its two shapes: a chained turn
-/// names the server's own session, an unchained one replays the transcript itself.
-///
-/// `stream` is always on. A server that cannot stream is a protocol the protocol-detection crate
-/// will name, not a field to flip here.
+// Responses tools and images use a different shape from the chat API.
 pub fn request_body(shape: &RequestShape<'_>) -> Map<String, Value> {
     let mut body = Map::new();
     body.insert("model".into(), shape.model.into());
@@ -76,11 +41,8 @@ pub fn request_body(shape: &RequestShape<'_>) -> Map<String, Value> {
         reasoning.insert("effort".into(), effort.into());
         body.insert("reasoning".into(), Value::Object(reasoning));
     }
-    // A tools string that will not parse as an array is skipped rather than sent half-formed: a
-    // server rejecting the whole body over one malformed definition loses the turn as well.
     if let Some(tools) = shape.tools {
         if let Ok(Value::Array(_)) = serde_json::from_str::<Value>(tools) {
-            // Reached only by the parse that just proved it is an array.
             let parsed = serde_json::from_str::<Value>(tools).expect("an array just parsed above");
             body.insert("tools".into(), parsed);
         }
@@ -91,7 +53,6 @@ pub fn request_body(shape: &RequestShape<'_>) -> Map<String, Value> {
     }
     let mut input = Vec::new();
     if !chained {
-        // `system` rides as `instructions`, so replaying it per turn would state it twice.
         for message in shape.history {
             if message.role != "system" {
                 input.push(text_message(&message.role, &message.content));
@@ -129,25 +90,15 @@ fn text_message(role: &str, content: &str) -> Value {
     Value::Object(message)
 }
 
-/// What one payload carried, if anything. Kept separate from [`TurnAccumulator`] so a caller can
-/// append to a card while the rest of the payload is bookkeeping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delta {
     pub text: Option<String>,
     pub reasoning: Option<String>,
 }
 
-/// The census entry for a payload that was not JSON at all.
 pub const NOT_JSON: &str = "(not-json)";
-/// The census entry for a payload that carried no name anywhere.
 pub const NO_TYPE: &str = "(no-type)";
 
-/// Reduce framed payloads into one turn.
-///
-/// The tolerance is the feature. `data.type` wins because that is what the Responses API specifies,
-/// then the `event:` field because some servers carry the name nowhere else, then `object` because
-/// that is all a `chat.completion.chunk` brings. Anything else is counted and sampled, so the
-/// census of a turn shows what a server really sent even when none of it was understood.
 #[derive(Debug, Default)]
 pub struct TurnAccumulator {
     text: String,
@@ -168,7 +119,6 @@ impl TurnAccumulator {
         TurnAccumulator::default()
     }
 
-    /// Fold one framed payload. `event` is the framed `event:` name, if any.
     pub fn feed(&mut self, event: Option<&str>, data: &str) -> Option<Delta> {
         self.event_count += 1;
         let Ok(parsed) = serde_json::from_str::<Value>(data) else {
@@ -177,15 +127,12 @@ impl TurnAccumulator {
         };
         let object = match &parsed {
             Value::Object(object) => object.clone(),
-            // A bare array or string is a payload too; it just has no fields to read.
             other => {
                 self.record(NO_TYPE, data);
                 let _ = other;
                 return None;
             }
         };
-        // Kept for the one message that must quote the whole payload back: a server's error means
-        // whatever sits beside its name, and a Map has no JSON spelling of its own.
         let payload = parsed.clone();
         let name = string_field(&object, "type")
             .or_else(|| event.map(str::to_string))
@@ -204,8 +151,6 @@ impl TurnAccumulator {
         delta
     }
 
-    /// The finished turn, exactly as the stream produced it -- including the census, so a caller can
-    /// show that a server spoke a dialect rather than merely that an answer looked short.
     pub fn finish(self) -> Turn {
         let event_count = self.event_count;
         Turn {
@@ -221,17 +166,14 @@ impl TurnAccumulator {
         }
     }
 
-    /// How many payloads have been folded, so a caller can tell "no events" from "events, no text".
     pub fn event_count(&self) -> u32 {
         self.event_count
     }
 
-    /// The name the server finished with, once a terminal event has been seen.
     pub fn final_event(&self) -> Option<&str> {
         self.final_event.as_deref()
     }
 
-    /// A stream-level error the server reported, which is not the same as an empty answer.
     pub fn stream_error(&self) -> Option<&str> {
         self.stream_error.as_deref()
     }
@@ -241,33 +183,27 @@ impl TurnAccumulator {
         if name.ends_with("output_text.delta") {
             return delta.map(|text| Delta { text: Some(text), reasoning: None });
         }
-        // Reasoning is the bulk of what a local reasoning model spends its ceiling on. Discarding it
-        // leaves an empty answer that only reports tokens burned, so it is captured and shown.
         if name.ends_with("reasoning_summary_text.delta") || name.ends_with("reasoning_text.delta") {
             return delta.map(|reasoning| Delta { text: None, reasoning: Some(reasoning) });
         }
+        // Read usage before the choice. A final usage chunk may have no choices.
         if name == "chat.completion.chunk" {
-            // Measured on LM Studio (2026-11-21): the chunk that ends a chat stream carries no
-            // `choices` at all -- an empty array -- and the turn's token counts in `usage`. Reading
-            // only the choice and returning here would fold that chunk's absence and throw its
-            // accounting away, which is the one number a person can check against their own GPU. So
-            // the response-level fields are absorbed first; `absorb` reads `usage` wherever it sits
-            // and takes its turn-level names (`id`, `output`, the terminals) from the same payload
-            // they appear in, which a chat chunk either does not have or has under another name.
             self.absorb(name, object);
             let choice =
                 object.get("choices").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_object);
-            let content = choice
+            if let Some(reason) = choice.and_then(|choice| string_field(choice, "finish_reason")) {
+                if !matches!(reason.as_str(), "stop" | "tool_calls" | "function_call") {
+                    self.incomplete_reason = Some(reason);
+                }
+            }
+            let delta = choice
                 .and_then(|c| c.get("delta").or_else(|| c.get("message")))
-                .and_then(Value::as_object)
-                .and_then(|d| string_field(d, "content"));
-            return content.map(|text| Delta { text: Some(text), reasoning: None });
+                .and_then(Value::as_object)?;
+            let text = string_field(delta, "content");
+            let reasoning = string_field(delta, "reasoning_content").or_else(|| string_field(delta, "reasoning"));
+            return (text.is_some() || reasoning.is_some()).then_some(Delta { text, reasoning });
         }
         if name == "error" {
-            // The whole payload, as the original does: an error's meaning is usually in the fields
-            // beside the name, and a map has no JSON spelling of its own.
-            // The whole payload, as the original does: the meaning of an error is usually in the
-            // fields beside its name, so quoting only the name would quote nothing.
             self.stream_error = Some(payload.to_string());
             return None;
         }
@@ -277,9 +213,7 @@ impl TurnAccumulator {
         None
     }
 
-    /// Response-level bookkeeping: the id, the usage, why the run ended, any function calls.
     fn absorb(&mut self, name: &str, object: &Map<String, Value>) {
-        // Some servers wrap the response, some hand it over bare.
         let response = object.get("response").and_then(Value::as_object).cloned().unwrap_or_else(|| object.clone());
         if let Some(id) = string_field(&response, "id") {
             self.response_id = Some(id);
@@ -303,9 +237,6 @@ impl TurnAccumulator {
                     .or_else(|| Some(name.to_string()));
             }
         }
-        // Native calls ride two shapes: the finished response carries them in its output array, and
-        // some servers surface each item on its own done event. Both are read; the dedup in
-        // `collect_call` keeps that from counting one call twice.
         if let Some(Value::Array(output)) = response.get("output") {
             for item in output {
                 self.collect_call(item.as_object());
@@ -314,8 +245,6 @@ impl TurnAccumulator {
         if name.ends_with("output_item.done") {
             self.collect_call(object.get("item").and_then(Value::as_object));
         }
-        // Tolerant fallback: a server may skip deltas and deliver the finished text only. Adopted
-        // just when nothing streamed, so nothing is counted twice.
         if name.ends_with("output_text.done") && self.text.is_empty() {
             if let Some(text) = string_field(object, "text") {
                 self.text.push_str(&text);
@@ -328,6 +257,7 @@ impl TurnAccumulator {
         }
     }
 
+    // A function call may appear in both item and terminal events.
     fn collect_call(&mut self, item: Option<&Map<String, Value>>) {
         let Some(item) = item.filter(|i| string_field(i, "type").as_deref() == Some("function_call")) else {
             return;
@@ -361,8 +291,6 @@ fn string_field(object: &Map<String, Value>, key: &str) -> Option<String> {
     object.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-/// Token accounting, reading both vocabularies: `input_tokens` is what the Responses API calls it,
-/// `prompt_tokens` what a chat-completions server does. A number a server omits stays omitted.
 pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
     let number = |keys: [&str; 2]| keys.into_iter().filter_map(|key| usage.get(key)).find_map(Value::as_i64);
     Usage::new(
@@ -372,12 +300,6 @@ pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {
     )
 }
 
-/// The events one payload produced, in the order a listener should apply them.
-///
-/// Lives apart from [`TurnAccumulator`] because the two see different things: the accumulator needs
-/// the whole census, the turn's events need only open and close the rows a payload touched. The
-/// item id is derived from the turn id rather than the payload's, so answer and reasoning each own
-/// exactly one row however a server chooses to split or name its chunks.
 pub fn events_for_payload(state: &mut StreamState, turn_id: &str, delta: &Delta) -> Vec<ThreadEvent> {
     let mut events = Vec::new();
     for (kind, text) in [(ItemKind::AgentMessage, &delta.text), (ItemKind::Reasoning, &delta.reasoning)] {
@@ -412,7 +334,6 @@ pub fn events_for_payload(state: &mut StreamState, turn_id: &str, delta: &Delta)
     events
 }
 
-/// Which rows a turn has opened, so [`events_for_payload`] announces each exactly once.
 #[derive(Debug, Clone)]
 pub struct StreamState {
     pub thread_id: String,
@@ -439,8 +360,6 @@ impl StreamState {
         }
     }
 
-    /// Close every open row, completed or interrupted, which is what a listener needs to stop
-    /// showing a spinner. Returns the events; the caller owns which terminal status applies.
     pub fn close_open_rows(&mut self, turn_id: &str, status: baudet_core::ItemStatus) -> Vec<ThreadEvent> {
         let mut events = Vec::new();
         for (kind, open) in [(ItemKind::Reasoning, self.reasoning_open), (ItemKind::AgentMessage, self.answer_open)] {
@@ -470,8 +389,6 @@ impl StreamState {
         events
     }
 
-    /// Whether the turn ever opened a row, so "the server streamed nothing" can be told apart from
-    /// "the server streamed nothing *useful*".
     pub fn any_open(&self) -> bool {
         self.answer_open || self.reasoning_open
     }

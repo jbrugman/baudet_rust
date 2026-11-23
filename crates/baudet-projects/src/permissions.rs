@@ -1,12 +1,6 @@
-//! De bitwaaier achter de maprechten, exact zoals `project/Permissions.kt`.
-//!
-//! De rechten zijn een eigendom van deze app, geen OS- of TCC-recht. Read wordt nu afgedwongen;
-//! Write en Execute worden vastgelegd zodat de tools later dezelfde catalogus lezen zonder het
-//! schema te verbouwen.
 
 use serde::{Deserialize, Serialize};
 
-/// Een recht dat Baudet zichzelf op een projectmap geeft. De bit is de opslag, niet een volgorde.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FolderPermission {
     Read,
@@ -28,7 +22,6 @@ impl FolderPermission {
     }
 }
 
-/// Zuivere bitmutatie: exact de contracten van de Kotlin-objecten, zonder database.
 pub struct Permissions;
 
 impl Permissions {

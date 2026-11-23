@@ -1,29 +1,13 @@
-//! One transcript row as it should be painted: what it is, whether it is still working, and the
-//! text a reader actually wants.
-//!
-//! Deliberately not a re-exposition of [`Item`]. The row keeps the three things a paint pass
-//! cannot derive cheaply or honestly from the enum alone -- the status it must colour by, the
-//! collapsible-versus-open decision, and which field holds the body -- and drops the rest. If a
-//! field matters to the reader, it gets added here with a line saying so; until then the enum
-//! stays the single place where the wire vocabulary lives.
 
 use baudet_core::{Item, ItemKind, ItemStatus};
 
-/// A row, reduced to what the transcript shows.
 pub struct Row {
     pub kind: ItemKind,
     pub status: ItemStatus,
-    /// The body: message text, command output, a diff, a tool's reply. Empty for rows that carry
-    /// no prose of their own, which is what lets the paint pass skip the expander instead of
-    /// painting an empty one.
     pub body: String,
-    /// The one-line identity of the row: the command, the changed path, the tool name. `None` for
-    /// prose rows, whose body *is* the heading.
     pub subject: Option<String>,
-    /// Whether the body is worth an expander. Streaming prose and user messages read inline;
-    /// output, diffs and reasoning are noise until asked for, which is how Baudet's JVM panel
-    /// behaved and why a long turn stays readable while it runs.
     pub collapsed: bool,
+    pub image: Option<(eframe::egui::Id, baudet_core::ImageItem)>,
 }
 
 impl Row {
@@ -31,12 +15,11 @@ impl Row {
         let status = item.status();
         let kind = item.kind();
         match item {
-            Item::UserMessage(i) => Row { kind, status, body: i.text.clone(), subject: None, collapsed: false },
-            Item::AgentMessage(i) => Row { kind, status, body: i.text.clone(), subject: None, collapsed: false },
-            // Thinking is worth reading occasionally and ruinous by default, so it is collapsed.
-            Item::Reasoning(i) => Row { kind, status, body: i.text.clone(), subject: None, collapsed: true },
+            Item::UserMessage(i) => Row { kind, status, body: i.text.clone(), subject: None, collapsed: false, image: None },
+            Item::AgentMessage(i) => Row { kind, status, body: i.text.clone(), subject: None, collapsed: false, image: None },
+            Item::Reasoning(i) => Row { kind, status, body: i.text.clone(), subject: None, collapsed: true, image: None },
             Item::CommandExecution(i) => {
-                Row { kind, status, body: i.output.clone(), subject: Some(i.command.clone()), collapsed: true }
+                Row { kind, status, body: i.output.clone(), subject: Some(i.command.clone()), collapsed: true, image: None }
             }
             Item::FileChange(i) => Row {
                 kind,
@@ -44,6 +27,7 @@ impl Row {
                 body: i.diff.clone().unwrap_or_default(),
                 subject: Some(format!("{}  +{} -{}", i.path, i.additions, i.deletions)),
                 collapsed: true,
+                image: None,
             },
             Item::ToolCall(i) => Row {
                 kind,
@@ -51,13 +35,16 @@ impl Row {
                 body: i.output.clone(),
                 subject: Some(format!("{} {}", i.tool, i.detail)),
                 collapsed: true,
+                image: None,
             },
             Item::Image(i) => Row {
                 kind,
                 status,
                 body: String::new(),
-                subject: Some(format!("{} ({})", i.tool, i.mime_type)),
+                subject: Some(i.tool.clone()),
                 collapsed: false,
+                // Item IDs are local to a conversation. Include image content in the texture key.
+                image: Some((eframe::egui::Id::new((&i.item_id, &i.mime_type, &i.base64)), i.clone())),
             },
             Item::Plan(i) => Row {
                 kind,
@@ -70,13 +57,12 @@ impl Row {
                     .join("\n"),
                 subject: None,
                 collapsed: false,
+                image: None,
             },
-            // An error is never collapsed: it is the one row that must interrupt reading.
-            Item::Error(i) => Row { kind, status, body: i.message.clone(), subject: None, collapsed: false },
+            Item::Error(i) => Row { kind, status, body: i.message.clone(), subject: None, collapsed: false, image: None },
         }
     }
 
-    /// The status spelled out. Colour plus this word, never colour alone.
     pub fn status_word(&self) -> &'static str {
         match self.status {
             ItemStatus::InProgress => "working",
@@ -86,7 +72,6 @@ impl Row {
         }
     }
 
-    /// Whether the row is mid-flight, which is what a spinner and the Stop button key on.
     pub fn in_progress(&self) -> bool {
         self.status == ItemStatus::InProgress
     }

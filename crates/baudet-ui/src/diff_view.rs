@@ -35,6 +35,7 @@ pub(crate) struct DiffView {
 }
 
 impl DiffView {
+    // Keep Git and file reads off the paint thread.
     pub fn open(ctx: &egui::Context, request: Request) -> Self {
         let relative = request.relative.clone();
         let (tx, rx) = mpsc::channel();

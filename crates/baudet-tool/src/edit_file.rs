@@ -1,16 +1,3 @@
-//! Het eerste schrijfbare gereedschap: één bestand in de projectmap patched door exacte tekst-edits.
-//!
-//! Poort van `tool/EditFileTool.kt`. De rechten die deze tool afdwingt, zijn precies diegene die het
-//! rechtenmodel al bewaart — er moet een map gekoppeld zijn en Write moet gegeven zijn — hij weigert élk pad
-//! dat buiten die map uitkomt, hij toont een diff en vraagt vóór er iets landt, en hij houdt de originele
-//! bytes zodat de write ongedaan kan. Élke weigering is een [`ToolResult`] met een model-gerichte reden en
-//! nooit een exception, zodat het model hetzelfde faalkanaal ziet, of de oorzaak nu een slecht pad is dan wel
-//! een verouderde match.
-//!
-//! De tijdvolgorde hier is de eigenlijke veiligheid, niet de tekst: lezen → patchen in het geheugen →
-//! vragen → nog eens lezen → pas schrijven. Die tweede lezing is geen overdaad. Tussen de preview en de klik
-//! kan de persoon zélf in de editor hebben gewijzigd, en zonder die lezing zou de tool zijn werk overschrijven
-//! met een patch die op een oudere tekst was berekend.
 
 use crate::diff::{LineDiff, UnifiedDiff};
 use crate::folder_boundary::FolderBoundary;
@@ -22,7 +9,6 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
 
-/// De tool zelf.
 #[derive(Debug, Default)]
 pub struct EditFileTool;
 
@@ -37,9 +23,6 @@ impl Tool for EditFileTool {
          old_text must appear once, or be unambiguous when replace_all is true."
     }
 
-    /// Altijd een update, nooit een toevoeging of een verwijdering: de tool patched tekst in een bestand dat
-    /// hij eerst leest, en een pad dat hij niet kan lezen is een weigering in plaats van een nieuw bestand.
-    /// `add` melden voor een bestand dat deze tool niet had kunnen aanmaken, zou een kaart zijn die liegt.
     fn item_kind(&self) -> ItemKind {
         ItemKind::FileChange
     }
@@ -67,6 +50,7 @@ impl Tool for EditFileTool {
         })
     }
 
+    // Recheck the file after approval before writing a patch.
     fn execute(&self, args: &Value, ctx: &ToolContext) -> ToolResult {
         let Some(rel) = args.get("file").and_then(Value::as_str) else {
             return fail("needs a file argument");
@@ -100,7 +84,6 @@ impl Tool for EditFileTool {
     }
 }
 
-/// Vragen, opnieuw lezen en pas dan schrijven. Zie de module-comment voor waarom de tweede lezing nodig is.
 fn write_if_approved(
     ctx: &ToolContext,
     root: &Path,
@@ -132,9 +115,6 @@ fn write_if_approved(
     if current != original {
         return fail(format!("{rel} changed since the preview; not overwriting a newer edit"));
     }
-    // Terugdraaien schrijft de originele bytes terug. In de origineler is dat `runCatching`, dus een mislukkende
-    // recover mag geen panic worden: de handgreep slikt de fout stil, want er is niemand die er dan nog iets
-    // mee kan dan de persoon die het bestand zelf bekijkt.
     let undo: Undo = {
         let path = safe.clone();
         let restore = original.to_owned();
@@ -154,9 +134,6 @@ fn write_if_approved(
     }
 }
 
-/// De edits uit het argument, in volgorde. Een element dat geen object is of waaraan een van de twee
-/// verplichte teksten ontbreekt, valt weg — precies zoals de origineler `mapNotNull` doet — zodat één rommelig
-/// element de rest van de lijst niet kost.
 fn parse_edits(value: Option<&Value>) -> Vec<Edit> {
     let Some(Value::Array(items)) = value else {
         return Vec::new();
@@ -166,16 +143,12 @@ fn parse_edits(value: Option<&Value>) -> Vec<Edit> {
         .filter_map(|item| {
             let old_text = item.get("old_text")?.as_str()?.to_owned();
             let new_text = item.get("new_text")?.as_str()?.to_owned();
-            // Alleen een echte boolean telt; een string "true" is geen waarheid, want `false` zou er dan uit
-            // moeten volgen en dat is een stil ander gedrag dan de aanvrager bedoelde.
             let replace_all = item.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
             Some(Edit { old_text, new_text, replace_all })
         })
         .collect()
 }
 
-/// De weigeringsformat van deze tool: de naam er vóór, zodat het model uit de tekst alleen al ziet welk
-/// gereedschap sprak.
 fn fail(reason: impl Into<String>) -> ToolResult {
     ToolResult::fail(format!("edit_file: {}", reason.into()))
 }
@@ -187,12 +160,6 @@ mod tests {
     use std::path::{Path as StdPath, PathBuf as StdPathBuf};
     use std::sync::{Arc, Mutex};
 
-    /// Een context die mag schrijven naar `root`, en die onthoudt wat er gevraagd is.
-    ///
-    /// De callback moet onthouden wat hij vroeg zonder `&mut` te kunnen vragen, dus de lijst leeft achter een
-    /// slot. `ToolContext` eist `Send` van zijn callbacks — hetrechte punt waar de UI op háár thread vraagt —
-    /// dus `Rc<RefCell>` valt af en is hier vervangen door `Arc<Mutex<_>>`. De mutex regelt geen concurrentie
-    /// in deze tests, hij zet alleen het type recht.
     struct Recorder {
         asked: Mutex<Vec<(String, String)>>,
         answer: bool,
@@ -239,13 +206,11 @@ mod tests {
         let no_edits = edit(dir.path(), json!({"file": "x.txt"}), &recorder);
         assert_eq!(no_edits.output, "edit_file: needs at least one edit");
 
-        // Een context zonder map én zonder recht: de map wordt eerst bekeken, dus dat is het antwoord.
         let ctx = ToolContext::default();
         let no_folder =
             EditFileTool.execute(&json!({"file": "x.txt", "edits": [{"old_text": "a", "new_text": "b"}]}), &ctx);
         assert_eq!(no_folder.output, "edit_file: no project folder is linked to write into");
 
-        // Zelfde pad, nu mét map maar zonder Write: het recht is het volgende hok.
         let ctx = ToolContext { root: Some(dir.path().to_path_buf()), ..Default::default() };
         let no_write =
             EditFileTool.execute(&json!({"file": "x.txt", "edits": [{"old_text": "a", "new_text": "b"}]}), &ctx);
@@ -276,9 +241,6 @@ mod tests {
             json!({"file": "ontbreekt.txt", "edits": [{"old_text": "a", "new_text": "b"}]}),
             &recorder,
         );
-        // Dit pad valt al vóór het lezen weg: `resolve_file_within` eist een regelbaar bestand en melden
-        // zelf de opsomming, precies zoals de origineler. Het "could not be read"-pad is er een van een
-        // bestand dat wél bestaat maar niet te lezen is (rechten, of een directory-race).
         assert_eq!(
             result.output,
             format!("edit_file: ontbreekt.txt does not exist inside the folder.{}", folder_listing::hint(dir.path()))
@@ -317,7 +279,6 @@ mod tests {
         );
         assert!(!result.ok);
         assert_eq!(result.output, "the user declined the change to notes.txt; do not retry it, tell the user instead");
-        // De diff gaat mee naar de kaart, ook bij weigering: de persoon moet zien wat hij zojuist afwees.
         assert!(result.diff.is_some());
         assert_eq!(fs::read_to_string(dir.path().join("notes.txt")).unwrap(), "eerste regel\n");
     }
@@ -339,8 +300,6 @@ mod tests {
 
     #[test]
     fn it_refuses_to_overwrite_an_edit_that_landed_since_the_preview() {
-        // De vraag is het moment waarop de wereld buiten de tool doorloopt: hier wijzigt "de persoon" het
-        // bestand alsnog, tussen preview en klik. De tool mag dan niet zijn eigen patch erover zetten.
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("notes.txt");
         fs::write(&file, "eerste regel\n").unwrap();
@@ -415,8 +374,6 @@ mod tests {
 
     #[test]
     fn a_junk_element_is_dropped_and_the_good_ones_still_land() {
-        // Eén element zonder new_text valt weg; de tweede edit blijft en is de enige die landt. De tekst kent
-        // "a" maar één keer als hele occurrence — "a2" bevat "a" wel, dus deze tekst is zonder die valkuil.
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("notes.txt"), "eerste\ntweede\n").unwrap();
         let (result, _) = edit_with(

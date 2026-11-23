@@ -1,26 +1,13 @@
-//! De enige plek die beslist of een pad waar een tool aan wil komen echt binnen de projectmap blijft.
-//!
-//! Poort van `tool/FolderBoundary.kt`. De lexicale `starts_with` die een aanroeper eerst doet, vouwt alleen
-//! het letterlijke pad; hij lost geen symlinks op. Een link die binnen de map woont maar ernaar buiten wijst,
-//! zou daardoor doorkomen en daarna door die link gelezen of geschreven worden. Deze module lost het echte
-//! doel op, volgt élke symlink, en geeft het alleen terug wanneer het onder de echte root blijft.
-//!
-//! Hij eist dat het pad bestaat — beide bestands-tools garanderen dat al vóór ze hierbellen.
 
 use std::path::{Path, PathBuf};
 
-/// Het resultaat van [`FolderBoundary::resolve_file_within`]: het echte bestand, of de reden van weigering
-/// zoals het model die hoort te lezen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolved {
-    /// Een regulair bestand dat binnen de map blijft, als opgelost pad.
     Inside(PathBuf),
-    /// De weigering, in dezelfde model-gerichte formulering voor beide bestands-tool.
     Refused(String),
 }
 
 impl Resolved {
-    /// Het pad wanneer het binnen bleef. Handig voor een tool die alleen de Inside-kant doorschuift.
     pub fn path(self) -> Option<PathBuf> {
         match self {
             Resolved::Inside(path) => Some(path),
@@ -29,16 +16,11 @@ impl Resolved {
     }
 }
 
-/// De mapgrens zelf. Een struct in plaats van de `object` van Kotlin, maar met dezelfde staatsloosheid: al
-/// zijn input is het root- en het kandidaat-pad.
 #[derive(Debug, Clone, Copy)]
 pub struct FolderBoundary;
 
 impl FolderBoundary {
-    /// Het echte, symlink-opgeloste pad wanneer het binnen `root` blijft, anders `None`.
-    ///
-    /// Beide kanten moeten oplossen; faalt een van beide — de root bestaat niet, of de kandidaat is een
-    /// kapotte link — dan is het antwoord onthouden, niet "binnen".
+    // Containment must hold after resolving symlinks.
     pub fn real_within(root: &Path, resolved: &Path) -> Option<PathBuf> {
         let real_root = root.canonicalize().ok()?;
         let real = resolved.canonicalize().ok()?;
@@ -49,9 +31,6 @@ impl FolderBoundary {
         }
     }
 
-    /// Lost `rel` op binnen `root` en bevestigt dat het een regulair bestand is dat binnen de map blijft
-    /// zodra links worden gevolgd. Gemeenschappelijk voor de read- en de edit-tool, zodat een verkeerd pad
-    /// bij allebei op dezelfde manier wordt geweigerd, met dezelfde formulering.
     pub fn resolve_file_within(root: &Path, rel: &str) -> Resolved {
         let resolved = root.join(rel).normalize();
         if !resolved.starts_with(root) {
@@ -70,9 +49,6 @@ impl FolderBoundary {
     }
 }
 
-/// Een pad zonder `..`- en `.`-segmenten, puur tekstueel — de `normalize()` van de JDK. Componenten na een
-/// `..` op de top blijven staan, want er is niets om tegen in te korten; de `starts_with`-controle eroverheen
-/// wijst ze dan af, wat de conservatieve richting is.
 trait Normalize {
     fn normalize(&self) -> PathBuf;
 }
@@ -116,7 +92,6 @@ mod tests {
     #[test]
     fn a_dot_dot_escape_is_refused_before_any_read() {
         let dir = tempfile::tempdir().unwrap();
-        // De parent van de tijdelijke map bevat werelike bestanden; de lexicale check moet ze afweren.
         let outcome = FolderBoundary::resolve_file_within(dir.path(), "../outside.txt");
         assert!(matches!(outcome, Resolved::Refused(reason) if reason.contains("outside the project folder")));
     }
@@ -128,7 +103,6 @@ mod tests {
         let Resolved::Refused(reason) = FolderBoundary::resolve_file_within(dir.path(), "geen.txt") else {
             panic!("een ontbrekend bestand is een weigering");
         };
-        // De hint maakt een verkeerd pad een verbeterbare fout in plaats van een dood eind.
         assert!(reason.contains("present.rs"), "de hint moet de map noemen: {reason}");
     }
 
@@ -141,7 +115,6 @@ mod tests {
 
     #[test]
     fn a_symlink_to_a_file_outside_the_folder_is_refused() {
-        // Dit is de echte greep: de link zelf woont binnen de map en doorstaat dus elke lexicale check.
         let dir = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let secret = outside.path().join("secret.txt");
@@ -171,7 +144,6 @@ mod tests {
 
     #[test]
     fn a_symlink_staying_inside_the_folder_still_works() {
-        // Omgekeerde kant, anders bewijst de symlink-test alleen dat alles geweigerd wordt.
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("real")).unwrap();
         fs::write(dir.path().join("real/target.txt"), "x").unwrap();
@@ -185,11 +157,9 @@ mod tests {
         let inside = dir.path().join("a");
         fs::write(&inside, "x").unwrap();
         assert!(FolderBoundary::real_within(dir.path(), &inside).is_some());
-        // Een kapotte link lost niet op en is dus niet "binnen".
         let broken = dir.path().join("broken");
         std::os::unix::fs::symlink(dir.path().join("niets"), &broken).unwrap();
         assert!(FolderBoundary::real_within(dir.path(), &broken).is_none());
-        // Een onbestaande root is hetzelfde antwoord.
         assert!(FolderBoundary::real_within(&dir.path().join("geen-map"), &inside).is_none());
     }
 }

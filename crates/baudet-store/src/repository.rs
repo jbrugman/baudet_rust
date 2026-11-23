@@ -1,21 +1,3 @@
-//! Opening a stored conversation as a [`Session`], and persisting one again.
-//!
-//! Kotlin keeps this in `H2Store` behind the [`TranscriptStore`](dev.baudet.store) interface, and
-//! `AppState` splits it in two on purpose: `buildSession` reads without touching a shared field, so
-//! it may run on a worker, while `adoptSession` swaps it in on the UI thread. This module is the
-//! read half plus the write half, and neither one holds state — the [`Session`] does.
-//!
-//! What the flat-file shape buys over the interface, and what it costs:
-//!
-//!  * **`seq` is a line position within its file**, not a column. Reading the whole file is how a
-//!    turn's tail gets appended and how a page gets cut, so no counter has to be kept correct by a
-//!    second writer.
-//!  * **the item cursor is a line position too**, which is why [`Repository::items_window`] reads a
-//!    whole file before it slices it. That is honest paging, not index paging: correct at the sizes
-//!    this app reaches, with a real cap on what it does. A real index is a later decision, and the
-//!    signature below is already the shape an index would serve, so the caller will not change.
-//!  * **the trail's decode tolerance is re-applied per window** rather than assumed from a
-//!    `LIMIT` in a query. A dropped row still costs a slot and still proves that more precedes it.
 
 use crate::paging::ItemWindow;
 use crate::records::SessionDetail;
@@ -24,31 +6,15 @@ use crate::session::Session;
 use baudet_core::Item;
 use std::path::Path;
 
-/// The page sizes carried over from `AppState`, because they are two different intentions.
 pub mod page {
-    /// What opening a conversation reads: enough to show a tail without a second thought.
     pub const INITIAL: usize = 10;
-    /// What one scroll-up pull reads.
     pub const SCROLL: usize = 20;
 }
 
-/// Read and write one session's transcript on disk.
-///
-/// Stateless by design: every mutation it makes is reflected in the [`Session`] it is handed, so
-/// two conversations can be persisted from the same repository without one learning about the
-/// other.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Repository;
 
 impl Repository {
-    /// Read a conversation out of the store into a fresh state, touching nothing else.
-    ///
-    /// `fallback_model` is what a session with no recorded model gets — the configured model, which
-    /// is the answer Kotlin gives too (`store.model(id) ?: config.model`). The page is the initial
-    /// one: reading two hundred rows to draw ten is the thing this function exists to avoid.
-    ///
-    /// The boundary fields are set from what was read, so the very next persist appends only the
-    /// tail a turn adds instead of rewriting every row.
     pub fn build(
         &self,
         root: &Path,
@@ -66,27 +32,22 @@ impl Repository {
                 .unwrap_or_else(|| fallback_model.to_string()),
         );
         session.previous_response_id = detail.as_ref().and_then(|d| d.prev_response_id.clone());
-        session.messages = rollout.messages()?;
-        session.summary = detail.and_then(|d| d.summary);
+        let (messages, checkpoint) = rollout.context()?;
+        session.messages = messages;
+        if checkpoint.as_ref().is_some_and(|summary| {
+            !detail.as_ref().is_some_and(|detail| detail.summary.as_ref() == Some(summary) && detail.seq == session.messages.len() as u64)
+        }) {
+            session.previous_response_id = None;
+        }
+        session.summary = checkpoint.or_else(|| detail.and_then(|d| d.summary));
         let window = self.items_window(root, session_id, page::INITIAL, None)?;
         session.items = window.items;
-        // Two spellings of the same fact, and the distinction matters: a window that reaches the
-        // start has no cursor to hand back, so `None` here is what stops the UI offering "older".
         session.oldest_loaded_seq = if window.has_more_older { window.older_seq } else { None };
         session.persisted_messages = session.messages.len();
         session.persisted_items_tail_id = session.items.last().map(Item::item_id).map(String::from);
         Ok(session)
     }
 
-    /// Persist one conversation, writing only what is new.
-    ///
-    /// Turns grow at the tail between persistences — compaction is the lone head-cut and it
-    /// rewrites and re-anchors before calling here — so the newer tail is appended. The item trail
-    /// is append-only for the same reason: find the newest stored row from the back and write what
-    /// came after it, which lands on the genuine tail even after a page of older rows was prepended.
-    ///
-    /// The head line is written last and always, carrying the summary: the older turns it replaces
-    /// are already gone, so losing only the summary would drop that context for good.
     pub fn persist(&self, root: &Path, session: &mut Session) -> std::io::Result<()> {
         let mut rollout = Rollout::open(root, &session.session_id)?;
         if session.messages.len() > session.persisted_messages {
@@ -101,7 +62,6 @@ impl Repository {
         });
         let new_items: &[Item] = match start {
             Some(index) => &session.items[index + 1..],
-            // Nothing stored yet, so everything this view holds is new.
             None => &session.items[..],
         };
         if !new_items.is_empty() {
@@ -119,17 +79,9 @@ impl Repository {
             summary: session.summary.clone(),
             project_id: session.project_id.clone(),
         })?;
-        // One flush at the end of a persist is the moment worth paying for: everything before it
-        // becomes durable, and a streamed delta costs no disk round-trip.
         rollout.flush()
     }
 
-    /// Read one older page of a conversation for the scroll path, stopping just before
-    /// `before_seq`.
-    ///
-    /// Read-only, so a worker can run it while the UI thread keeps showing the rows it already
-    /// holds; the caller prepends the page and moves the cursor. Writes append only the new tail,
-    /// so a partially loaded view never has to pull the older pages it has not shown.
     pub fn items_window(
         &self,
         root: &Path,
@@ -142,11 +94,7 @@ impl Repository {
         Ok(ItemWindow::from_newest_first(rows, limit, |_slot, row| Some(row.1.clone())))
     }
 
-    /// Replace a conversation's turns wholesale.
-    ///
-    /// Not the per-turn path — that is [`Repository::persist`]. This is the primitive a caller uses
-    /// when compaction renumbers the head, and it re-anchors the boundary afterwards so the next
-    /// persist cannot append the discarded tail back onto the compacted head.
+    // Reset the append boundary after replacing context history.
     pub fn rewrite_messages(
         &self,
         root: &Path,
@@ -155,12 +103,6 @@ impl Repository {
     ) -> std::io::Result<()> {
         let rollout = Rollout::open(root, &session.session_id)?;
         let path = rollout.path().join("history.jsonl");
-        // The one place a history file is replaced. It is not an append because the point is to
-        // make rows that exist on disk stop existing; the summary that replaces them is written by
-        // the caller before this returns, so nothing becomes unrecoverable.
-        //
-        // Written beside the original and renamed, so a crash leaves the old file readable instead
-        // of a truncated one.
         let temp = path.with_extension("jsonl.tmp");
         {
             use std::io::Write;
@@ -275,7 +217,6 @@ mod tests {
         assert_eq!(session.persisted_messages, 1);
         assert_eq!(session.persisted_items_tail_id.as_deref(), Some("u-eerste"));
 
-        // Tweede beurt: de store groeit met één beurt en één rij, niet met alles.
         session.messages.push(Msg::assistant("antwoord"));
         session.items.push(agent("a-1", "antwoord"));
         session.previous_response_id = Some("resp-1".into());
@@ -408,7 +349,6 @@ mod tests {
         repo.persist(&root.0, &mut session).unwrap();
         assert_eq!(session.persisted_messages, 4);
 
-        // Verdichting: de kop wordt korter en de samenvatting vervangt hem.
         let compacted = vec![Msg::user("beurt 2"), Msg::assistant("beurt 3")];
         repo.rewrite_messages(&root.0, &mut session, compacted.clone()).unwrap();
         assert_eq!(session.persisted_messages, 2, "de anker wordt verzet, anders schrijft de volgende persist de weggegoonde staart terug");

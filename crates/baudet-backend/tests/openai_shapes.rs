@@ -1,8 +1,3 @@
-//! The wire shape and the delta mapping, tested against payloads rather than against a server.
-//!
-//! These are the two places where a "works on my machine" backend hides: what a request names its
-//! fields, and which event name carries a delta. Both are tested as pure data, because a transport
-//! that decides them would hide its guesses behind whichever server happened to be up.
 
 use baudet_backend::openai::{events_for_payload, request_body, Delta, StreamState, TurnAccumulator, REASONING_NONE};
 use baudet_backend::protocol::Protocol;
@@ -21,8 +16,6 @@ fn shape<'a>(model: &'a str, user_text: &'a str) -> baudet_backend::openai::Requ
 fn a_turn_always_streams_and_never_sends_a_zero_ceiling() {
     let asked = body(shape("m", "hi"));
     assert_eq!(asked["stream"], Value::Bool(true));
-    // Sending 0 is not the same as sending nothing: it caps the answer at nothing. So the field is
-    // absent unless a real ceiling was asked for.
     assert!(asked.get("max_output_tokens").is_none());
     let ceiling = body(baudet_backend::openai::RequestShape { max_output_tokens: Some(4096), ..shape("m", "hi") });
     assert_eq!(ceiling["max_output_tokens"], Value::from(4096));
@@ -30,8 +23,6 @@ fn a_turn_always_streams_and_never_sends_a_zero_ceiling() {
 
 #[test]
 fn reasoning_default_sends_nothing_and_a_named_effort_names_it() {
-    // The panel's "default" must not be a silent "none": a server that reasons by default keeps
-    // doing that, which is the behaviour the label promises.
     let plain = body(shape("m", "hi"));
     assert!(plain.get("reasoning").is_none());
     let effort = body(baudet_backend::openai::RequestShape { reasoning: Some("low"), ..shape("m", "hi") });
@@ -80,7 +71,6 @@ fn an_image_rides_as_content_parts_next_to_the_text() {
 
 #[test]
 fn a_tools_string_that_is_not_an_array_is_left_out_rather_than_sent_half_formed() {
-    // A server rejecting the whole body over one malformed definition costs the turn as well.
     let broken = body(baudet_backend::openai::RequestShape { tools: Some("{\"nope\":1}"), ..shape("m", "hi") });
     assert!(broken.get("tools").is_none());
     let good =
@@ -102,8 +92,6 @@ fn a_delta_is_read_from_the_field_the_api_specifies() {
 
 #[test]
 fn the_event_field_carries_the_name_when_the_payload_has_none() {
-    // Measured: some local servers put the name nowhere but the `event:` line, and dropping those
-    // payloads is how an answer silently becomes an empty one.
     let mut turn = TurnAccumulator::new();
     let delta = turn.feed(Some("response.output_text.delta"), r#"{"delta":"lo"}"#).unwrap();
     assert_eq!(delta.text.as_deref(), Some("lo"));
@@ -115,7 +103,6 @@ fn a_chat_completion_chunk_is_read_through_its_choices() {
     let delta =
         turn.feed(None, r#"{"object":"chat.completion.chunk","choices":[{"delta":{"content":"Hi"}}]}"#).unwrap();
     assert_eq!(delta.text.as_deref(), Some("Hi"));
-    // A role-only opening chunk carries nothing and must not invent a delta.
     assert!(turn
         .feed(None, r#"{"object":"chat.completion.chunk","choices":[{"delta":{"role":"assistant"}}]}"#)
         .is_none());
@@ -133,7 +120,6 @@ fn an_unknown_event_is_counted_and_sampled_but_never_fatal() {
     let mut turn = TurnAccumulator::new();
     let delta = turn.feed(None, r#"{"type":"response.output_text.delta","delta":"a"}"#).unwrap();
     assert_eq!(delta.text.as_deref(), Some("a"));
-    // A dialect nobody predicted must not end the turn; the census is what tells the story.
     assert!(turn.feed(None, r#"{"type":"response.mystery.thing","x":1}"#).is_none());
     turn.feed(None, "not json at all");
     let finished = turn.finish();
@@ -145,7 +131,6 @@ fn an_unknown_event_is_counted_and_sampled_but_never_fatal() {
 
 #[test]
 fn usage_is_read_in_both_vocabularies() {
-    // Measured on LM Studio: input_tokens/output_tokens with *_tokens_details beside them.
     let mut responses = TurnAccumulator::new();
     responses.feed(None, r#"{"type":"response.completed","response":{"id":"resp_9","usage":{"input_tokens":15,"output_tokens":0,"total_tokens":15}}}"#);
     let finished = responses.finish();
@@ -164,8 +149,6 @@ fn usage_is_read_in_both_vocabularies() {
 
 #[test]
 fn a_truncation_is_named_rather_than_left_as_silence() {
-    // "No answer" and "budget exhausted before the answer started" look identical unless the reason
-    // is surfaced, and only one of them is fixed by raising the ceiling.
     let mut turn = TurnAccumulator::new();
     turn.feed(None, r#"{"type":"response.incomplete","incomplete_details":{"reason":"max_output_tokens"}}"#);
     let finished = turn.finish();
@@ -196,8 +179,6 @@ fn a_stream_that_only_reports_an_error_says_so() {
 
 #[test]
 fn a_finished_text_adopted_without_deltas_counts_once() {
-    // The tolerant fallback: some servers skip deltas. Adopting the done payload when text already
-    // streamed would print the answer twice.
     let mut silent = TurnAccumulator::new();
     silent.feed(None, r#"{"type":"response.output_text.done","text":"whole answer"}"#);
     assert_eq!(silent.finish().text, "whole answer");
@@ -211,8 +192,6 @@ fn a_finished_text_adopted_without_deltas_counts_once() {
 
 #[test]
 fn a_function_call_is_collected_once_whatever_shape_it_arrives_in() {
-    // The finished response carries calls in its output array, and some servers also surface each
-    // item on its own done event. Reading both must not double-count.
     let mut turn = TurnAccumulator::new();
     turn.feed(
         None,
@@ -273,7 +252,6 @@ fn one_answer_row_and_one_reasoning_row_open_whatever_the_server_splits() {
     assert_eq!((started, deltas), (2, 4), "two rows announced once, four deltas");
     let ids: Vec<&str> = events.iter().filter_map(item_id_of).collect();
     assert_eq!(ids, ["tu_1/reasoning", "tu_1/reasoning", "tu_1/msg", "tu_1/msg"]);
-    // The kinds must agree with their rows: a reasoning delta rendered as an answer is a lie.
     for event in &events {
         if let ThreadEvent::ItemDelta { kind, .. } = event {
             let expected =
@@ -297,15 +275,11 @@ fn closing_rows_names_the_status_the_turn_ended_with() {
             other => panic!("closing rows must complete, not delta: {other:?}"),
         }
     }
-    // Closing twice must not announce rows that are already closed.
     assert!(state.close_open_rows("tu_1", baudet_core::ItemStatus::Completed).is_empty());
 }
 
 #[test]
 fn a_usage_chunk_without_choices_keeps_its_accounting() {
-    // Measured on LM Studio (2026-11-21): after the last text chunk comes a chunk with an empty
-    // `choices` array and the token counts in it. A reader that treats "no choices" as "nothing to
-    // fold" throws away the one number a person can check against their own GPU.
     let mut turn = TurnAccumulator::new();
     turn.feed(None, r#"{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ja"}}]}"#);
     assert!(
@@ -321,14 +295,6 @@ fn a_usage_chunk_without_choices_keeps_its_accounting() {
 
 #[test]
 fn a_body_that_ends_at_its_terminator_is_an_ending_not_a_failure() {
-    // `[DONE]` never reaches the accumulator: the framer drops it as a terminator (sse.rs, and
-    // `sse_framing.rs::done_is_not_an_event` guards that). What the accumulator therefore sees of a
-    // chat stream that only says `[DONE]` is nothing at all -- which is an ordinary ending, named by
-    // the count it reached, and deliberately *not* reported incomplete, because nothing went wrong.
-    //
-    // Fed as nothing, not as `[DONE]`: this asserts the consequence of that framing rule at the
-    // accumulator, which is where a turn's terminal name is decided. The framing itself belongs to
-    // `sse_framing.rs`, and duplicating it here would test the same rule twice under two names.
     let turn = TurnAccumulator::new();
     assert_eq!(turn.event_count(), 0, "the terminator is not an event");
     let finished = turn.finish();
@@ -339,19 +305,12 @@ fn a_body_that_ends_at_its_terminator_is_an_ending_not_a_failure() {
 
 #[test]
 fn a_settings_word_round_trips_and_an_unknown_word_is_refused() {
-    // `word` is what a settings file stores and `from_word` is what reads it back, so the two must
-    // be exact inverses; a word this build has no path for must answer `None` rather than be
-    // guessed at, because guessing sends a turn built for one dialect to a server chosen for
-    // another -- a wrong answer where an absent one was available.
     for protocol in [Protocol::Responses, Protocol::ChatCompletions] {
         assert_eq!(Protocol::from_word(protocol.word()), Some(protocol), "{} must round-trip", protocol.word());
     }
     for word in ["", "  ", "Responses", "openai", "chat/completions", "gpt"] {
         assert_eq!(Protocol::from_word(word), None, "{word:?} names no dialect this build can send to");
     }
-    // `label` is what a person reads, `word` is what a file stores, and the two differ for one
-    // dialect: prose says `chat/completions`, the file says `chat_completions`. Guarding that they
-    // are *equal* would be wrong; guarding that `from_word` reads the stored spelling is the point.
     assert_eq!(Protocol::ChatCompletions.label(), "chat/completions");
     assert_eq!(Protocol::ChatCompletions.word(), "chat_completions");
 }

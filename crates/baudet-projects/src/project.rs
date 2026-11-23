@@ -1,4 +1,3 @@
-//! Een project groepeert gesprekken en mag naar een map wijzen, zoals `project/Project.kt`.
 
 use crate::permissions::{FolderPermission, Permissions};
 use serde::{Deserialize, Serialize};
@@ -17,7 +16,6 @@ pub struct Project {
 }
 
 impl Project {
-    /// Een project zonder map en zonder rechten, precies zoals `createProject` het aanmaakt.
     pub fn new(id: String, name: impl Into<String>, created_at: i64) -> Self {
         Self { id, name: name.into().trim().to_owned(), folder_path: None, permissions: 0, archived: false, created_at }
     }

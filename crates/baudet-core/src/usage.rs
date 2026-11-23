@@ -1,8 +1,3 @@
-//! The turn's token accounting.
-//!
-//! Translated from `dev.baudet.api.Usage`. Every field is optional on purpose: a backend that
-//! reports no usage must not be reported as having reported zero, because an honest `None` is
-//! what tells the reader the number is missing rather than small.
 
 use serde::Deserialize;
 use serde::Serialize;

@@ -1,26 +1,12 @@
-//! Eén tekstbestand lezen binnen de projectmap, zodat het model het kan zien vóór het het verandert.
-//!
-//! Poort van `tool/ReadFileTool.kt`. Dit is de lees-helft van de edit-loop: zonder deze tool kan een model
-//! alleen de huidige bytes raden en zijn patch matcht nooit — precies zo faalt een eerste echte edit.
-//!
-//! Dezelfde grens als de edit-tool: er moet een map gekoppeld zijn en het pad moet binnen die map oplossen.
-//! Omdat lezen niets schrijft, heeft deze tool geen Write-recht nodig, vraagt hij niets, schrijft hij niets en
-//! biedt hij geen undo. Een pad dat mist geeft de begrensde map-opsomming terug, zodat het model de echte naam
-//! kan kiezen. Een bestand te groot om goedkoop terug te geven, of met bytes die geen tekst zijn, wordt
-//! geweigerd in plaats van gedumpt: megabytes of binaire ruis in de context kost een beurt en helpt niemand.
-//! Elke weigering is een [`ToolResult`] met een model-gerichte reden, nooit een exception.
 
 use crate::folder_boundary::{FolderBoundary, Resolved};
 use crate::tool::{Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
-/// Harde cap op de bytes van schijf, dus een enorm bestand wordt geweigerd vóór het geladen wordt.
 const MAX_FILE_BYTES: u64 = 1_000_000;
 
-/// Cap op de karakters die aan het model worden gegeven, dus één read kan niet de hele context verdringen.
 const MAX_CHARS: usize = 60_000;
 
-/// De tool zelf; staatsloos, zoals in de origineler.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ReadFileTool;
 
@@ -42,7 +28,6 @@ impl Tool for ReadFileTool {
         })
     }
 
-    /// Lezen schrijft niets en wacht op niemand, dus twee reads mogen parallel.
     fn can_run_parallel(&self, _args: &Value, _ctx: &ToolContext) -> bool {
         true
     }
@@ -87,8 +72,6 @@ impl Tool for ReadFileTool {
     }
 }
 
-/// De weigeringstekst zoals het model die hoort: de toolnaam erbij, zodat een observatie laat zien wát er
-/// weigerde.
 fn fail(reason: impl Into<String>) -> ToolResult {
     ToolResult::fail(format!("read_file: {}", reason.into()))
 }
@@ -167,7 +150,6 @@ mod tests {
 
     #[test]
     fn characters_are_counted_not_bytes() {
-        // Een read van 60 000 karakters mag niet korter afkappen omdat Nederlandse tekst méér bytes kost.
         let dir = tempfile::tempdir().unwrap();
         let text = "é".repeat(MAX_CHARS + 1);
         fs::write(dir.path().join("accent.txt"), &text).unwrap();
@@ -190,8 +172,6 @@ mod tests {
 
     #[test]
     fn reading_needs_no_write_right_and_asks_nothing() {
-        // Zelfs een context zonder één recht mag lezen: lezen is geen schrijven, en de origineler eist hier
-        // alleen de map, niet het Write-recht.
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.txt"), "inhoud").unwrap();
         let ctx = ToolContext { root: Some(dir.path().to_path_buf()), ..Default::default() };

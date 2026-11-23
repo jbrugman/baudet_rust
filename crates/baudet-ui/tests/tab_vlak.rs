@@ -1,13 +1,3 @@
-//! De tabstrip tekent twee knoppen, ook nadat er een op geklikt is.
-//!
-//! De klacht was "de tabs zien er niet uit als tab, maar als losse teksten". Een assert op een
-//! stijlveld of op een response-rect had die klacht groen laten staan: de *platte woorden* waren
-//! precies het gevolg van een style-gedrag dat pas na de klik toeslaat. `Button::selectable` zet
-//! `frame_when_inactive: !selected` (`button.rs:78-83`) en `atom_ui` tekent het frame alleen bij
-//! `state != Inactive || frame_when_inactive` (`button.rs:358-362`). Een muis die op een tab blijft
-//! staan, laat die knop de hele pass als `Inactive` lezen, dus zonder die vlag tekende geen enkel
-//! tabblad een vlak en oogde de strip als tekst. Daarom leest deze test de geschilderde vormen
-//! idem `knop_zichtbaar.rs`, en wel na een klik.
 
 use baudet_ui::{root_ui_id, tab_size, Tab, TranscriptApp, TABSTRIP, TAB_GAP};
 use eframe::egui;
@@ -21,9 +11,6 @@ fn input() -> egui::RawInput {
     }
 }
 
-/// Eén frame schilderen met een vooraf gevuld frame: vormen teruggeven en de output laten
-/// varen (idem knop_zichtbaar.rs). Het frame moet werkelijk aan run_ui meegegeven worden; een
-/// evenement dat alleen gebouwd en genegeerd wordt, ziet egui nooit.
 fn paint_with(ctx: &egui::Context, app: &mut TranscriptApp, frame: egui::RawInput) -> Vec<egui::Shape> {
     let out = ctx.run_ui(frame, |ui| app.paint(ui));
     let shapes: Vec<egui::Shape> = out.shapes.clone().iter().map(|c| c.shape.clone()).collect();
@@ -31,18 +18,10 @@ fn paint_with(ctx: &egui::Context, app: &mut TranscriptApp, frame: egui::RawInpu
     shapes
 }
 
-/// Passieve schilderbeurt zonder evenementen.
 fn paint(ctx: &egui::Context, app: &mut TranscriptApp) -> Vec<egui::Shape> {
     paint_with(ctx, app, input())
 }
 
-/// De maten van de tabknoppen zoals de vensterpass ze werkelijk neerzet.
-///
-/// Meten in dezelfde pass die tekent en niet erbuiten: `tab_size` vraagt de `Ui` van die pass, en de
-/// recten van de tabknoppen zijn de bakken die de strip voor ze reserveert (`app.rs` opent per tabblad
-/// een `UiBuilder::max_rect` van precies die maat en tekent de knop er met `add_sized` in, dus rect en
-/// bak zijn één). Een rect erbuiten herbouwen — `tab_size` eromheen rekenen — noemt een maat die de
-/// strip misschien net niet hanteert, dus deze helper leest beide uit dezelfde pass.
 fn tab_maten(ctx: &egui::Context, bak: &mut Option<egui::Vec2>) -> Vec<egui::Rect> {
     let mut recten = Vec::new();
     let output = ctx.run_ui(input(), |ui| {
@@ -60,7 +39,6 @@ fn tab_maten(ctx: &egui::Context, bak: &mut Option<egui::Vec2>) -> Vec<egui::Rec
     recten
 }
 
-/// Klik-helper:beweeg naar het middelpunt van de tabknop, druk in en laat los in twee passen.
 fn click(ctx: &egui::Context, app: &mut TranscriptApp, target: Tab) {
     let center = {
         paint(ctx, app);
@@ -78,13 +56,10 @@ fn click(ctx: &egui::Context, app: &mut TranscriptApp, target: Tab) {
             pressed,
             modifiers: egui::Modifiers::default(),
         });
-        // Het frame bevat de beweging en de klik; alleen als het bij run_ui beland, ziet egui
-        // de aanwijzer en schakelt de tab (gemeten: anders bleef muis None en tab Chat).
         paint_with(ctx, app, frame);
     }
 }
 
-/// Het kleinste gevulde afgeronde vlak dat de rect van een tabknop omvat.
 fn tab_vlak(shapes: &[egui::Shape], rect: egui::Rect) -> Option<(egui::Rect, egui::Color32)> {
     shapes
         .iter()
@@ -119,8 +94,6 @@ fn beide_tabknoppen_schilderen_een_vlak_voordat_er_geklikt_is() {
 
 #[test]
 fn na_een_klik_blijven_alle_tabknoppen_een_vlak_schilderen() {
-    // De regressie zélf: de muis blijft op de aangeklikte tab staan, die knop leest dan `Inactive`,
-    // en zonder `frame_when_inactive` verliest juist díe knop zijn vlak.
     let ctx = egui::Context::default();
     baudet_ui::palette::install(&ctx);
     let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
@@ -144,8 +117,6 @@ fn na_een_klik_blijven_alle_tabknoppen_een_vlak_schilderen() {
 
 #[test]
 fn het_actieve_tabblad_is_te_onderscheiden_van_de_andere() {
-    // Twee identieke vlakken zijn een strip zonder antwoord: "welke tab staat er" moet uit de
-    // geschilderde vulling blijken, niet uit de kleur alleen (`visuals.selection`, gemeten).
     let ctx = egui::Context::default();
     baudet_ui::palette::install(&ctx);
     let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
@@ -170,11 +141,6 @@ fn het_actieve_tabblad_is_te_onderscheiden_van_de_andere() {
 
 #[test]
 fn de_tabknoppen_plakken_niet_tegen_elkaar() {
-    // De klacht: "er mag wat meer ruimte tussen de elementen, ze plakken tegen elkaar". Voor de tab-
-    // strip betekent dat één ding: twee bakken met 1 pt rand tegen elkaar zijn een blok met twee
-    // woorden en geen twee tabbladen. Daarom meten wij hier de lucht zélf, in de pass die tekent
-    // (`tab_maten`), en wel vóórdat er geklikt is: een strip die pas na een klik lucht krijgt, is
-    // geen strip. Een styleveld lezen had deze klacht groen laten staan.
     let ctx = egui::Context::default();
     baudet_ui::palette::install(&ctx);
     let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
@@ -182,9 +148,6 @@ fn de_tabknoppen_plakken_niet_tegen_elkaar() {
     let mut bak = None;
     let recten = tab_maten(&ctx, &mut bak);
     let bak = bak.expect("de strip meet geen tab-maat");
-    // Eerst de maat van de bak: een spleet meten tussen recten die niet de bakken zijn, meet lucht
-    // die er niet staat. Daarna pas de lucht zélf, en dan op de maat van TAB_GAP — de waarde die de
-    // strook zet en niet een grens die de test verzint.
     for rect in &recten {
         assert!(
             (rect.width() - bak.x).abs() < 0.5 && (rect.height() - bak.y).abs() < 0.5,

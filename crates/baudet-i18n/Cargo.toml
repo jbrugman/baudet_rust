@@ -4,13 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# Alle zichtbare tekst in vier talen. Geen enkele afhankelijkheid: de tabel is compilatekst, er is
-# niets te lezen, te locken of te alloceren. Daarom mag elke crate hier tegen aanlopen, ook
-# `baudet-settings`, zonder dat er een cykel ontstaat.
 [dependencies]
-# Alleen voor de afgeleide `Serialize`/`Deserialize` op `Language`: de taal is een instelling en
-# moet dus door `baudet-settings` weggeschreven kunnen worden. De sleutel-tabel zelf blijft vrij van
-# serde, want die is compilatekst.
 serde = { workspace = true }
 
 [dev-dependencies]

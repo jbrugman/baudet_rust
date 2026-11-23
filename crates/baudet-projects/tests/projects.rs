@@ -1,5 +1,3 @@
-//! De catalogus is de deur waarachter de linkersidebar zijn projects en sessies tekent. Deze
-//! tests beschermen de opslagvolgorde, cascade en titelregels die `H2Store.kt` eerst bewees.
 
 use baudet_core::Msg;
 use baudet_projects::{Catalog, FolderPermission, Permissions};

@@ -1,5 +1,3 @@
-//! The scripted backend must be honest: it publishes what a script says and nothing more.
-//! Translated from the `AppState*Spec` intent of driving a turn against a scripted backend.
 
 use baudet_backend::scripted::{Script, ScriptedBackend, Step};
 use baudet_backend::{Backend, SendRequest};
@@ -34,8 +32,6 @@ fn ev(deltas: &[&str], thread: &str, turn: &str) -> Vec<ThreadEvent> {
 fn drain(backend: &ScriptedBackend, text: &str) -> Vec<ThreadEvent> {
     let mut handle = backend.send(SendRequest { user_text: text.into(), ..Default::default() }).unwrap();
     let mut seen = Vec::new();
-    // Drain until the player is done with the script. The stream is unbounded, so blocking-recv
-    // with a short timeout is enough: the script is finite and publishes without waiting.
     while let Some(event) = handle.events().blocking_recv() {
         seen.push(event);
     }
@@ -68,8 +64,6 @@ fn the_second_turn_gets_the_second_script() {
 
 #[test]
 fn a_script_that_never_completes_really_never_completes() {
-    // "no answer" has to stay distinguishable from "budget exhausted", so the player may not
-    // invent a terminal event to be helpful.
     let seen = drain(&ScriptedBackend::new(vec![Script::new()]), "hi");
     assert!(seen.is_empty());
     assert!(!seen.iter().any(|e| e.wire_method() == "turn/completed"));
@@ -77,13 +71,11 @@ fn a_script_that_never_completes_really_never_completes() {
 
 #[test]
 fn raw_sse_goes_through_the_real_framer() {
-    // The point of RawSse: a script cannot bundle deltas more nicely than a wire does.
     let script = Script::new().step(Step::RawSse {
         lines: vec![
             "event: response.output_text.delta".into(),
             "data: {\"delta\":\"Hel\"}".into(),
             "".into(),
-            // one event split over two data lines: must arrive as one payload
             "data: {".into(),
             "data: \"delta\":\"lo\"}".into(),
             "".into(),
@@ -116,9 +108,6 @@ fn raw_sse_goes_through_the_real_framer() {
 
 #[test]
 fn a_cancel_reaches_the_turn_and_a_drained_stream_closes() {
-    // What the player guarantees today: a script publishes its steps and then drops its sender,
-    // so a renderer sees the stream close. That close is what tells the orchestrator the turn is
-    // over; the interrupt-close of the rows is the orchestrator's job, tested in baudet-app.
     let backend = ScriptedBackend::new(vec![
         Script::new().event(ThreadEvent::TurnStarted { thread_id: "th_1".into(), turn_id: "tu_1".into() })
     ]);

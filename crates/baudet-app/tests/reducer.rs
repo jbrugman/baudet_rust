@@ -1,12 +1,8 @@
-//! Folding a stream into rows. Translated from the `TranscriptRowsSpec` and
-//! `AppStateItemSpec` intents: a transcript is rebuilt from events, never from a cached string.
 
 use baudet_app::{reduce, Emitter, Rows};
 use baudet_core::*;
 
 
-/// Een kaart in de vorm die `Emitter::open` voortbrengt: getekend vóór de run, nog open, nog geen
-/// beslissing. De vraag van een tool moet op díe kaart landen.
 fn command_card(item_id: &str) -> Item {
     Item::CommandExecution(CommandExecutionItem {
         item_id: item_id.to_string(),
@@ -62,9 +58,6 @@ fn answered(item_id: &str, decision: ApprovalDecision) -> ThreadEvent {
 
 #[test]
 fn a_question_lands_on_the_card_it_is_holding() {
-    // De vraag mag geen tweede regel worden: dezelfde kaart, en die blijft open — een vraag is nog
-    // geen feit. Dit is waarom de loop de kaart vóór de run tekende: een kaart die pas ná de run
-    // ontstaat, kan de vraag niet dragen.
     let mut rows = Rows::new();
     reduce(&mut rows, &opened(command_card("th/tu/i1")));
     assert!(reduce(&mut rows, &asked("th/tu/i1")), "de vraag raakte de kaart niet");
@@ -80,8 +73,6 @@ fn a_question_lands_on_the_card_it_is_holding() {
 
 #[test]
 fn a_question_on_a_row_that_never_was_gets_a_card_of_its_own() {
-    // Wie gevraagd wil worden, mag niet genegeerd worden: een vraag die op geen enkele bestaande regel
-    // past, krijgt een eigen kaart in plaats van spoorloos te verdwijnen.
     let mut rows = Rows::new();
     assert!(reduce(&mut rows, &asked("th/tu/i7")));
     assert_eq!(rows.len(), 1);
@@ -104,8 +95,6 @@ fn an_answer_settles_the_card_and_says_which_way() {
 
 #[test]
 fn a_declined_patch_shows_that_it_was_declined() {
-    // Een patch-kaart heeft geen uitvoer waarin een beslissing past. Verbergen is oneerlijker dan
-    // nergens zetten: de kijker mag zien waarom het bestand bleef zoals het was.
     let mut rows = Rows::new();
     reduce(&mut rows, &opened(patch_card("th/tu/i2")));
     assert!(reduce(&mut rows, &answered("th/tu/i2", ApprovalDecision::Decline)));
@@ -119,8 +108,6 @@ fn a_declined_patch_shows_that_it_was_declined() {
 
 #[test]
 fn an_answer_for_a_row_that_never_was_is_reported_not_fabricated() {
-    // Een klik op een kaart van een beurt die al stopte: er is niets te sluiten, en een regel erbij
-    // verzinnen zou het audit-spoor vullen met een feit dat niemand ooit zag.
     let mut rows = Rows::new();
     assert!(!reduce(&mut rows, &answered("th/tu/i9", ApprovalDecision::Accept)));
     assert!(rows.is_empty(), "er verscheen een regel uit het niets");
@@ -128,8 +115,6 @@ fn an_answer_for_a_row_that_never_was_is_reported_not_fabricated() {
 
 #[test]
 fn a_turn_divides_ids_that_do_not_collide() {
-    // De teler bestaat omdat één beurt een kaart op hetzelfde id moet kunnen openen en sluiten.
-    // `Rows` verdraagt geen dubbele naam: de tweede tekening overschrijft de eerste.
     let mut rows = Rows::new();
     let mut emitter = Emitter::display(&mut rows, "th_1", "tu_1");
     let first = emitter.next_item_id();
@@ -143,15 +128,10 @@ fn a_turn_divides_ids_that_do_not_collide() {
 
 #[test]
 fn an_observation_reaches_the_model_without_becoming_a_row() {
-    // Gereedschapsuitvoer is werk, geen prosa: de observatie mag geen rij worden, maar moet wél mee
-    // naar de volgende vraag, anders vergeet het model wat hij zojuist las.
     let mut rows = Rows::new();
     let mut emitter = Emitter::display(&mut rows, "th_1", "tu_1");
     emitter.store_message(&Msg::user("the file holds 12 lines"));
     let observed = emitter.taken_messages().len();
-    // De emitter laat de rijen pas los als hij hier wegvalt, dus de teller is afgenomen vóór deze
-    // twee vragen — dezelfde volgorde die de tool-lus hanteert: eerst de observaties overnemen, dan
-    // het scherm beoordelen.
     assert_eq!(observed, 1, "de observatie haalde het model niet");
     assert!(rows.is_empty(), "een observatie tekende een rij");
 }
@@ -225,8 +205,6 @@ fn a_delta_for_an_unknown_row_is_reported_not_swallowed() {
 
 #[test]
 fn a_close_may_not_erase_what_was_streamed() {
-    // A completed item carries the final state, but if a delta arrived after the snapshot the
-    // close was built from, dropping the streamed text would silently lose the answer.
     let mut rows = Rows::new();
     reduce(
         &mut rows,
@@ -290,7 +268,6 @@ fn a_close_with_its_own_text_is_the_truth() {
 
 #[test]
 fn a_truncated_turn_leaves_a_row_that_says_so() {
-    // "No answer" and "budget exhausted before the answer started" must not look alike.
     let mut rows = Rows::new();
     reduce(
         &mut rows,

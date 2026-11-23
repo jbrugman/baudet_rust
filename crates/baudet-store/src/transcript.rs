@@ -1,19 +1,3 @@
-//! Eén open gesprek op schijf: de lange-levende aanraking die `H2Store` met `db` is.
-//!
-//! `H2Store.kt:19-24` opent één `Connection` voor de hele levensduur van de app en doet er al
-//! zijn `PreparedStatement`s op. De equivalent hiervan is niet het stateuteloze `Repository`
-//! (dat per aanroep een `Rollout` opent en dus per beurt vier descriptors open-t) maar dit
-//! object: één gesprek, één set open bestanden, zoveel beurten als de gebruiker wil.
-//!
-//! Twee bewust gekozen grenzen:
-//!
-//!  * **één gesprek per handvat.** De origineler is één `AppState`/één `session`, en meer
-//!    live-gesprekken tegelijk staan hier expliciet als later (zie de turn-claim in
-//!    `session.rs`). Dit object past precies bij die aannname; een handvat-per-sessie zou de
-//!    eerste stap naar die volgende fase zijn en niet vooruitlopen op de huidige vraag.
-//!  * **lezen van een *ouder* venster blijft de stateloze `Repository::items_window`.** Een
-//!    scroll-om-hoger-lezing is een toevalslezing en mag geen open descriptor vergen; de
-//!    oorspronkelijke lezer heeft er zelf ook geen voor nodig.
 
 use crate::paging::ItemWindow;
 use crate::records::{SessionDetail, SessionMeta};
@@ -23,23 +7,12 @@ use crate::session::Session;
 use baudet_core::Item;
 use std::path::Path;
 
-/// Eén gesprek, open voor aanhangen en voor herschrijven van zijn kop.
-///
-/// Sluit de bestanden bij drop. Een `Rollout` is `Send` (inwendig geen delers), dus dit handvat
-/// naar de worker-thread meenemen is veilig; het is bewust niet `Sync`, want er hoort één eigenaar
-/// bij te horen.
 #[derive(Debug)]
 pub struct Transcript {
     rollout: Rollout,
 }
 
 impl Transcript {
-/// Een bestaand gesprek openen, of een nieuw aanmaken als de map nog leeg is.
-    ///
-    /// `model`/`cwd` zijn de herkomst-regels voor een *nieuw* bestand en worden genegeerd als het
-    /// gesprek er al staat: de identiteitsregel is write-once en mag niet van een tweede opening
-    /// afhangen. `create` verzet zich tegen overschrijven van een bestaande sessie, dus deze route
-    /// probeert eerst `open` en valt alleen terug op `create` als er werkelijk niets is.
     pub fn open_or_create(
         root: &Path,
         session_id: &str,
@@ -48,8 +21,6 @@ impl Transcript {
     ) -> std::io::Result<Transcript> {
         match Rollout::open(root, session_id) {
             Ok(rollout) => Ok(Transcript { rollout }),
-            // `open` faalt op een sessie zonder identiteitsregel - dat is precies "nog niet
-            // gemaakt". Een echte leesfout (map niet leesbaar) mag hier niet als "nieuw" lezen.
             Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
                 let mut meta = SessionMeta::new(session_id);
                 meta.model = model.map(str::to_owned);
@@ -60,12 +31,6 @@ impl Transcript {
         }
     }
 
-    /// Het gesprek uit de schijf lezen in een verse staat, zonder iets gedeelds aan te raken
-    /// (`AppState.buildSession`).
-    ///
-    /// De randen (`persisted_messages`, `persisted_items_tail_id`) worden uit de lezing gezet,
-    /// zodat de eerstvolgende `persist` alléén de staart aanhangt die deze beurt toevoegt en niet
-    /// elke rij herschrijft.
     pub fn build(&self, fallback_model: &str) -> std::io::Result<Session> {
         let detail = self.rollout.detail()?;
         let mut session = Session::new(
@@ -77,11 +42,15 @@ impl Transcript {
                 .unwrap_or_else(|| fallback_model.to_owned()),
         );
         session.previous_response_id = detail.as_ref().and_then(|d| d.prev_response_id.clone());
-        session.messages = self.rollout.messages()?;
-        session.summary = detail.as_ref().and_then(|d| d.summary.clone());
-        // Het project komt uit de kop en niet uit een gok: de catalogus weet tijdens een
-        // vensterleven in welk project een gesprek staat, en deze regel is wat ervan overblijft
-        // nadat dat venster dicht is. Eerder ging die koppeling bij elke herstart verloren.
+        let (messages, checkpoint) = self.rollout.context()?;
+        session.messages = messages;
+        // The old server-side chain may still contain the turns replaced by the checkpoint.
+        if checkpoint.as_ref().is_some_and(|summary| {
+            !detail.as_ref().is_some_and(|detail| detail.summary.as_ref() == Some(summary) && detail.seq == session.messages.len() as u64)
+        }) {
+            session.previous_response_id = None;
+        }
+        session.summary = checkpoint.or_else(|| detail.as_ref().and_then(|d| d.summary.clone()));
         session.project_id = detail.as_ref().and_then(|d| d.project_id.clone());
         let window = self.items_window(page::INITIAL, None)?;
         session.items = window.items;
@@ -91,8 +60,6 @@ impl Transcript {
         Ok(session)
     }
 
-    /// Aanhangen wat er nieuw is, en de kopregel actueel schrijven. De tail-only-regel staat bij
-    /// `Repository::persist` en geldt hier hetzelfde; alleen de descriptor is nu gedeeld.
     pub fn persist(&mut self, session: &mut Session) -> std::io::Result<()> {
         if session.messages.len() > session.persisted_messages {
             for msg in &session.messages[session.persisted_messages..].to_vec() {
@@ -100,6 +67,7 @@ impl Transcript {
             }
             session.persisted_messages = session.messages.len();
         }
+        // An older page adds rows before this boundary. Only append rows after it.
         let start = session.items.iter().rposition(|row| {
             session.persisted_items_tail_id.as_deref() == Some(row.item_id())
         });
@@ -125,21 +93,19 @@ impl Transcript {
         self.rollout.flush()
     }
 
-    /// Het aantal regels dat de opslag van dit gesprek draagt.
-    ///
-    /// Doorgevraagd naar `Rollout::item_count`, voor de statusregel die beeld en schijf met
-    /// elkaar vergelijkt zonder het gesprek te lezen.
     pub fn item_count(&self) -> std::io::Result<usize> {
         self.rollout.item_count()
     }
 
-    /// Eén ouder venster, op hetzelfde open gesprek, zonder een tweede descriptor te openen.
+    pub fn compact_context(&mut self, messages: &[baudet_core::Msg], summary: &str) -> std::io::Result<()> {
+        self.rollout.compact_context(messages, summary)
+    }
+
     pub fn items_window(&self, limit: usize, before_seq: Option<u64>) -> std::io::Result<ItemWindow> {
         let rows = self.rollout.item_rows(Some(limit), before_seq)?;
         Ok(ItemWindow::from_newest_first(rows, limit, |_slot, row| Some(row.1.clone())))
     }
 
-    /// De beurtental die op schijf staat, voor de index-titel (`last_seq`).
     pub fn message_count(&self) -> std::io::Result<usize> {
         Ok(self.rollout.messages()?.len())
     }

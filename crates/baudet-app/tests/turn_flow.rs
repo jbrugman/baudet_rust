@@ -1,5 +1,3 @@
-//! The turn lifecycle against a scripted backend: claim, fold, close, release.
-//! Translated from the `AppStateTurnFlowSpec` and `AppStateTurnGuardSpec` intents.
 
 use baudet_app::session::pump;
 use baudet_app::AppState;
@@ -16,7 +14,6 @@ fn scripted(events: Vec<ThreadEvent>) -> Arc<ScriptedBackend> {
     Arc::new(ScriptedBackend::new(vec![script]))
 }
 
-/// The full loop a UI would drive: claim, drain while folding, then release.
 fn run_turn(state: &Arc<AppState>, text: &str) -> Vec<ThreadEvent> {
     let sent = state.send(text).expect("the turn must be claimable");
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -26,7 +23,6 @@ fn run_turn(state: &Arc<AppState>, text: &str) -> Vec<ThreadEvent> {
         pump(&handle, |event| folder.apply(event), &tx);
     });
     let mut seen = Vec::new();
-    // `blocking_recv` yields `None` once the reader drops its mirror, which is the end of the turn.
     while let Some(event) = rx.blocking_recv() {
         seen.push(event);
     }
@@ -83,8 +79,6 @@ fn state_for(events: Vec<ThreadEvent>) -> (Arc<ScriptedBackend>, Arc<AppState>) 
 #[test]
 fn the_instruction_is_a_row_before_the_answer_arrives() {
     let (_backend, state) = state_for(vec![]);
-    // A turn that never answers must still show what was asked, so the user row cannot depend on
-    // the backend having replied.
     let sent = state.send("en?").unwrap();
     let rows = state.rows();
     assert_eq!(rows.len(), 1, "the user row must exist before a single event is folded");
@@ -127,7 +121,6 @@ fn a_running_turn_holds_the_session_and_finish_frees_it() {
 fn a_stopped_turn_leaves_its_open_rows_interrupted_not_failed() {
     let (_backend, state) = state_for(answer("th_1", "tu_1"));
     let _sent = state.send("ga").unwrap();
-    // Fold the open row only: a Stop arrives while the reply is still in progress.
     state.apply(&ThreadEvent::ItemStarted {
         thread_id: "th_1".into(),
         turn_id: "tu_1".into(),
@@ -144,19 +137,10 @@ fn a_stopped_turn_leaves_its_open_rows_interrupted_not_failed() {
     assert_eq!(open[0].status(), ItemStatus::Interrupted, "a deliberate Stop is not a failure");
 }
 
-/// A closed turn must not leave a row claiming to work.
-///
-/// The reducer deliberately never invents an item status: the stream owns it, and `TurnCompleted`
-/// closes the turn rather than every row inside it. That is only honest while the sender keeps its
-/// side of the deal and closes each item it opened. A row left `InProgress` after a clean close is
-/// a stream that broke its own contract, and in the window it reads as a marker that keeps moving
-/// under a header that already says idle -- so the demo turn is held to it here.
 #[test]
 fn a_cleanly_closed_turn_leaves_no_row_working() {
     let (_backend, state) = state_for(answer("th_1", "tu_1"));
     run_turn(&state, "ga");
-    // An open row on the way in, so the assertion below proves the close settled it rather than
-    // proving that a row was never opened at all.
     state.apply(&ThreadEvent::ItemStarted {
         thread_id: "th_1".into(),
         turn_id: "tu_1".into(),
@@ -206,7 +190,6 @@ fn a_second_turn_appends_rather_than_replaces() {
     run_turn(&state, "eerste");
     run_turn(&state, "tweede");
     let rows = state.rows();
-    // user, answer, user, answer -- the first turn's answer survives the second.
     assert_eq!(rows.len(), 4, "got {:?}", rows.iter().map(|i| i.kind()).collect::<Vec<_>>());
     assert_eq!(rows[0].kind(), ItemKind::UserMessage);
     assert_eq!(rows[1].kind(), ItemKind::AgentMessage);
@@ -216,8 +199,6 @@ fn a_second_turn_appends_rather_than_replaces() {
 
 #[test]
 fn one_reader_can_take_the_turn_only_once() {
-    // The stream is one reader's. A second claim is refused instead of splitting the turn in two,
-    // which is the failure that made a folded transcript lose half its answer.
     let (_backend, state) = state_for(answer("th_1", "tu_1"));
     let sent = state.send("kijk").unwrap();
     assert!(sent.take_reader().is_some(), "the first claim wins");
@@ -226,8 +207,6 @@ fn one_reader_can_take_the_turn_only_once() {
 
 #[test]
 fn the_reader_folds_every_event_it_drains() {
-    // Nothing may go missing between wire and row: five scripted events, five forwarded events,
-    // and both rows the turn describes.
     let (_backend, state) = state_for(answer("th_1", "tu_1"));
     let sent = state.send("kijk").unwrap();
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -243,8 +222,6 @@ fn the_reader_folds_every_event_it_drains() {
     assert_eq!(state.rows().len(), 2, "and the owner must have folded the same turn");
 }
 
-/// The orchestrator must not depend on `Arc<AppState>` being cloned; this asserts the type is
-/// usable behind the shared handle a UI would hold.
 #[test]
 fn the_state_is_shareable_behind_one_handle() {
     let (_backend, state) = state_for(vec![]);

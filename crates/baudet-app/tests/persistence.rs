@@ -1,14 +1,3 @@
-//! Wat een gesprek overleeft, en wat het er niet voor hoeft te betalen.
-//!
-//! De eis achter deze suite is niet "er staat een bestand" maar de twee prijzen eraan: een
-//! herstart moet het gesprek teruggeven zoals het eruitzag, en een gesprek van honderd beurten
-//! mag een venster niet honderd beurten laten laden om de laatste te tonen. Daarom meet deze
-//! suite ook de grenzen: hoeveel er bij een opening wordt teruggelezen, en hoeveel er bij het
-//! opslaan van één beurt wordt geschreven.
-//!
-//! Alles hier draait zonder server en zonder venster: een [`ScriptedBackend`] speelt de beurt,
-//! een tijdelijke map doet de opslag. Dat is de scheiding die deze laag bewijst - de UI tekent
-//! wat `AppState` draagt en draagt zelf niets.
 
 use baudet_app::session::pump;
 use baudet_app::AppState;
@@ -19,14 +8,10 @@ use baudet_store::repository::page;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Een map die er nog niet is, met een naam die parallelle tests uit elkaar houdt.
 fn scratch(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("baudet-persist-{}-{}-{}", name, std::process::id(), line!()))
 }
 
-/// De events van één antwoord, in de vorm die de transport-laag zelf stuurt: openen ledig,
-/// streamen, en sluiten met een ledig exemplaar - want `close_open_rows` (openai.rs) zendt de
-/// tekst niet opnieuw, de reductor houdt hem vast.
 fn answer(turn: &str, text: &str) -> Vec<ThreadEvent> {
     vec![
         ThreadEvent::ItemStarted {
@@ -57,7 +42,6 @@ fn answer(turn: &str, text: &str) -> Vec<ThreadEvent> {
     ]
 }
 
-/// Een handvat op een gesprek dat op schijf schrijft, plus de speler die de beurten speelt.
 fn persistent(root: &std::path::Path, scripts: Vec<Vec<ThreadEvent>>) -> (Arc<ScriptedBackend>, Arc<AppState>) {
     let scripts: Vec<Script> = scripts
         .into_iter()
@@ -70,7 +54,6 @@ fn persistent(root: &std::path::Path, scripts: Vec<Vec<ThreadEvent>>) -> (Arc<Sc
     (backend, Arc::new(state))
 }
 
-/// De beurt zoals een venster hem afhandelt, plus de opslag die erbij hoort.
 fn run_turn(state: &Arc<AppState>, text: &str) {
     let sent = state.send(text).expect("de beurt moet opeisbaar zijn");
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -80,19 +63,12 @@ fn run_turn(state: &Arc<AppState>, text: &str) {
     while rx.blocking_recv().is_some() {}
     reader.join().unwrap();
     state.finish();
-    // De opslag is geen bijvangst van de beurt maar zijn afsluiting, dus de aanroeper - het
-    // venster, in het echt - doet hem hier. Een fout mag het scherm niet stilzetten.
     if let Some(reason) = state.persist() {
         panic!("opslaan mislukte: {reason}");
     }
 }
 
 
-/// Een rij met **exact** deze tekst, niet één die die tekst als voorzetsel bevat.
-///
-/// Nodig omdat de paginarenaam "vraag 1" een voorzetsel is van "vraag 10" tot "vraag 19": een
-/// `contains`-teller gaf dan elf treffers op een gesprek dat één "vraag 1" bevat, en dat meet niet
-/// "staat deze rij er" maar "staat er iets dat erop lijkt". Exact tellen is wat de asserts bedoelen.
 fn mentions_exact(state: &AppState, tekst: &str) -> usize {
     state.rows().iter().filter(|row| baudet_app::reducer::streamed_text(row) == tekst).count()
 }
@@ -104,7 +80,6 @@ fn een_beurt_overleeft_het_handvat() {
     run_turn(&state, "vraag een");
     assert!(state.persists(), "met een map is dit gesprek niet puur in het geheugen");
 
-    // De herstart: een leeg handvat op dezelfde map, zonder backend-verleden.
     let id = state.session_id();
     let reopened = AppState::new(Arc::new(ScriptedBackend::new(vec![])) as Arc<dyn Backend>, "systeem")
         .on_session(&root, &id, "model-van-hier", None)
@@ -117,10 +92,6 @@ fn een_beurt_overleeft_het_handvat() {
 
 #[test]
 fn een_herstart_leest_niet_het_hele_verleden() {
-    // De paginaregel van de origineler (`AppState.buildSession` leest `INITIAL_ITEMS_PAGE`, niet
-    // het bestand): een gesprek van veel beurten openen mag niet alles laden, en moet expliciet
-    // zeggen dat er ouder is. Zonder deze grens zou een lang gesprek een venster openen dat
-    // eerst zijn hele geschiedenis doorloopt - traag, en trager naarmate het langer duurt.
     let root = scratch("paging");
     let turns = 25;
     let scripts: Vec<Vec<ThreadEvent>> =
@@ -143,9 +114,6 @@ fn een_herstart_leest_niet_het_hele_verleden() {
     assert!(has_more_older, "er staan {total} rijen op schijf, dit beeld houdt er {initial}", initial = page::INITIAL);
     assert!(cursor.is_some(), "een cursor hoort er te zijn zolang er ouder is");
 
-    // De eis is niet "mag stoppen bij de eerste vraag" maar "de cursor boekt af tot index 0". Een
-    // vraag kan met haar antwoord op een venstergrens in dezelfde pagina vallen, dus `mentions` zegt
-    // pas iets ná de volgende voorzet; daarom doorlopen tot de opslag niets ouder meer houdt.
     let mut walked = 0usize;
     while let (true, Some(before), _) = reopened.paging() {
         let added = reopened.load_older(before).expect("een ouder venster");
@@ -168,9 +136,6 @@ fn een_herstart_leest_niet_het_hele_verleden() {
 
 #[test]
 fn opslaan_schrijft_per_beurt_allen_de_staart() {
-    // Append-only is de hele prijs van dit ontwerp: een beurt mag niet het hele gesprek
-    // herschrijven. Dit meet het aantal regels op schijf, niet het aantal bytes - een regel per
-    // feit is de belofte, en een herschreven verleden zou er twee van maken.
     let root = scratch("tail");
     let (_, state) = persistent(&root, vec![answer("tu_1", "antwoord een"), answer("tu_2", "antwoord twee")]);
     run_turn(&state, "vraag een");
@@ -184,18 +149,12 @@ fn opslaan_schrijft_per_beurt_allen_de_staart() {
     assert_eq!(mentions_exact(&state, "vraag een"), 1, "het verleden wordt niet opnieuw geschreven");
 }
 
-/// Het project van een gesprek dat via het handvat werd geopend, mag niet verdwijnen.
-///
-/// `on_session` zette `project_id` op `None` omdat de kop het veld niet kende. Na die
-/// reparatie draagt `detail.jsonl` het project, dus een herstart geeft de koppeling terug
-/// zonder dat de catalogus in de buurt hoeft te zijn.
 #[test]
 fn een_herstart_houdt_het_project_van_het_gesprek() {
     let root = scratch("project");
     let state = AppState::new(Arc::new(ScriptedBackend::new(vec![])) as Arc<dyn Backend>, "systeem")
         .on_session(&root, "s-project", "model-van-hier", Some("p-tuis"))
         .expect("een nieuw gesprek op schijf");
-    // Pas een opslag maakt de kopregel: vóórdat er iets werd geschreven, was er geen kop.
     if let Some(reason) = state.persist() {
         panic!("opslaan mislukte: {reason}");
     }
@@ -206,8 +165,6 @@ fn een_herstart_houdt_het_project_van_het_gesprek() {
     assert_eq!(reopened.project().as_deref(), Some("p-tuis"), "de kop draagt het project");
 }
 
-/// De twee bewegingen van een gesprekswissel: lezen mag overal, ruilen alleen als er niemand
-/// schrijft. `open_store` raakt de staat van het handvat niet; `switch_to` is wat het wél doet.
 #[test]
 fn openen_ergens_raakt_de_huidige_staat_niet_aan() {
     let root = scratch("wissel");
@@ -215,7 +172,6 @@ fn openen_ergens_raakt_de_huidige_staat_niet_aan() {
     run_turn(&state, "vraag een");
     let hier = state.session_id();
 
-    // Dezelfde map, een ander gesprek: de lezing mag er niets van merken op het scherm.
     let (opened, session) = state
         .open_store(&root, "s-ander", "model-van-hier", Some("p-ander"))
         .expect("een tweede gesprek op dezelfde map");
@@ -230,10 +186,6 @@ fn openen_ergens_raakt_de_huidige_staat_niet_aan() {
     assert!(state.persists(), "het handvat ging mee, anders schreef het volgende feit in het oude bestand");
 }
 
-/// Het gesprek waarnaar werd geruild, is het gesprek dat opslaat.
-///
-/// Dit is de fout die de `Clone`-route zou maken: twee handvaten op hetzelfde bestand. Na
-/// `switch_to` mag een beurt in het oude spoor geen regel achterlaten.
 #[test]
 fn na_de_wissel_schrijft_de_beurt_in_het_nieuwe_spoor() {
     let root = scratch("spoor");
@@ -249,21 +201,6 @@ fn na_de_wissel_schrijft_de_beurt_in_het_nieuwe_spoor() {
     assert_eq!(count_lines_in(&root, &hier), 2, "het vorige gesprek houdt zijn eigen twee regels");
 }
 
-/// Een herstart nummert dóór waar het geladen gesprek ophield.
-///
-/// De beurtnamer is proces-breed en start bij 0, maar de id's van een geladen gesprek zijn al
-/// namen (`tu_1/user`, `tu_1/msg`). Zónder dat de teller bij het laden wordt bijgetrokken, gaf een
-/// herstart die een sessie met `tu_1` opende de volgende vraag wéér `tu_1` en panikte de
-/// "twee keer opgeslaan"-assertie van de reductor op de worker-thread -- wat daar bleef hangen
-/// als "blijft wachten, niets meer te sturen". De fix zaadt de teller tot boven het hoogste
-/// `tu_<n>` in de geladen items; deze test legt de beide kanten vast: de eerste beurt na de
-/// herstart overleeft, en de regel die hij opent draagt een beurtnummer dat nog niet bestond.
-///
-/// De scripted backend nummert zelf door (die met een verse speler telt weer vanaf `tu_1`), dus
-/// het antwoord dat hij voor de tweede beurt publiceert, hardcodeert `tu_2` -- de id die de
-/// gesprekseigenaar ná de fix kiest -- precies zoals de `answer`-fixture hierboven dat ook doet
-/// ("een script dat een andere id kiest dan de eigenaar, opent een rij die bij een andere beurt
-/// hoort").
 #[test]
 fn een_herstart_nummert_door_waar_het_gesprek_ophield() {
     let root = scratch("dornummer");
@@ -271,7 +208,6 @@ fn een_herstart_nummert_door_waar_het_gesprek_ophield() {
     run_turn(&state, "vraag een");
     let id = state.session_id();
 
-    // De herstart: een fris handvat (teller 0) op dezelfde map, die `tu_1` al draagt.
     let script = answer("tu_2", "het tweede antwoord")
         .into_iter()
         .fold(Script::new(), |s, event| s.event(event));
@@ -283,8 +219,6 @@ fn een_herstart_nummert_door_waar_het_gesprek_ophield() {
     );
     assert_eq!(reopened.rows().len(), 2, "de herstart draagt vraag en antwoord");
 
-    // De tweede beurt mag de eerste niet overnemen: zonder fix paniekte hij hier met
-    // "tu_1/user state twee keer opgeslaan".
     run_turn(&reopened, "vraag twee");
 
     let rows = reopened.rows();
@@ -295,7 +229,6 @@ fn een_herstart_nummert_door_waar_het_gesprek_ophield() {
     assert_eq!(mentions_exact(&reopened, "vraag een"), 1, "de oude vraag blijft één keer: {bodies:?}");
 }
 
-/// Regelentelling in het spoor van één sessie-id, ongeacht welk dagbucket hem draagt.
 fn count_lines_in(root: &std::path::Path, session_id: &str) -> usize {
     let mut total = 0usize;
     for day in std::fs::read_dir(root).expect("de data-map") {
@@ -308,11 +241,6 @@ fn count_lines_in(root: &std::path::Path, session_id: &str) -> usize {
 
 #[test]
 fn de_handvat_telling_is_de_schrijftelling() {
-    // `disk_items` is wat de statusregel met het beeld vergelijkt ("12 of 40 regels"), dus zijn
-    // enige eis is dat hij zegt wat er werkelijk staat: niet het gesprek, niet het model-boek,
-    // de regel. `count_lines` telt die regels onafhankelijk, met een lezing van het bestand zelf,
-    // dus deze test vergelijkt de handvat-telling met de grondwaarheid in plaats van met nog een
-    // telling uit dezelfde bron.
     let root = scratch("telling");
     let (_, state) = persistent(&root, vec![answer("tu_1", "het eerste antwoord"), answer("tu_2", "het tweede antwoord")]);
     assert_eq!(state.disk_items(), Some(0), "een gesprek dat nog niets zei, staat met nul regels op schijf");
@@ -325,26 +253,16 @@ fn de_handvat_telling_is_de_schrijftelling() {
     assert_eq!(state.disk_items(), Some(na_twee), "na twee beurten: handvat {:?} tegen schijf {na_twee}", state.disk_items());
     assert!(na_twee > na_een, "de tweede beurt moet meer regels hebben achtergelaten");
 
-    // Een handvat zonder opslag heeft geen schrijftelling, en liegt dus ook niet over "opgeslagen".
     let (_, leads) = ledig_handvat();
     assert_eq!(leads.disk_items(), None, "zonder handvat is er niets te tellen");
 }
 
-/// Een handvat zonder data-map: het venster dat tekent zonder te schrijven.
 fn ledig_handvat() -> (Arc<ScriptedBackend>, Arc<AppState>) {
     let backend = Arc::new(ScriptedBackend::new(vec![]));
     let state = AppState::new(Arc::clone(&backend) as Arc<dyn Backend>, "systeem");
     (backend, Arc::new(state))
 }
 
-/// Regelentelling over het item-spoor van één sessie: `items.jsonl`.
-///
-/// Het spoor is de rijenlijst, precies zoals `Repository::persist` en `persistTo` in de origineler
-/// alleen `items` aanhangen. Het secondaire model-boek (`history.jsonl`) en de kop (`detail.jsonl`,
-/// door `write_detail` per beurt herschreven) dragen geen beurten en tellen hier niet mee. Een
-/// sessie staat twee niveaus diep (`root/<dag>/<id>/`, `rollout::session_dir`), dus deze telling
-/// daalt die niveaus af en telt dan één bestand; één niveau zou niets vinden en de staart-meting
-/// groen maken op nul, wat juist de meting is waar het om gaat.
 fn count_lines(root: &std::path::Path) -> usize {
     const FILES: [&str; 1] = ["items.jsonl"];
     let mut total = 0usize;
@@ -374,4 +292,78 @@ fn count_lines(root: &std::path::Path) -> usize {
         }
     }
     total
+}
+
+#[test]
+fn compaction_commits_summary_with_retained_context_and_keeps_the_display_trail() {
+    use baudet_app::compaction::{CompactionOutcome, CompactionPlan};
+    use baudet_backend::{BackendError, SendRequest, TurnHandle};
+    use baudet_core::Turn;
+
+    struct Summarizer;
+    impl Backend for Summarizer {
+        fn send(&self, _: SendRequest) -> Result<TurnHandle, BackendError> {
+            unreachable!()
+        }
+
+        fn complete_once(&self, _: &str, text: &str, _: u32) -> Result<Turn, BackendError> {
+            assert!(text.contains("old question"));
+            assert!(!text.contains("recent question"));
+            Ok(Turn::text("retained facts"))
+        }
+    }
+
+    let root = scratch("compaction");
+    let (_, state) = persistent(&root, vec![answer("tu_1", "old answer"), answer("tu_2", "recent answer")]);
+    run_turn(&state, "old question");
+    run_turn(&state, "recent question");
+    let id = state.session_id();
+    let state = AppState::new(Arc::new(Summarizer), "system").on_session(&root, &id, "model", None).unwrap();
+    let before = state.rows();
+    let plan = CompactionPlan { keep_recent: 2, max_chars: 4000, max_tokens: 1024 };
+    assert_eq!(state.compact(&plan).unwrap(), CompactionOutcome::Compacted { summary: "retained facts".into(), folded: 2 });
+    assert_eq!(state.rows(), before);
+    let reopened = state.build_session().unwrap();
+    assert_eq!(reopened.summary.as_deref(), Some("retained facts"));
+    assert_eq!(reopened.messages.iter().map(|msg| msg.content.as_str()).collect::<Vec<_>>(), ["recent question", "recent answer"]);
+    assert_eq!(reopened.items, before);
+}
+
+#[test]
+fn a_tool_turn_feeds_the_observation_back_and_persists_the_final_answer() {
+    use baudet_app::session::tool_turn::ToolTurn;
+    use baudet_projects::{FolderPermission, Permissions, Project};
+    use baudet_tool::mcp::McpServers;
+    use std::sync::atomic::AtomicBool;
+
+    let root = scratch("tool-turn");
+    let first = ["```baudet-tool", r#"{"tool":"read_file","arguments":{"file":"example.txt"}}"#, "```"].join("\n");
+    let completed = |turn: &str, text: &str| {
+        let mut events = answer(turn, text);
+        events.push(ThreadEvent::TurnCompleted {
+            thread_id: "th_1".into(), turn_id: turn.into(), response_id: None,
+            usage: None, final_event: Some("response.completed".into()), incomplete_reason: None,
+        });
+        events
+    };
+    let (_, state) = persistent(&root, vec![completed("tu_1", &first), completed("tu_2", "Read it.")]);
+    std::fs::write(root.join("example.txt"), "known observation").unwrap();
+    let mut project = Project::new("p-1".into(), "Fixture", 0);
+    project.folder_path = Some(root.to_string_lossy().into_owned());
+    project.permissions = Permissions::encode([FolderPermission::Read, FolderPermission::Write]);
+    let settings = baudet_settings::Settings::default();
+    state.run_tools("Read the file", None, ToolTurn {
+        project: &project,
+        settings: &settings,
+        servers: &mut McpServers::default(),
+        approval: Arc::new(|_| ApprovalDecision::Decline),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    }).unwrap();
+    assert_eq!(state.live_turns(), 0);
+    assert!(state.rows().iter().any(|item| matches!(item, Item::ToolCall(call) if call.output.contains("known observation"))));
+    assert_eq!(mentions_exact(&state, "Read it."), 1);
+    assert_eq!(state.persist(), None);
+    let reopened = state.build_session().unwrap();
+    assert_eq!(reopened.messages.last().unwrap().content, "Read it.");
+    assert!(reopened.messages.iter().any(|msg| msg.content.contains("known observation")));
 }

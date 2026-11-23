@@ -1,16 +1,3 @@
-//! Een shell-commando in de projectmap draaien, zodat het model een echt project kan bouwen, testen of
-//! bekijken en niet alleen zijn bestanden kan lezen en editten.
-//!
-//! Poort van `tool/ExecuteTool.kt`. Dit is het machtigste en het minst omheinbare gereedschap: een subproces
-//! valt niet door de mapgrens te vangen, dus twee andere dingen omheinen het. Eén: het wordt alleen aangeboden
-//! wanneer het project het Execute-recht geeft. Twee: élk commando heeft een mens nodig, ook in `Auto`, want
-//! zodra bytes een shell bereiken, is de mapgrens niet langer de onze.
-//!
-//! Om bruikbaar te blijven doet de tool twee dingen rond de run: de projectmap is de werkmap en de systeem-temp
-//! is `TMPDIR`, zodat scripts die een commando schrijft landen waar wij verwachten, en beide mappen worden door
-//! [`execute_workspace::ExecuteWorkspace`] gecontroleerd vóórdat het commando als temp-script wordt gestald. Het
-//! draaien zélf, met de begrensde gelijktijdige drain, is gedelegeerd aan [`ProcessRunner`]. Een niet-nul exit
-//! is model-gerichte feedback, nooit een exception.
 
 use crate::command_signature;
 use crate::execute_workspace::ExecuteWorkspace;
@@ -23,12 +10,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Standaard-run-cap, zoals de origineler die aan het model belooft in zijn description.
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
-/// Harde bovenkant, zodat een model met een slecht idee niet de beurt gijzelt.
 const MAX_TIMEOUT_SECONDS: u64 = 600;
 
-/// De tool zelf.
 #[derive(Debug, Default)]
 pub struct ExecuteTool;
 
@@ -37,7 +21,6 @@ impl Tool for ExecuteTool {
         "run_command"
     }
 
-    /// Een shell-run is het `commandExecution`-item van het protocol, dus zijn kaart draagt exit code en timing.
     fn item_kind(&self) -> ItemKind {
         ItemKind::CommandExecution
     }
@@ -63,10 +46,6 @@ impl Tool for ExecuteTool {
         })
     }
 
-    /// Een commando fan-out alleen op de exacte route waarop de run zelf zonder mens vertrouwd:
-    /// [`safe_commands`] bewijst dat het read-only is en de safe-gate staat aan, dus het schrijft niet en het
-    /// parkeert geen draad die op een klik wacht. Een gepind of family-vertrouwd commando blijft bewust serieel
-    /// — diens vertrouwen kan een write dekken, en twee parallelle runs mogen die niet racen.
     fn can_run_parallel(&self, args: &Value, ctx: &ToolContext) -> bool {
         ctx.auto_approve_safe && args.get("command").and_then(Value::as_str).is_some_and(safe_commands::is_safe)
     }
@@ -90,13 +69,6 @@ impl Tool for ExecuteTool {
 
         let timeout = timeout_arg(args).unwrap_or(DEFAULT_TIMEOUT_SECONDS).clamp(1, MAX_TIMEOUT_SECONDS);
 
-        // Drie manieren waarop een commando de vraag overslaat, alle drie via die ene read-only-kenner in
-        // `safe_commands`. `pinned(command)` is precies wat een eerdere "Always" bewaarde, dus een match betekent
-        // dat de persoon dit al gaf: alleen een bewezen read-only commando heeft een herbruikbare signatuur, en
-        // alles anders — een keten, of een tool die kan schrijven — vertrouwt alleen op zijn eigen letterlijke
-        // tekst, zodat een read-goedkeuring er nooit een write doorheen kan trekken. De safe-gate laat toe wat
-        // `safe_commands` read-only bewijst. Alles anders wordt door een mens bevestigd. De lijst wordt hier
-        // opgevraagd en niet aan het begin van de beurt, zodat een pin van ogenblik daarvoor nú telt.
         let trusted = command_signature::pinned(command);
         let family = command_signature::trusted_entry(command);
         let pre_approved = ctx.auto_allow().contains(&trusted)
@@ -107,12 +79,6 @@ impl Tool for ExecuteTool {
             return ToolResult::fail("run_command: the user declined to run this command");
         }
 
-        // De opeenvolging is die van de origineler (`ExecuteTool.kt:96-125`): het pad eerst aanmaken, dan de
-        // grens checken op het pad dat er werkelijk ligt, en pas daarna schrijven. Een pad dat wij zelf in de
-        // temp aanmaakten, valt daarbinnen; de check is een vangnet op wat er echt staat, geen decoratie. De
-        // inhoud komt in één schrijfbeurt met de shebang vooraan, zodat er nooit een script op schijf staat dat
-        // zonder shebang draait. Het script opruimen hoort bij de run, niet bij het succes: een achtergelaten
-        // stapel scripts is vuil dat de persoon niet bestelde, en het zegt niets over hoe de run afliep.
         let script = match stage_script(&temp, command) {
             Ok(path) => path,
             Err(reason) => return fail(reason),
@@ -124,9 +90,6 @@ impl Tool for ExecuteTool {
             None => return fail("the command could not be started or completed"),
         };
 
-        // Een timeout heeft géén exit code, dus die regel mag er niet één fantomen. De origineler speelt zijn
-        // `"exit code: ${result.exitCode}"` rechtstreeks en zou daar `null` printen; in een Option-taal is dat
-        // geen cijfer om te tonen, dus de kop blijft weg en alleen de timeout-tekst zegt wat er gebeurde.
         let head = match outcome.exit_code {
             Some(code) => format!("exit code: {code}"),
             None => format!("run_command timed out after {timeout}s (no exit code)"),
@@ -143,20 +106,12 @@ impl Tool for ExecuteTool {
     }
 }
 
-/// Het commando als temp-script stallen: een lege `.sh` in de temp, de grens erover, en dan de inhoud.
-///
-/// De fout leidt tot een reden in de tekst van de tool, zoals de origineler die voor elke mislukte stap een
-/// eigen `fail(...)` heeft; `within_allowed` kent maar een boolean, dus het onderscheid tussen "buiten de
-/// temp" en "niet te schrijven" zit in de volgorde waarin deze functie faalt.
 fn stage_script(temp: &Path, command: &str) -> Result<PathBuf, &'static str> {
     let path = tempfile::Builder::new()
         .prefix("baudet-run-")
         .suffix(".sh")
         .tempfile_in(temp)
         .map_err(|_| "the run script could not be staged in the temp folder")?
-        // `tempfile` zou het bestand weggooien zodra de handgreep uit scope valt, maar dit script moet blijven
-        // tot de run voorbij is; `keep` geeft het pad terug zonder die opruiming. De tool ruimt zelf op, in
-        // dezelfde `finally`-geest als `Files.deleteIfExists` van de origineler.
         .into_temp_path()
         .keep()
         .map_err(|_| "the run script could not be staged in the temp folder")?;
@@ -164,7 +119,6 @@ fn stage_script(temp: &Path, command: &str) -> Result<PathBuf, &'static str> {
         fs::remove_file(&path).ok();
         return Err("the run script did not stage inside the temp folder");
     }
-    // Eén schrijfbeurt, shebang vooraan: `Files.writeString(script, "#!/bin/bash\n$command\n")`.
     if fs::write(&path, format!("#!/bin/bash\n{command}\n")).is_err() {
         fs::remove_file(&path).ok();
         return Err("the run script could not be staged in the temp folder");
@@ -172,14 +126,6 @@ fn stage_script(temp: &Path, command: &str) -> Result<PathBuf, &'static str> {
     Ok(path)
 }
 
-/// De run zelf, met `TMPDIR` naar de gecontroleerde temp. De environment gaat mee via de environment-haak van
-/// [`ProcessRunner::run_with`], precies zoals de origineler `pb.environment()["TMPDIR"]` op zijn builder zet.
-/// Wat hier niet mag, is wat de eerste opzet deed: `std::env::set_var` op dit proces. Die variabele is
-/// procesbreed en gedeeld met elke andere draad — de parallelle reads van dezelfde beurt — en hij zou ook de
-/// tool zelf verontreinigen, tot en met zijn eigen temp-lezing in de volgende run. Een kind krijgt zijn
-/// omgeving, de gastheer houdt de zijne.
-///
-/// Een start-fout wordt `None`: de aanroeper maakt er zijn eigen model-gerichte reden van.
 fn run_staged(script: &Path, cwd: &Path, temp: &Path, timeout: u64) -> Option<crate::process_runner::ProcessOutcome> {
     let script_arg = script.to_str()?;
     let argv = ["/bin/bash", script_arg];
@@ -189,8 +135,6 @@ fn run_staged(script: &Path, cwd: &Path, temp: &Path, timeout: u64) -> Option<cr
     .ok()
 }
 
-/// `timeout_seconds` uit het argument. De origineler leest de ruwe primitief-tekst en raadt daarna; een getal
-/// of een cijferstring telt, alles anders valt weg naar de default.
 fn timeout_arg(args: &Value) -> Option<u64> {
     match args.get("timeout_seconds")? {
         Value::Number(number) => number.as_u64(),
@@ -199,7 +143,6 @@ fn timeout_arg(args: &Value) -> Option<u64> {
     }
 }
 
-/// De weigeringsformat van deze tool.
 fn fail(reason: impl Into<String>) -> ToolResult {
     ToolResult::fail(format!("run_command: {}", reason.into()))
 }
@@ -210,7 +153,6 @@ mod tests {
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
-    /// Een context die mag draaien, met de vragen en de antwoorden van deze run.
     struct Recorder {
         asked: Mutex<Vec<(String, String, u64)>>,
         answer: bool,
@@ -234,7 +176,6 @@ mod tests {
         Arc::new(Recorder { asked: Mutex::new(Vec::new()), answer })
     }
 
-    /// De aanroep van de tool zelf; de map zit al in de context, dus deze helper draagt alleen `args` over.
     fn run(args: Value, ctx: &ToolContext) -> ToolResult {
         ExecuteTool.execute(&args, ctx)
     }
@@ -288,7 +229,6 @@ mod tests {
         assert_eq!(result.exit_code, Some(4));
         assert!(!result.timed_out);
         assert!(result.output.starts_with("exit code: 4\n--- stdout ---\n"), "{}", result.output);
-        // De werkmap is de projectmap, en het antwoord is het echte pad —dezelfde discipline als de mapgrens.
         assert!(
             result.output.contains(&fs::canonicalize(dir.path()).unwrap().to_string_lossy().into_owned()),
             "de run moet in de projectmap draaien: {}",
@@ -313,7 +253,7 @@ mod tests {
     #[test]
     fn a_read_only_command_needs_no_person_when_the_safe_gate_is_on() {
         let dir = tempfile::tempdir().unwrap();
-        let rec = recorder(false); // zou weigeren mocht er gevraagd worden
+        let rec = recorder(false);
         let result = run(json!({"command": "ls"}), &ctx(dir.path(), &rec, true));
         assert!(result.ok, "een bewezen read-only commando draait zonder vraag");
         assert!(rec.asked.lock().unwrap().is_empty());
@@ -330,8 +270,6 @@ mod tests {
 
     #[test]
     fn a_command_that_can_write_is_asked_even_when_its_family_is_trusted_as_read_only() {
-        // De veilige-gate is geen vrijbrief: `rm` staat op geen van beide lijsten, dus `is_safe` zegt nee en
-        // de persoon moet vragen worden — ook al staat de poort open.
         let dir = tempfile::tempdir().unwrap();
         let rec = recorder(false);
         let result = run(json!({"command": "rm -r iets"}), &ctx(dir.path(), &rec, true));
@@ -360,7 +298,6 @@ mod tests {
         assert_eq!(timeout_arg(&json!({"timeout_seconds": "7"})), Some(7));
         assert_eq!(timeout_arg(&json!({"timeout_seconds": "niet-getald"})), None);
         assert_eq!(timeout_arg(&json!({})), None);
-        // De cap is geen suggestie: een model dat 10 000 seconden vraagt, krijgt de plafond.
         let capped = timeout_arg(&json!({"timeout_seconds": 10_000})).unwrap().clamp(1, MAX_TIMEOUT_SECONDS);
         assert_eq!(capped, MAX_TIMEOUT_SECONDS);
     }
@@ -380,10 +317,6 @@ mod tests {
 
     #[test]
     fn it_leaves_no_run_script_behind() {
-        // De origineler ruimt in zijn `finally`, dus de garantie is: na een run — hoe die ook afliep — ligt er
-        // van ons geen script meer. Een telling over de hele gedeelde temp is daar geen bewijs van, want
-        // parallelle tests schrijven en ruimen zelf ook in diezelfde map. Daarom controleert deze test het
-        // pad dat de run zelf stalde, en vier uitkomsten: geslaagd, niet-nul exit, timeout en geweigerd.
         let dir = tempfile::tempdir().unwrap();
         let temp = ExecuteWorkspace::temp_dir().unwrap();
 
@@ -401,7 +334,6 @@ mod tests {
             drop(rec);
         }
 
-        // Een geweigerde run steekt al vóór het stallen, dus er ontstaat niets om op te ruimen.
         let rec = recorder(false);
         run(json!({"command": "echo Geen-Tmp-Run"}), &ctx(dir.path(), &rec, false));
         let achtergebleven: Vec<_> = fs::read_dir(&temp)
@@ -418,8 +350,6 @@ mod tests {
 
     #[test]
     fn a_script_sees_the_controlled_temp_as_its_tmpdir() {
-        // Het punt van de TMPDIR-zetting: een commando dat iets schrijft, moet landen waar wij het verwachten,
-        // en niet in een map die buiten ons bereik ligt.
         let dir = tempfile::tempdir().unwrap();
         let rec = recorder(true);
         let result = run(json!({"command": "echo $TMPDIR"}), &ctx(dir.path(), &rec, true));

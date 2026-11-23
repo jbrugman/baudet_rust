@@ -1,6 +1,3 @@
-//! The contract test. It is documentation that is checked rather than a comment: when this
-//! process eventually answers a JSON-RPC request over stdio, it publishes exactly these methods
-//! and tags. Translated from the Kotlin `ItemSpec`/`ThreadEmitterSpec` intents.
 
 use baudet_core::*;
 
@@ -13,8 +10,6 @@ fn item_wire_names_are_the_app_server_spellings() {
     assert_eq!(ItemKind::FileChange.wire_name(), "fileChange");
     assert_eq!(ItemKind::Plan.wire_name(), "plan");
     assert_eq!(ItemKind::Error.wire_name(), "error");
-    // Ours, prefixed, so a mapper must map or drop and can never pass it through as if the
-    // backend had invented it.
     assert_eq!(ItemKind::ToolCall.wire_name(), "baudet/toolCall");
     assert_eq!(ItemKind::Image.wire_name(), "baudet/image");
 }
@@ -33,7 +28,6 @@ fn delta_method_splits_one_stream_per_content_type() {
     assert_eq!(delta_method(ItemKind::Reasoning), "item/reasoning/textDelta");
     assert_eq!(delta_method(ItemKind::CommandExecution), "item/commandExecution/outputDelta");
     assert_eq!(delta_method(ItemKind::FileChange), "item/fileChange/outputDelta");
-    // A kind with no delta method of its own reports through item/completed, spelled as ours.
     assert_eq!(delta_method(ItemKind::Error), "baudet/item/delta");
     assert_eq!(delta_method(ItemKind::Plan), "item/plan/delta");
 }
@@ -128,8 +122,6 @@ fn event_methods_match_the_protocol() {
 
 #[test]
 fn a_command_row_keeps_a_missing_exit_code_missing() {
-    // A timeout is not exit code 0, and reporting them alike is the dishonesty this app exists
-    // against, so the field must survive a round trip as absent.
     let item = Item::CommandExecution(CommandExecutionItem {
         item_id: "it_9".into(),
         command: "sleep 999".into(),

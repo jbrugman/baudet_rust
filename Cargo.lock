@@ -164,7 +164,9 @@ dependencies = [
  "baudet-backend",
  "baudet-core",
  "baudet-projects",
+ "baudet-settings",
  "baudet-store",
+ "baudet-tool",
  "futures-util",
  "serde",
  "serde_json",
@@ -258,6 +260,7 @@ name = "baudet-ui"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "base64 0.22.1",
  "baudet-app",
  "baudet-backend",
  "baudet-core",
@@ -269,6 +272,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_extras",
+ "image",
  "png",
  "reqwest",
  "rfd",
@@ -1384,6 +1388,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

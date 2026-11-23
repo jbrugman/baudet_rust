@@ -1,14 +1,4 @@
-//! Regeldiff in het geheugen, en de ene plek waar een diff leesbare regels wordt.
-//!
-//! Poort van `diff/LineDiff.kt`, `diff/UnifiedDiff.kt` en `diff/DiffLineKind.kt`. Dit is het enige diff-formaat
-//! in deze app: de goedkeuringskaart en de patch-weergave in de bestandsboom kleuren dezelfde tekst, omdat er
-//! geen tweede formaat bestaat dat ze allebei kunnen uitvinden. `git diff` is zelf al in deze vorm en hoeft dus
-//! geen renderer, alleen dezelfde kleuring.
-//!
-//! Deze diff loopt vóór er iets geschreven is, en git kan daar niet bij helpen zolang de nieuwe inhoud alleen
-//! nog in het geheugen leeft.
 
-/// Categorie van één unified-diff-regel, gebruikt om een kijkkleur te kiezen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffLineKind {
     Context,
@@ -20,9 +10,7 @@ pub enum DiffLineKind {
 }
 
 impl DiffLineKind {
-    /// De categorie van één regel-tekst, zoals de viewer hem aanwijst: koppen op hun voormering, dan pas de
-    /// binaire +/-/spatie. Een hunk-kop begint met `@@`, een bestandskop met `--- ` of `+++ `, en een meta-regel
-    /// is het werk van git zelf (`diff --git`, `index `, `new file mode`, …) dat door deze renderer heen komt.
+    // Classify Git file headers before ordinary added or removed lines.
     pub fn of(line: &str) -> DiffLineKind {
         if line.starts_with("@@") {
             DiffLineKind::HunkHeader
@@ -40,27 +28,18 @@ impl DiffLineKind {
     }
 }
 
-/// Eén regel in het verschil tussen twee teksten.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
-    /// Regel die in beide staat.
     Context(String),
-    /// Regel die alleen in de nieuwe tekst staat.
     Add(String),
-    /// Regel die alleen in de oude tekst staat.
     Remove(String),
 }
 
-/// Het regeldifference zelf.
 pub struct LineDiff;
 
-/// Bovengrens aan beide kanten waarboven de exacte LCS kwadratisch wordt; daarbuiten valt de diff terug op een
-/// grof heel-blok-verschil, dat is een ruwe maar altijd-eindigende preview in plaats van een ophanging.
 const MAX_LINES: usize = 2000;
 
 impl LineDiff {
-    /// Het regel-voor-regel-verschil tussen `old_text` en `new_text`. Een least-common-subsequence over regels
-    /// merkt elke regel aan als context, bijgevoegd of verwijderd.
     pub fn diff(old_text: &str, new_text: &str) -> Vec<Op> {
         let a = lines(old_text);
         let b = lines(new_text);
@@ -70,7 +49,6 @@ impl LineDiff {
 
         let n = a.len();
         let m = b.len();
-        // lcs[i][j] = de lengte van de gemeenschappelijke deellijst van a[i..] en b[j..], van achteren opgebouwd.
         let mut lcs = vec![vec![0u32; m + 1]; n + 1];
         for i in (0..n).rev() {
             for j in (0..m).rev() {
@@ -105,7 +83,6 @@ impl LineDiff {
     }
 }
 
-/// Een heel-blok verwijder-dan-voeg-toe, voor input te groot om regel voor regel uit te lijnen.
 fn coarse(a: &[String], b: &[String]) -> Vec<Op> {
     a.iter().map(|line| Op::Remove(line.clone())).chain(b.iter().map(|line| Op::Add(line.clone()))).collect()
 }
@@ -118,12 +95,9 @@ fn lines(text: &str) -> Vec<String> {
     }
 }
 
-/// Het unified-diff-formaat zelf.
 pub struct UnifiedDiff;
 
 impl UnifiedDiff {
-    /// Een minimale unified-kop plus de body; context-regels dragen een spatie, toevoegingen een +,
-    /// verwijderingen een -.
     pub fn render(old_name: &str, new_name: &str, ops: &[Op]) -> String {
         let mut out = format!("--- {old_name}\n+++ {new_name}\n");
         for op in ops {
@@ -153,8 +127,6 @@ mod tests {
 
     #[test]
     fn it_marks_context_added_and_removed_lines() {
-        // "a\nb\nc\n" split op '\n' is vier regels, de laatste leeg — de origineler doet `text.split('\n')` en
-        // kent geen trim. Een ronde telling zou hier drie ops geven; vier is juist en bewijst de poort.
         let ops = LineDiff::diff("a\nb\nc\n", "a\nX\nc\n");
         assert_eq!(kinds(&ops), vec![' ', '-', '+', ' ', ' ']);
         assert_eq!(
@@ -171,13 +143,11 @@ mod tests {
 
     #[test]
     fn an_empty_text_has_no_lines_so_adding_is_all_adds() {
-        // Leeg is geen lege regel: `lines("")` is leeg, dus er is niets te verwijderen.
         assert!(LineDiff::diff("", "nieuwe regel\n").iter().all(|op| matches!(op, Op::Add(_))));
     }
 
     #[test]
     fn a_trailing_newline_is_a_real_line_and_shows_as_removed() {
-        // "a\n" split op '\n' is ["a", ""]: de afwezige slot-nieuwe-regel in "a" is dus een echte verwijdering.
         let ops = LineDiff::diff("a\n", "a");
         assert_eq!(kinds(&ops), vec![' ', '-']);
     }
@@ -185,7 +155,6 @@ mod tests {
     #[test]
     fn pure_addition_keeps_the_shared_head_and_tail_as_context() {
         let ops = LineDiff::diff("kop\nstaart\n", "kop\nmidden\nstaart\n");
-        // De slotsom is de lege laatste regel van beide teksten, dus twee context-regels aan het eind.
         assert_eq!(kinds(&ops), vec![' ', '+', ' ', ' ']);
     }
 
@@ -197,9 +166,6 @@ mod tests {
 
     #[test]
     fn it_falls_back_to_a_whole_block_past_the_line_cap() {
-        // De cap is aan élke kant, en de terugval is grof: eerst alles weg, dan alles bij. Een LCS van 2001 ×
-        // 2001 zou hier tientallen miljoenen cellen kosten, dus dit bewijst meer dan alleen het resultaat.
-        // De cap geldt op het aantal regels, en "x\n".repeat(2001) zijn er 2002: de lege slot-regel meegerekend.
         let big_old = "x\n".repeat(MAX_LINES + 1);
         let ops = LineDiff::diff(&big_old, "y\n");
         let first_add = ops.iter().position(|op| matches!(op, Op::Add(_))).expect("er moet een toevoeging in zitten");
@@ -210,8 +176,6 @@ mod tests {
     #[test]
     fn the_render_carries_the_header_and_the_three_prefixes() {
         let ops = LineDiff::diff("a\nb\nc\n", "a\nX\nc\n");
-        // De lege slot-regel wordt " \n": een spatiesegel zonder tekst. Eerder gladstrijsen zou de diff van
-        // de origineler onherkenbaar maken voor elke externe kijker.
         assert_eq!(UnifiedDiff::render("a/x.txt", "b/x.txt", &ops), "--- a/x.txt\n+++ b/x.txt\n a\n-b\n+X\n c\n \n");
     }
 

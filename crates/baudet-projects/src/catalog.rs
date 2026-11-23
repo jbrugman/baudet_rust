@@ -1,9 +1,3 @@
-//! De JSON-catalogus achter de linkersidebar.
-//!
-//! De oorspronkelijke H2Store kent één database aan voor sessies en berichten. Deze catalogus is
-//! alleen de index: welke sessie bij welk project hoort, hoe zij heet en wanneer zij laatst actief
-//! was. De inhoud blijft in `baudet-store`. Daardoor hoeft de append-only rollout geen kolom of
-//! rapportageprotocol te dragen, en blijft de catalogus klein genoeg om atomair te herschrijven.
 
 use crate::ids::new_project_id;
 use crate::project::Project;
@@ -15,8 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// De catalogus is één bestand per data-map. Instanties delen hun staat via een slot, zodat twee
-/// zijden van de app dezelfde index zien zonder een database te vereisen.
 #[derive(Clone, Debug)]
 pub struct Catalog {
     shared: Arc<Mutex<State>>,
@@ -38,10 +30,6 @@ struct Data {
     sessions: Vec<SessionRecord>,
 }
 
-/// De metadata van een gesprek, zoals `sessions` in de oorspronkelijke tabel.
-///
-/// De titel is expliciet optioneel: een blanco of ontbrekende titel laat de afgeleide titel weer
-/// terugkomen, precies zoals `renameSession` in H2Store NULL zet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub id: String,
@@ -57,7 +45,6 @@ pub struct SessionRecord {
     pub updated_at: i64,
 }
 
-/// Een rij zoals de sidebar hem tekent: de weergavetitel is hier al opgelost.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSummary {
     pub id: String,
@@ -77,13 +64,10 @@ pub enum CatalogError {
 }
 
 impl Catalog {
-    /// Open of maak de catalogus in de standaard-data-map.
     pub fn open_default() -> Result<Catalog, CatalogError> {
         Self::open(&baudet_store::data_dir())
     }
 
-    /// Open of maak `<directory>/projects.json`. Een ontbrekende map wordt niet gecreëerd totdat
-    /// er werkelijk iets geschreven wordt; lezen van een eerste run is gewoon een lege catalogus.
     pub fn open(directory: &Path) -> Result<Catalog, CatalogError> {
         let path = directory.join("projects.json");
         let data = match fs::read(&path) {
@@ -97,7 +81,6 @@ impl Catalog {
         Ok(Catalog { shared: Arc::new(Mutex::new(State { path, data })) })
     }
 
-    /// Actieve projecten eerst, daarna gearchiveerde; binnen elke groep oudste eerst.
     pub fn list_projects(&self) -> Vec<Project> {
         let state = self.lock();
         let mut projects = state.data.projects.clone();
@@ -107,7 +90,6 @@ impl Catalog {
         projects
     }
 
-    /// Maak een project, met de trimde naam en de Kotlin-creatie-tijd in milliseconden.
     pub fn create_project(&self, name: &str) -> Result<Project, CatalogError> {
         let project = Project::new(new_project_id(), name, now_millis());
         let mut state = self.lock();
@@ -116,7 +98,6 @@ impl Catalog {
         Ok(project)
     }
 
-    /// Hernoem een project. De identifier blijft de ankerwaarde van sessies en mappen.
     pub fn rename_project(&self, id: &str, name: &str) -> Result<(), CatalogError> {
         let mut state = self.lock();
         let project = Self::project_mut(&mut state.data, id)?;
@@ -124,7 +105,7 @@ impl Catalog {
         self.write(&mut state)
     }
 
-    /// Zet de map en de maprechten together, zoals de SQL-update van de oorspronkelijke store.
+    // Changing the linked folder replaces its permission grant as one update.
     pub fn set_folder(&self, id: &str, path: Option<&str>, permissions: i32) -> Result<(), CatalogError> {
         let mut state = self.lock();
         let project = Self::project_mut(&mut state.data, id)?;
@@ -133,15 +114,12 @@ impl Catalog {
         self.write(&mut state)
     }
 
-    /// Archiveer of herstel een project zonder zijn sessies aan te raken.
     pub fn set_archived(&self, id: &str, archived: bool) -> Result<(), CatalogError> {
         let mut state = self.lock();
         Self::project_mut(&mut state.data, id)?.archived = archived;
         self.write(&mut state)
     }
 
-    /// Verwijder een project en de index van al zijn sessies. De rolloutbestanden blijven hier
-    /// onaangeraakt: deze methode corrupteert geen gespreksgeschiedenis om een index op te ruimen.
     pub fn delete_project(&self, id: &str) -> Result<(), CatalogError> {
         let mut state = self.lock();
         if Self::project_mut(&mut state.data, id).is_err() {
@@ -155,8 +133,6 @@ impl Catalog {
         self.write(&mut state)
     }
 
-    /// Voeg een sessie toe of werk haar index bij zonder een bestaande eigendom per ongeluk te
-    /// wissen. Dit is de vervanger van H2's MERGE, niet van het gesprek zelf.
     pub fn upsert_session(
         &self,
         id: &str,
@@ -189,7 +165,6 @@ impl Catalog {
         self.write(&mut state)
     }
 
-    /// Zet een expliciete sessietitel. Een blanco haalt de override weg, zoals NULL in H2.
     pub fn rename_session(&self, id: &str, title: &str) -> Result<(), CatalogError> {
         let mut state = self.lock();
         let session = Self::session_mut(&mut state.data, id)?;
@@ -199,7 +174,6 @@ impl Catalog {
         self.write(&mut state)
     }
 
-    /// Verwijder alleen de indexrij. De inhoud hoort bij `Rollout`, niet bij deze catalogus.
     pub fn delete_session(&self, id: &str) -> Result<(), CatalogError> {
         let mut state = self.lock();
         if Self::session_mut(&mut state.data, id).is_err() {
@@ -212,7 +186,6 @@ impl Catalog {
         self.write(&mut state)
     }
 
-    /// De sessies van een project, of van `None` (de inbox), meest recent eerst.
     pub fn sessions_in(&self, project_id: Option<&str>) -> Vec<SessionSummary> {
         let state = self.lock();
         let mut sessions = state
@@ -238,22 +211,11 @@ impl Catalog {
             .collect()
     }
 
-    /// Het project met deze id, of `None` als de catalogus het niet kent.
-    ///
-    /// De UI zocht dit vijf keer lineair in `list_projects()`, wat elk een volledige kopie van de
-    /// lijst maakt. `currentProject` in `AppState.kt:724` is één opzoeking per beurt en die beurt
-    /// loopt vóór élke toolcall, dus het hoort hier.
-    ///
-    /// Bewust géén `SessionRecord`-kopie: de catalogus is de index, niet de eigendom. Het gesprek
-    /// woont in een rollout, dus een sessie die hier nog niet staat maar wél in een rollout is geen
-    /// databug — het is een gesprek dat nog niet in de index is geland, en de oorspronkelijke
-    /// `currentProject` heeft haar project in het geheugen en zal het dus nooit missen.
     pub fn project(&self, id: &str) -> Option<Project> {
         let state = self.lock();
         state.data.projects.iter().find(|project| project.id == id).cloned()
     }
 
-    /// Het project waaraan een sessie is gekoppeld, of `None` voor de inbox en onbekende sessies.
     pub fn project_of_session(&self, session_id: &str) -> Option<String> {
         self.lock()
             .data
@@ -263,8 +225,6 @@ impl Catalog {
             .and_then(|session| session.project_id.clone())
     }
 
-    /// De afgeleide titel van een gesprek, exact als `H2Store.sessionTitle`: eerste niet-blanco
-    /// regel uit de eerste gebruikersboodschap, maximaal 48 tekens, anders de sessie-id.
     pub fn derived_title(first_user_message: Option<&Msg>, fallback_id: &str) -> String {
         let line = first_user_message
             .filter(|message| message.role == "user")

@@ -4,81 +4,33 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# The GUI is phase one, so this crate must run with no backend process at all: the transcript is
-# driven by baudet-backend's scripted player, which is also what the JVM suite already used for
-# the same reason. A real transport (reqwest + SSE through baudet_backend::sse) becomes another
-# `impl Backend` later and changes nothing here.
 [dependencies]
 baudet-core = { workspace = true }
 baudet-backend = { workspace = true }
 baudet-app = { workspace = true }
 baudet-store = { workspace = true }
 baudet-settings = { workspace = true }
-# De linkersidebar tekent de projectcatalogus. Alleen de catalogus zelf wordt hier gelezen en
-# bijgeschreven; de rechtenregels en de cascade blijven in die crate staan, zodat de sidebar geen
-# tweede opslag wordt (zie src/sidebar.rs).
 baudet-projects = { workspace = true }
-# Het vertrouwde-families-vak in het instellingenpaneel past regels toe, en de regel die beslist of
-# een gezin vertrouwd mag worden, is `command_signature::trusted_entry`. Die tekst mag hier niet
-# komen te staan: een tweede implementatie van die regel is precies hoe een paneel breder gaat
-# vertrouwen dan de commandolaag. Daarom loopt deze crate tegen `baudet-tool` aan.
 baudet-tool = { workspace = true }
-# De tabel met alle zichtbare tekst in vier talen. De panel tekent er de labels uit en de app zet
-# er de actieve taal op vanuit het instellingenbestand, precies zoals `AppState.kt:195` daar doet.
 baudet-i18n = { workspace = true }
-# Only for the settings panel's Scan button: the probe it sends is a blocking request made from the
-# settings worker, and it goes through `baudet_backend::protocol::scan`, which is where the dialect
-# rules live. Declared at the workspace for the reason already stated there — the GUI and the
-# transport must not disagree about the HTTP stack.
 reqwest = { workspace = true }
-# The probe's answer is judged from its JSON body — that is the scan's rule — so the panel's worker
-# reads JSON too. Not a new package: `baudet-settings` and `baudet-backend` already carry it.
 serde_json = { workspace = true }
 tokio = { workspace = true }
 egui = { workspace = true }
 egui_extras = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "glow"] }
 
-# Only for `--screenshot`: the picture egui hands back is a `Vec<Color32>`, and this turns it into
-# a PNG file. It is not a new dependency: `eframe` already pulls `image`, which already pulls this
-# exact `png`, so the graph gains one edge (this crate -> png) and no new package. Reach for `png`
-# rather than `image` because the only format that matters here is the one we are asked to write,
-# and `image`'s other ~30 decoders are not something a screenshot needs.
 png = "0.18"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
-# Only for macOS: the flag that keeps `--screenshot` from activating the app and stealing focus
-# sits on winit's event-loop builder, and eframe only reaches it through
-# `NativeOptions::event_loop_builder`. This is not a new package either: `eframe` and `egui-winit`
-# already depend on this exact `winit`, so it cannot disagree with the one the window is built on.
-# Gated to macOS because that is the only platform whose builder has the method, and because a
-# version bump of eframe on another platform must not look like a breaking change here.
-# De native mapkiezer naast het folder-pad. Bewust een crate en geen eigen boom-browser: het
-# wijzingsverhaal van dit project is dat wat ArtCraft al bouwde niet opnieuw wordt uitgevonden, en
-# een eigen dialoog in egui zou precies dat zijn. De macOS-tak zit in rfd zelf (objc2-app-kit,
-# gemeten in `cargo tree`); de optionele Linux- en Windows-takken staan met `default-features =
-# false` uit, en wat die keus op die platforms met de kiezer doet, is hier niet gemeten — er staat
-# geen cross-target geïnstalleerd, dus dat is een aanname en geen bewering. `tokio`-vriendelijk is
-# het niet: de dialoog blokkeert, dus hij draait niet op een paint-pass (zie de workerregel in dit
-# paneel) maar wordt vanuit de UI-thread aangeroepen, waar hij dat ook doet in elke desktop-app.
 rfd = { version = "0.18", default-features = false }
 
-# Het "Copy path"-menu van de bestandsboom én de changes-lijst (`FileTreePanel.kt:533-539` zet een
-# `StringSelection` op de `systemClipboard`). `arboard` is het stuk dat in deze crate nog ontbrak:
-# `rfd` kiepert mappen maar heeft geen klembord, en egui heeft er geen. Geen nieuw pakket naar
-# schatting: `arboard 3.7.0` staat al in de lokale crate-boom, dus dit kost geen netwercopeging.
 arboard = "3.7"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 winit = "0.30"
 
-# No `accesskit` yet: on macOS eframe reaches the screen through its own objc2 path, and the
-# feature only drags in `accesskit_unix` -> `zvariant` for Linux. Screen-reader support is a real
-# design conversation (which row announces as what), not a feature flag to flip for show.
-# No `links` either, so `ctx.open_url` is a deliberate no-op until a link in a transcript is a
-# requirement with a browser policy attached -- silent-and-honest beats silently-wrong.
 
 [dev-dependencies]
-# The tree tests read real throwaway folders, and a directory that removes itself on drop is the
-# difference between a self-contained test and one that cleans up after itself by luck. Same reason
-# baudet-core already carries it.
 tempfile = { workspace = true }

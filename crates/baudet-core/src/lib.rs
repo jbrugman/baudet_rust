@@ -1,22 +1,10 @@
-//! Baudet's internal seam: the vocabulary of a conversation, as facts rather than as text.
-//!
-//! This crate holds no UI, no transport and no storage. It is the contract every other layer
-//! speaks, translated 1:1 from the Kotlin originals so behaviour is protected by the same
-//! intents the JVM suite already encodes:
-//!
-//!  * [`item`] -- what a row is and what state it is in (`Item.kt`);
-//!  * [`event`] -- everything that happens, each event scoped by thread and turn (`ThreadEvent.kt`);
-//!  * [`protocol`] -- what a turn returned, including the backend's own terminal signals (`Turn.kt`);
-//!  * [`usage`] -- token accounting, where a missing number stays missing (`Usage.kt`);
-//!  * [`error`] -- a backend complaint, and the one error a user can act on (`BackendException.kt`);
-//!  * [`context`] -- where a conversation happened, which a transcript needs to stay meaningful;
-//!  * [`msg`] -- a turn as the model is asked to remember it, the wire twin of [`item`];
-//!  * [`model_windows`] -- the context window a model id is known to have.
+//! Shared model requests, transcript items, and application events.
 
 pub mod context;
 pub mod error;
 pub mod event;
 pub mod item;
+pub mod mcp;
 pub mod model_windows;
 pub mod msg;
 pub mod protocol;

@@ -1,4 +1,3 @@
-//! A prepared turn, and the backend that plays it.
 
 use crate::sse::frame;
 use crate::{Backend, BackendError, SendRequest, TurnHandle};
@@ -7,22 +6,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
-/// One step a script can take. A script is data, not a closure, so it can be written down as a
-/// fixture and read back, which is what lets a UI test and a future wire recording share it.
 #[derive(Clone)]
 pub enum Step {
-    /// Publish one event verbatim.
     Event(ThreadEvent),
-    /// Raw SSE lines: framed through [`crate::sse`], so the interface sees exactly the delta
-    /// bundling a wire would give it. `Fn` maps a framed payload to an event; return `None` for
-    /// anything the real framer would drop.
     RawSse { lines: Vec<String>, to_event: RawMapper },
 }
 
-/// Turns one framed SSE payload into an event, the way a real adapter would.
 pub type RawMapper = Arc<dyn Fn(&str) -> Option<ThreadEvent> + Send + Sync>;
 
-/// A scripted turn: the events it publishes, in order.
 #[derive(Clone, Default)]
 pub struct Script {
     pub steps: Vec<Step>,
@@ -50,11 +41,6 @@ impl Script {
     }
 }
 
-/// The scripted [`Backend`]: each `send` plays the next script in order, so a test drives a
-/// whole conversation rather than one turn.
-///
-/// Cancellation is real: after a `cancel`, the remaining steps are dropped and only an interrupt
-/// close is published, which is how a UI learns to leave rows `interrupted` rather than `failed`.
 #[derive(Default)]
 pub struct ScriptedBackend {
     scripts: Mutex<Vec<Script>>,
@@ -68,16 +54,9 @@ struct TurnState {
     steered: Mutex<Vec<String>>,
 }
 
-/// What the most recent turn was asked for.
-///
-/// A value behind a lock, not a borrow: `send` is given the `SendRequest` by move, so nothing here
-/// could outlive the call as a reference, and the conversation owner hands its transcript over in
-/// exactly the shape a caller would want to assert on.
 #[derive(Debug, Clone)]
 struct RecordedRequest {
     request: SendRequest,
-    /// `tu_1` for the first turn -- the same id the player publishes, so an answer can be matched
-    /// back to the request that produced it.
     turn_id: String,
 }
 
@@ -91,26 +70,18 @@ impl ScriptedBackend {
         }
     }
 
-    /// How many turns have been started, so a test can assert a turn was claimed exactly once.
     pub fn turns_started(&self) -> usize {
         self.turn_counter.load(Ordering::SeqCst)
     }
 
-    /// What the human steered into the most recent turn, in order.
     pub fn steers(&self) -> Vec<String> {
         self.last_turn.lock().unwrap().as_ref().map(|t| t.steered.lock().unwrap().clone()).unwrap_or_default()
     }
 
-    /// The whole request of the most recent turn, with the id that turn was published under.
-    ///
-    /// Exists so a caller can assert what it *asked*, not only what it replayed. Whether a turn
-    /// carried its conversation is invisible in the published events, so without this the player
-    /// could drop the transcript and every test here would still pass.
     pub fn last_request(&self) -> Option<(SendRequest, String)> {
         self.last_request.lock().unwrap().clone().map(|r| (r.request, r.turn_id))
     }
 
-    /// Whether the most recent turn was cancelled.
     pub fn cancelled(&self) -> bool {
         self.last_turn.lock().unwrap().as_ref().map(|t| t.cancelled.load(Ordering::SeqCst)).unwrap_or(false)
     }
@@ -134,14 +105,10 @@ impl Backend for ScriptedBackend {
         std::thread::spawn(move || {
             for step in steps {
                 if player_state.cancelled.load(Ordering::SeqCst) {
-                    // Deliberate Stop: publish nothing more, and let the close below interrupt.
                     break;
                 }
                 publish(&step, &tx);
             }
-            // The sender drops here, which is what closes the stream and tells the owner the
-            // script is done. A Stop must not look like a completion, so no terminal event is
-            // invented here either; the orchestrator owns the interrupted close.
         });
 
         let steer_state = Arc::clone(&state);
