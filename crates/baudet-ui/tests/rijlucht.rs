@@ -69,6 +69,7 @@ fn input() -> egui::RawInput {
 /// lokaal voor deze functie: `run_ui` leent hem, en de clonede `Shape`s overleven hem.
 struct Geschilderd {
     vormen: Vec<egui::Shape>,
+    midden: std::ops::RangeInclusive<f32>,
 }
 
 fn settings() -> Geschilderd {
@@ -77,24 +78,32 @@ fn settings() -> Geschilderd {
     let mut app = TranscriptApp::new(TranscriptApp::demo_backend()).with_tab(Tab::Settings);
     let out = ctx.run_ui(input(), |ui| app.paint(ui));
     let vormen: Vec<egui::Shape> = out.shapes.iter().map(|c| c.shape.clone()).collect();
+    let panel = |id| egui::containers::PanelState::load(&ctx, egui::Id::new(id)).unwrap().outer_rect;
+    let midden = panel("projects").right()..=panel("filetree").left();
     out.drop_without_applying_deltas();
     drop(ctx);
-    Geschilderd { vormen }
+    Geschilderd { vormen, midden }
 }
 
 /// De horizontale groepscheidingen, van boven naar beneden, als y.
 ///
 /// Een `Separator` roept `painter.hline` (`separator.rs:132`), en `hline` levert één
 /// `Shape::LineSegment` van `rect.left()` naar `rect.right()` op `rect.center().y`. Zoek dus
-/// horizontale segmenten breder dan de helft van het scherm: dat zijn de groepscheidingen, en geen
-/// hairline van een veld — die horen bij een `Rect`-stroke.
-fn scheidingen(vormen: &[egui::Shape]) -> Vec<f32> {
-    let mut ys: Vec<f32> = vormen
+/// brede horizontale segmenten in het middenpaneel, onder de tabs. Het formulier is 360 pt
+/// breed in dit testvenster. De breedtes van de zijpanelen veranderen die meting niet.
+fn scheidingen(geschilderd: &Geschilderd) -> Vec<f32> {
+    let mut ys: Vec<f32> = geschilderd
+        .vormen
         .iter()
         .filter_map(|shape| match shape {
             egui::Shape::LineSegment { points, .. } => {
                 let [p0, p1] = *points;
-                ((p0.y - p1.y).abs() < 0.5 && (p1.x - p0.x).abs() > SCREEN[0] * 0.35).then_some(p0.y)
+                ((p0.y - p1.y).abs() < 0.5
+                    && p0.y >= FORM_HOOG
+                    && geschilderd.midden.contains(&p0.x)
+                    && geschilderd.midden.contains(&p1.x)
+                    && (p1.x - p0.x).abs() > 180.0)
+                    .then_some(p0.y)
             }
             _ => None,
         })
@@ -140,7 +149,7 @@ fn het_formulier_schildert_zijn_groepscheidingen() {
     // zijn er geen banden om lucht tussen te meten. Het venster start op chat (`tests/tabs.rs`), dus
     // zonder `with_tab` staat hier een transcript en zijn er nul tot twee lijnen — gemeten.
     let geschilderd = settings();
-    let ys = scheidingen(&geschilderd.vormen);
+    let ys = scheidingen(&geschilderd);
     assert!(
         ys.len() >= 6,
         "het instellingenformulier tekent maar {aantal} groepscheidingen: de body is niet geschilderd",
@@ -156,7 +165,7 @@ fn twee_groepsbanden_plakken_niet_tegen_elkaar() {
     // (`SeparatorStyle::separator_style`: `spacing: 6.0`), en de klacht was dat dat plakken was.
     // Deze ondergrens is daarom geen verzinsel: GROUP_GAP is de marge die `group_break` zet.
     let geschilderd = settings();
-    let ys = scheidingen(&geschilderd.vormen);
+    let ys = scheidingen(&geschilderd);
     assert!(ys.len() >= 2, "te weinig banden om lucht tussen te meten: {ys:?}");
     for paar in ys.windows(2) {
         let vrij = paar[1] - paar[0];

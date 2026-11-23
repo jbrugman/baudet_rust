@@ -15,6 +15,7 @@
 //!    channels is both simpler and free of lock ordering.
 
 mod app;
+mod diff_view;
 // Publiek zodat tests/tabs.rs dat palet tekent en niet een standaard-`Visuals`: de vormen waarmee
 // die test maten vergelijkt, zijn de vormen van dit venster.
 pub mod clipboard;

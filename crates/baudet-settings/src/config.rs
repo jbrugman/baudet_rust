@@ -342,6 +342,10 @@ pub struct Settings {
     /// De breedte van het middenvlak plus de linkerbalk samen, dus de plek waar de bestandsboom
     /// begint (`AppConfig.kt:153`, `Main.kt:171`).
     pub right_divider: i32,
+    /// De gekozen breedte van de bestandsboom in punten. Nul gebruikt de oude scheidingspositie.
+    pub right_panel_width: i32,
+    /// De laatst gebruikte breedte en hoogte van het patchvenster in punten.
+    pub diff_window_size: Option<[f32; 2]>,
     /// De hoogte die de changes-lijst onder de bestandsboom krijgt (`AppConfig.kt:158`).
     ///
     /// De derde verdeelstand en dezelfde regel, met één verschil: hij loopt verticaal, dus zijn
@@ -439,6 +443,8 @@ impl Default for Settings {
             // verdeelstand en niet haar eigen fabriekswaarde (`AppConfig.kt:152-158`).
             left_divider: 0,
             right_divider: 0,
+            right_panel_width: 0,
+            diff_window_size: None,
             files_divider: 0,
             // Engels, zoals `AppConfig.kt:24`. Niet "de taal van deze machine": de origineler kiest
             // bewust een vaste default zodat een scherm dat iemand deelt, er overal gelijk uitziet.
@@ -919,11 +925,19 @@ mod tests {
             "een null in het bestand is geen breedte"
         );
 
-        let measured = Settings { left_divider: 311, right_divider: 940, files_divider: 168, ..Default::default() };
+        let measured = Settings {
+            left_divider: 311,
+            right_divider: 940,
+            right_panel_width: 300,
+            files_divider: 168,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&measured).unwrap();
         assert!(json.contains("\"left_divider\":311"), "het bestand noemt de stands: {json}");
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back, measured);
+        let legacy: Settings = serde_json::from_str(r#"{"right_divider":940}"#).unwrap();
+        assert_eq!((legacy.right_divider, legacy.right_panel_width), (940, 0));
     }
 
     /// Het fragment van `WindowLayout.resolveDivider` dat hier thuishoort: zonder vorige waarneming

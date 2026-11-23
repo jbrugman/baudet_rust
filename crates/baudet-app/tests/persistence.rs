@@ -112,9 +112,7 @@ fn een_beurt_overleeft_het_handvat() {
 
     let rows = reopened.rows();
     let bodies: Vec<String> = rows.iter().map(baudet_app::reducer::streamed_text).collect();
-    assert!(bodies.iter().any(|body| body == "vraag een"), "de vraag staat er weer: {bodies:?}");
-    assert!(bodies.iter().any(|body| body == "het eerste antwoord"), "het antwoord staat er weer: {bodies:?}");
-    assert_eq!(bodies.len(), 2, "twee regels en geen derde: {bodies:?}");
+    assert_eq!(bodies, ["vraag een", "het eerste antwoord"]);
 }
 
 #[test]
@@ -140,6 +138,7 @@ fn een_herstart_leest_niet_het_hele_verleden() {
         .expect("hetzelfde gesprek, dezelfde map");
 
     assert_eq!(reopened.rows().len() as u64, page::INITIAL as u64, "openen leest de staart, niet het bestand");
+    assert_eq!(baudet_app::reducer::streamed_text(reopened.rows().last().unwrap()), format!("antwoord {turns}"));
     let (has_more_older, cursor, _) = reopened.paging();
     assert!(has_more_older, "er staan {total} rijen op schijf, dit beeld houdt er {initial}", initial = page::INITIAL);
     assert!(cursor.is_some(), "een cursor hoort er te zijn zolang er ouder is");
@@ -161,7 +160,10 @@ fn een_herstart_leest_niet_het_hele_verleden() {
     let (has_more_older, _, _) = reopened.paging();
     assert!(!has_more_older, "scrollen eindigt bij de allereerste rij, niet halverwege");
     assert_eq!(reopened.rows().len() as u64, total, "elke rij één keer en de volledige lading: {} van {total}", reopened.rows().len());
-    assert_eq!(mentions_exact(&reopened, "vraag 1"), 1, "één rij per vraag, ook na scrollen");
+    let actual: Vec<_> = reopened.rows().iter().map(baudet_app::reducer::streamed_text).collect();
+    let expected: Vec<_> =
+        (1..=turns).flat_map(|index| [format!("vraag {index}"), format!("antwoord {index}")]).collect();
+    assert_eq!(actual, expected, "terugscrollen behoudt de gespreksvolgorde");
 }
 
 #[test]

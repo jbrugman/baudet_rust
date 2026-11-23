@@ -255,6 +255,8 @@ mod tests {
             // fabrikaat is 0, dus waarden die hier niet staan, bewijzen dat ze zijn weggeschreven.
             left_divider: 301,
             right_divider: 745,
+            right_panel_width: 320,
+            diff_window_size: Some([720.0, 460.0]),
             files_divider: 214,
             // Evenmin de default: de taal gaat door een eigen leespoort (`parse_language`), en een
             // rondreisje langs de default bewijst van zo'n veld niets - dan kan het zowel zijn

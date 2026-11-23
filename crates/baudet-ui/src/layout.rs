@@ -30,11 +30,14 @@ pub const CHANGES_MIN: f32 = 96.0;
 /// De smalste strook die een zijkolom ooit krijgen mag: de vloer die `tests/folder_row.rs` per
 /// constructie meet voor de maprij, en dus geen eigen voorkeur is maar de grens van die test.
 pub const PANEL_MIN: f32 = 180.0;
+pub(crate) const LEFT_PANEL_MIN: f32 = 190.0;
+pub(crate) const CENTER_MIN: f32 = 220.0;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Dividers {
     pub left: i32,
     pub right: i32,
+    pub right_width: i32,
     pub files: i32,
 }
 

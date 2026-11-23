@@ -231,11 +231,12 @@ impl Changes {
 /// been probed yet and for every switch, false while the same folder stays the subject. A folder
 /// that cannot be read asks once as well, because "no repository" is git's honest answer there and
 /// not one the panel may invent.
-pub fn file_tree_controls(
+fn file_tree_controls(
     ui: &mut Ui,
     workspace: &mut Workspace,
     meta: Option<&GitMeta>,
     changes: &[ChangedFile],
+    actions: &mut FileRowActions,
 ) -> bool {
     // De rechterstrook heeft geen map-invoerveld. De Kotlin `FileTreePanel` laat alleen de boom
     // en de knoppen `[Refresh] [Hidden files]` zien (`:126-131`) en leest de map uit het project
@@ -318,23 +319,7 @@ pub fn file_tree_controls(
                 // scheidingslijn tussen boom en wijzigingen maar de greep van zijn `JSplitPane`
                 // (`FileTreePanel.kt:103-113`), dus hoogte 0 is ook hier de oorspronkelijke vorm.
                 ui.add(egui::Separator::default().spacing(0.0));
-                // De boom vult de breedte, maar niet de hoogte.
-                //
-                // `auto_shrink([false, false])` in een verticale layout vraagt de rest van de
-                // (`scroll_area.rs`: `auto_shrink.y == false` → de gewenste hoogte is wat er
-                // beschikbaar is), en de kolom hieronder — de greep en de wijzigingenlijst in
-                // `changes_band` — hield dan nul pixels over.
-                //
-                // Gemeten in deze flank met een geopende map: 596 pt bij binnenkomst, 0 pt na
-                // `file_tree_controls`, en `changes_band` klemde zijn band toen op
-                // `column.max(floor)` met `column == 0` — de lijst bestond, maar had geen
-                // hoogte. Dat is precies "ik mis de filelisting onder de tree".
-                //
-                // `auto_shrink([false, true])`: de breedte blijft de volle strook — `JTree` volgt
-                // in de bron ook de viewport-breedte (`FileTreePanel.kt:554`) — maar de hoogte vraagt
-                // wat de rijen nodig hebben. Wat een boom van 300 pt in een kolom van 596 pt niet
-                // opvult, gaat naar de band eronder; wat hij wél nodig heeft, rolt hij zelf.
-                ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
+                ScrollArea::both().min_scrolled_height(0.0).auto_shrink([false, false]).show(ui, |ui| {
                     if !root.is_dir() {
                         // `showMessage(FileTreeNoRead)` (`FileTreePanel.kt:212-218`): een pad dat
                         // niet te lezen is, krijgt dezelfde reden als een map zonder Lezen.
@@ -349,7 +334,7 @@ pub fn file_tree_controls(
                     egui::CollapsingHeader::new(folder_name(cwd))
                         .id_salt(cwd.clone())
                         .default_open(true)
-                        .show(ui, |ui| tree(ui, workspace, &root, 1, &status, Some(&root)));
+                        .show(ui, |ui| tree(ui, workspace, &root, 1, &status, &root, actions));
                 });
             }
         }
@@ -407,23 +392,49 @@ pub enum SidebarIntent {
     Deleted,
 }
 
+/// Laat egui de scheidingslijn slepen. De inhoud krijgt een eigen viewport zodat haar
+/// gemeten grootte niet meetelt voor het frame of de opgeslagen paneelbreedte.
+fn side_panel(
+    ui: &mut Ui,
+    panel: Panel,
+    id: &str,
+    width: &mut f32,
+    min: f32,
+    max: f32,
+    body: impl FnOnce(&mut Ui),
+) {
+    let max = max.min(ui.available_width()).floor().max(0.0);
+    let visible = width.min(max);
+    let id = egui::Id::new(id);
+    if let Some(mut state) = egui::containers::PanelState::load(ui.ctx(), id) {
+        if (state.size().x - visible).abs() > 0.01 {
+            state.outer_rect.max.x = state.outer_rect.min.x + visible;
+            ui.ctx().data_mut(|data| data.insert_persisted(id, state));
+        }
+    }
+    let response = panel
+        .resizable(true)
+        .default_size(visible)
+        .size_range(min.min(max)..=max)
+        .frame(egui::Frame::side_top_panel(ui.style()))
+        .show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            let mut content = ui.new_child(egui::UiBuilder::new().id_salt("content"));
+            content.set_clip_rect(ui.clip_rect().intersect(content.max_rect()));
+            body(&mut content);
+        });
+    // egui rondt de rand af bij het tekenen. Tijdens een tijdelijke viewportbeperking
+    // blijft de gekozen maat bewaard, zodat die terugkomt zodra er weer plaats is.
+    if *width <= max {
+        *width = response.response.rect.width().round();
+    }
+}
+
 /// De linkersidebar. Geeft de intenties terug die deze pass heeft opgeleverd. De catalogus zelf is
 /// dan al bijgeschreven door `SidebarModel`, dus een intentie is nooit een verzoek om op te slaan.
-pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec<SidebarIntent> {
+pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: &mut f32, max: f32) -> Vec<SidebarIntent> {
     let mut intents = Vec::new();
-    let frame = Panel::left("projects")
-        .resizable(true)
-        // De volgorde is geen smuk: egui klemt `outer_size_range.min` op de default
-        // (`panel.rs:396` `clamp_range`), dus een `default_size` onder de vloer zou die vloer
-        // stiljes halveren. Eerst de vloer, dan de maat.
-        .min_size(190.0)
-        .default_size(width)
-        // 190 pt blijft de vloer, en de reden is dezelfde: de breedste riem van het paneel — het
-        // rechtenvakje met zijn titel plus de drie woorden van de disk-rij — is samen ~165 pt,
-        // plus de margering van de `Frame`. Een onthouden stand smaller dan dat bestaat niet, want
-        // `worth_remembering` laat een balk op de vloer als inklapping vallen.
-        .frame(egui::Frame::side_top_panel(ui.style()));
-    frame.show(ui, |ui| {
+    side_panel(ui, Panel::left("projects"), "projects", width, layout::LEFT_PANEL_MIN, max, |ui| {
         // --- bovenrij: één knop, één handeling per klik. ---
         let root = crate::app::root_ui_id(ui.ctx());
         // De vraag en de bevestiging staan niet meer in deze kolom. Ze stonden er tussen de knop en
@@ -460,10 +471,50 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
             model.start_name(NameAsk::NewProject, None);
         }
 
-        ui.separator();
+        let footer_id = egui::Id::new("project-details");
+        let previous = egui::containers::PanelState::load(ui.ctx(), footer_id);
+        let footer = Panel::bottom(footer_id).frame(egui::Frame::NONE).show(ui, |ui| {
+            // --- onderaan: de map van het gekozen project en wat de schijf ervan toestaat. ---
+            match model.permission_state() {
+                None => {
+                    // Geen selectie is geen map: dezelfde waarde als hierboven, met hetzelfde label
+                    // (`ProjectSidebar.kt:250-252` — `updateDetail` vult `FolderNone` en zet de
+                    // vinkjes uit), en niet een vierde zin die ik bedacht heb.
+                    ui.horizontal(|ui| {
+                        ui.label(FOLDER_LABEL);
+                        ui.label(dim(FOLDER_NONE));
+                    });
+                }
+                Some(state) => {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.strong(Texts::get(Key::FolderPermissionsTitle));
+                        // Twee cellen zoals de origineler ze tekent (`ProjectSidebar.kt:96-97`:
+                        // `BorderLayout.WEST` het label, `CENTER` de waarde), hier in één
+                        // horizontale riem. Eén geformatteerde zin maakte van `map:` en zijn waarde
+                        // één tekst en gaf daarmee twee woorden waar de bron er twee heeft.
+                        ScrollArea::horizontal().id_salt("project-folder").show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(FOLDER_LABEL);
+                                ui.add(egui::Label::new(state.folder.as_deref().unwrap_or(FOLDER_NONE)).extend());
+                            });
+                        });
+                        if let Some(capability) = &state.disk_capability {
+                            ui.label(dim(capability.clone()));
+                        }
+                        permission_boxes(ui, &state, model);
+                    });
+                }
+            }
+        });
+        // De hoogte wijzigt bijvoorbeeld bij een nieuwe projectselectie of taal.
+        if previous.map(|state| state.size().y) != Some(footer.response.rect.height()) {
+            ui.ctx().request_repaint();
+        }
+
+        ui.add(egui::Separator::default().spacing(0.0));
 
         // --- de boom: projecten met hun sessies, dan de inbox. ---
-        ScrollArea::vertical().id_salt("project-tree").auto_shrink([false, false]).show(ui, |ui| {
+        ScrollArea::both().id_salt("project-tree").min_scrolled_height(0.0).auto_shrink([false, false]).show(ui, |ui| {
             let projects = model.catalog().list_projects();
             for project in &projects {
                 let sessions = model.catalog().sessions_in(Some(&project.id));
@@ -511,38 +562,6 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: f32) -> Vec
             }
             row_menu(ui, &response.header_response, model, None, None, &mut intents);
         });
-
-        ui.separator();
-
-        // --- onderaan: de map van het gekozen project en wat de schijf ervan toestaat. ---
-        match model.permission_state() {
-            None => {
-                // Geen selectie is geen map: dezelfde waarde als hierboven, met hetzelfde label
-                // (`ProjectSidebar.kt:250-252` — `updateDetail` vult `FolderNone` en zet de
-                // vinkjes uit), en niet een vierde zin die ik bedacht heb.
-                ui.horizontal(|ui| {
-                    ui.label(FOLDER_LABEL);
-                    ui.label(dim(FOLDER_NONE));
-                });
-            }
-            Some(state) => {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.strong(Texts::get(Key::FolderPermissionsTitle));
-                    // Twee cellen zoals de origineler ze tekent (`ProjectSidebar.kt:96-97`:
-                    // `BorderLayout.WEST` het label, `CENTER` de waarde), hier in één
-                    // horizontale riem. Eén geformatteerde zin maakte van `map:` en zijn waarde
-                    // één tekst en gaf daarmee twee woorden waar de bron er twee heeft.
-                    ui.horizontal(|ui| {
-                        ui.label(FOLDER_LABEL);
-                        ui.label(state.folder.clone().unwrap_or_else(|| FOLDER_NONE.to_string()));
-                    });
-                    if let Some(capability) = &state.disk_capability {
-                        ui.label(dim(capability.clone()));
-                    }
-                    permission_boxes(ui, &state, model);
-                });
-            }
-        }
     });
     intents
 }
@@ -585,7 +604,7 @@ fn permission_boxes(ui: &mut Ui, state: &PermissionState, model: &mut SidebarMod
     let mut read = state.read;
     let mut write = state.write;
     let mut execute = state.execute;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         // Het vierkantje van een vinkje is net zo goed zichtbaar als een knop: de origineler geeft het
         // `CheckBox.icon.background` rgb(70,73,75) met rand rgb(105,107,109) — 1,88:1 en 3,18:1 op de
         // paneelkleur, gemeten uit FlatDarkLaf via de eigen jar. De statussen die hier golden gaven
@@ -1064,26 +1083,38 @@ fn copy_path_menu(row: &egui::Response, root: Option<&Path>, path: Option<&Path>
     chosen.map(|()| text)
 }
 
+#[derive(Default)]
+struct FileRowActions {
+    copy: Option<String>,
+    preview: Option<PathBuf>,
+}
+
+impl FileRowActions {
+    fn interact(&mut self, ui: &mut Ui, id: egui::Id, root: &Path, path: &Path) {
+        ui.set_min_width(ui.available_width().max(ui.min_rect().width()));
+        let row = ui.interact(ui.min_rect(), id, egui::Sense::click());
+        if row.double_clicked_by(egui::PointerButton::Primary) {
+            self.preview = Some(path.to_owned());
+        }
+        if let Some(text) = copy_path_menu(&row, Some(root), Some(path)) {
+            self.copy = Some(text);
+        }
+    }
+}
+
 /// Paint one directory level, descending through the headers the user has opened.
-///
-/// De retourwaarde is nieuw ten opzichte van de origineler en verandert niets aan wat er staat:
-/// een `JTree` deelt zijn klik met het menu via een listener, maar in onmiddellijke modus moet de
-/// tekening zelf zeggen wat er geklik is. Alleen de klik van deze niveau's bestandsrijen komt
-/// terug; een geopende map geeft de aanvraag van zijn eigen rijen door.
 fn tree(
     ui: &mut Ui,
     workspace: &mut Workspace,
     dir: &Path,
     depth: usize,
     status: &FileStatus,
-    root: Option<&Path>,
-) -> Option<String> {
+    root: &Path,
+    actions: &mut FileRowActions,
+) {
     let listing = workspace.tree_at(dir);
-    let mut copied = None;
     for path in &listing.files {
-        if let Some(text) = file_row(ui, path, status.get(path), root) {
-            copied = Some(text);
-        }
+        file_row(ui, path, status.get(path), root, actions);
     }
     // Said by the level that was cut, so the claim and the rows it describes are one unit: a folder
     // that fits never inherits another folder's warning.
@@ -1098,9 +1129,7 @@ fn tree(
                 if depth >= MAX_DEPTH {
                     ui.label(dim("…"));
                 } else {
-                    if let Some(text) = tree(ui, workspace, path, depth + 1, status, root) {
-                        copied = Some(text);
-                    }
+                    tree(ui, workspace, path, depth + 1, status, root, actions);
                 }
             },
         );
@@ -1110,20 +1139,18 @@ fn tree(
         // kind-riem mee zodat een map als dicht- en niet als leeg-lerend hoeft te lezen.
         ui.label(dim("empty folder"));
     }
-    copied
 }
 
 /// One file in the tree. A path git named wears git's colour -- the same three values as the changed
 /// list on the right, so a modified, added or new file reads identically on both sides -- while a
 /// path git left alone stays the panel's own dim. Dirs are never coloured here, as in the original:
 /// git reports states for files, and a coloured folder would claim a change it cannot name.
-fn file_row(ui: &mut Ui, path: &Path, change: Option<ChangeKind>, root: Option<&Path>) -> Option<String> {
+fn file_row(ui: &mut Ui, path: &Path, change: Option<ChangeKind>, root: &Path, actions: &mut FileRowActions) {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let colour = change.map_or(palette::DIM, ink_for);
     // De wikkel is de volle breedte, zoals `BaudetTree.getScrollableTracksViewportWidth` de bron
     // zijn rijen laat volgen (`FileTreePanel.kt:554`): een rechtermuisklik naast de naam opent bij
     // de origineler óók het menu, en een klik die alleen op de letters telt, zou dat verliezen.
-    let mut copied = None;
     ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::hover()), |ui| {
         ui.horizontal(|ui| {
             ui.add(
@@ -1131,20 +1158,8 @@ fn file_row(ui: &mut Ui, path: &Path, change: Option<ChangeKind>, root: Option<&
             )
             .on_hover_text(path.display().to_string());
         });
-        // Het vierkant van de wikkel is de rij, niet de letters: `ui.max_rect()` is de volle
-        // breedte die de wikkel inneemt, en geeft zo de klikplaats die `JTree` heeft omdat zijn
-        // rijen de viewport-breedte volgen (`getScrollableTracksViewportWidth`, `FileTreePanel.kt:554`).
-        // Een dubbelklik opent in de origineler géén externe app maar het eigen patchvenster
-        // (`DiffViewDialog`, `FileTreePanel.kt:186-190` + `openPatch` :420-466). Dat venster staat
-        // hier nog op TODO item G, dus een dubbelklik heeft nog niets om te tonen en blijft hier net
-        // zo stil als hij vóór deze regel al was — een `open`-oproep zou een handeling zijn die de
-        // bron niet kent.
-        let row = ui.interact(ui.max_rect(), ui.id().with(("file-row", path)), egui::Sense::hover());
-        if let Some(text) = copy_path_menu(&row, root, Some(path)) {
-            copied = Some(text);
-        }
+        actions.interact(ui, egui::Id::new(("file-row", path)), root, path);
     });
-    copied
 }
 
 /// De strook die de changes-lijst onder de boom krijgt: de hoogte van de greep erboven plus de
@@ -1159,48 +1174,37 @@ fn changes_band(
     changes: &Changes,
     chosen: Option<&str>,
     dividers: &mut layout::Dividers,
-) -> Option<String> {
+    actions: &mut FileRowActions,
+) {
     let column = ui.available_height();
     let stored = if dividers.files > 0 { dividers.files as f32 } else { layout::CHANGES_HEIGHT };
-    // De vloer van de origineler, met de kop van de lijst erbij: `MIN_FILES_VISIBLE` is wat er van
-    // de band zichtbaar moet blijven, en de kop is geen deel van die rijen.
     let header = ui.text_style_height(&egui::TextStyle::Heading) + ui.spacing().item_spacing.y;
-    let floor = layout::CHANGES_MIN + header;
-    let mut band = stored.clamp(floor, column.max(floor));
-    let handle = ui.available_rect_before_wrap();
-    let strip = egui::Rect::from_min_size(handle.min, egui::vec2(handle.width(), 6.0));
-    let grip = ui.interact(strip, egui::Id::new("files-split-handle"), egui::Sense::drag());
-    if grip.dragged() {
-        // Omlaag slepen maakt de band lager: de band is wat ónder de greep ligt.
-        band = (band - grip.drag_delta().y).clamp(floor, column.max(floor));
-        dividers.files = band as i32;
-        ui.ctx().request_repaint();
-    }
-    let hot = grip.hovered() || grip.dragged();
-    ui.painter().hline(
-        strip.x_range(),
-        strip.center().y,
-        egui::Stroke::new(if hot { 2.0 } else { 1.0 }, palette::BORDER),
-    );
-    // De band is wat er onder de greep overblijft. `allocate_ui_with_layout` geeft die strook een
-    // eigen vierkant binnen dezelfde flank, zodat de kolom één paneel blijft — de bron heeft ook
-    // één `SplitPane` in de rechterhelft en geen derde paneel naast de boom.
-    let height = layout::band_height(column, band);
-    let mut copied = None;
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), height),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            ui.set_max_height(height);
-            copied = changes_body(ui, changes, chosen);
-        },
-    );
-    copied
+    let max = (column - 100.0).max(0.0);
+    let floor = (layout::CHANGES_MIN + header).min(max);
+    let band = stored.clamp(floor, max);
+    Panel::bottom("filetree-changes")
+        .exact_size(band)
+        .frame(egui::Frame::NONE)
+        .show_separator_line(false)
+        .show(ui, |ui| {
+            let strip = ui.allocate_space(egui::vec2(ui.available_width(), 6.0)).1;
+            let grip = ui.interact(strip, egui::Id::new("files-split-handle"), egui::Sense::drag());
+            if grip.dragged() {
+                dividers.files = (band - grip.drag_delta().y).clamp(floor, max).round() as i32;
+                ui.ctx().request_repaint();
+            }
+            let hot = grip.hovered() || grip.dragged();
+            ui.painter().hline(
+                strip.x_range(),
+                strip.center().y,
+                egui::Stroke::new(if hot { 2.0 } else { 1.0 }, palette::BORDER),
+            );
+            changes_body(ui, changes, chosen, actions);
+        });
 }
 
 /// Het achterantwoord van de rechterfiletree: git-wijzigingen onder de mappenboom.
-fn changes_body(ui: &mut Ui, changes: &Changes, chosen: Option<&str>) -> Option<String> {
-    ui.separator();
+fn changes_body(ui: &mut Ui, changes: &Changes, chosen: Option<&str>, actions: &mut FileRowActions) {
     // De kop-rij van de origineler is één regel met één zin, geen kop plus een los aantal:
     // `FileTreePanel.kt:272-276` zet `changesHeader.text` op de notitie van git, het
     // schoon-cijfer, of `changes ({0})` (`Key.kt:391/394/395`). Zolang er geen map is, gaat die
@@ -1218,68 +1222,54 @@ fn changes_body(ui: &mut Ui, changes: &Changes, chosen: Option<&str>) -> Option<
     } else {
         format!("changes ({})", changes.paths.len())
     });
-    let mut copied = None;
-    // `chosen` is hier de projectmap: `maybePopupRows` relativizeert tegen `rootPath` en lost het
-    // git-pad daar binnen op (`FileTreePanel.kt:525-527`), precies wat `display_path` doet.
-    let root = chosen.map(Path::new);
-    ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        if chosen.is_none() || changes.unavailable || changes.meta.is_none() || changes.paths.is_empty() {
+    let Some(root) = chosen.map(Path::new) else { return };
+    ScrollArea::both().min_scrolled_height(0.0).auto_shrink([false, false]).show(ui, |ui| {
+        if changes.unavailable || changes.meta.is_none() {
             return;
         }
         for file in &changes.paths {
-            if let Some(text) = change_row(ui, file, root) {
-                copied = Some(text);
-            }
+            change_row(ui, file, root, actions);
         }
     });
-    copied
 }
 
 /// De rechterflank zoals `Main.kt:170` hem aan het venster vraagt: eerst de map, dan de wijzigingen.
-pub fn file_tree(
+pub(crate) fn file_tree(
     ui: &mut Ui,
     workspace: &mut Workspace,
     changes: &Changes,
     dividers: &mut layout::Dividers,
-    width: f32,
-) -> bool {
-    let frame = Panel::right("filetree")
-        .resizable(true)
-        // Zelfde regel als links: vloer eerst, want `default_size` klemt hem.
-        // 180 pt is de ondergrens die de gemeten folderrij per constructie aankan
-        // (tests/folder_row.rs).
-        .min_size(180.0)
-        // De strook was 280 pt, uit mijn hoofd. De origineler meet de bestandsboom op het
-        // verschil tussen het venster en `rightDivider` (`Main.kt:171`, val 720), en in een venster
-        // van 1040 pt is dat verschil 320 pt — dus dat is de fabrieksbreedte hier.
-        .default_size(width)
-        .frame(egui::Frame::side_top_panel(ui.style()));
-    let chosen = workspace.cwd().map(|s| s.to_string());
-    let mut refresh: Option<bool> = None;
-    // De boom en de lijst kunnen allebei een kopieeractie opleveren; één pass hoeft er maar één te
-    // doen, want de bron laat één klik één popup openen en die sluit bij de volgende.
-    let mut copied: Option<String> = None;
-    frame.show(ui, |ui| {
-        refresh = Some(file_tree_controls(ui, workspace, changes.meta(), changes.paths()));
-        // De verdeeling die de origineler met een `JSplitPane` tekent: boom boven, changes eronder,
-        // en tussen die twee een greep die iemand kan pakken (`FileTreePanel.kt:103-113`).
-        copied = changes_band(ui, changes, chosen.as_deref(), dividers);
+    width: &mut f32,
+    max: f32,
+) -> (bool, Option<crate::diff_view::Request>) {
+    let chosen = workspace.cwd().map(str::to_owned);
+    let mut refresh = false;
+    let mut actions = FileRowActions::default();
+    side_panel(ui, Panel::right("filetree"), "filetree", width, layout::PANEL_MIN, max, |ui| {
+        changes_band(ui, changes, chosen.as_deref(), dividers, &mut actions);
+        refresh = file_tree_controls(ui, workspace, changes.meta(), changes.paths(), &mut actions);
     });
-    // De kopie zelf is het gevolg: `copyPathPopup` zet het klembord en zegt niets (`:533-538`), en
-    // er is in de origineler geen statusregel voor. Een "copied …"-tekst zou gedrag zijn dat de
-    // bron niet heeft, dus een mislukt klembord blijft hier ook stil — het pad staat immers wél
-    // in de popup-tekst die iemand al zag. Wat wél blijft, is dat de poging plaatsvindt.
-    if let Some(text) = copied {
+    if let Some(text) = actions.copy {
         let _ = crate::clipboard::copy(&text);
     }
-    refresh.unwrap_or(false)
+
+    let preview = actions.preview.zip(chosen).and_then(|(path, root)| {
+        let relative = relative_to(&root, &path)?;
+        let change = changes.paths.iter().find(|file| file.path == relative);
+        Some(crate::diff_view::Request {
+            root,
+            relative,
+            in_repo: changes.meta.is_some() || changes.unavailable,
+            old_path: change.and_then(|file| file.old_path.clone()),
+        })
+    });
+    (refresh, preview)
 }
 
 /// One path git reports: its state, its name, and git's own counts.
-fn change_row(ui: &mut Ui, file: &ChangedFile, root: Option<&Path>) -> Option<String> {
+fn change_row(ui: &mut Ui, file: &ChangedFile, root: &Path, actions: &mut FileRowActions) {
     let ink = ink_for(file.change);
     let body_ink = if file.change.exists_on_disk() { palette::TEXT } else { palette::DIM };
-    let mut copied = None;
     ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::hover()), |ui| {
         ui.horizontal(|ui| {
             ui.add(
@@ -1310,19 +1300,8 @@ fn change_row(ui: &mut Ui, file: &ChangedFile, root: Option<&Path>) -> Option<St
                 });
             }
         });
-        // Zelfde volle-breedte-regel als de boom, en dezelfde `displayPath`: git noemt een
-        // repository-relatief pad, dus de riem toont het relatieve en kopiéért het relatieve
-        // (`maybePopupRows` lost `row.relPath` op in `rootPath`, `FileTreePanel.kt:525-527`).
-        let git_path = root.map(|root| root.join(&file.path));
-        // Een dubbelklik opent ook hier het patchvenster van de origineler (`openChange`,
-        // `FileTreePanel.kt:155-160`), niet een externe app; dat venster is TODO item G, dus de klik
-        // blijft stil tot het er is — `Sense::hover` kent alleen het kopieermenu, zoals de bytes hier.
-        let row = ui.interact(ui.max_rect(), ui.id().with(("change-row", &file.path)), egui::Sense::hover());
-        if let Some(text) = copy_path_menu(&row, root, git_path.as_deref()) {
-            copied = Some(text);
-        }
+        actions.interact(ui, egui::Id::new(("change-row", &file.path)), root, &root.join(&file.path));
     });
-    copied
 }
 
 /// The branch line, in the words the probe actually managed to produce.
@@ -1366,14 +1345,15 @@ fn ink_for(change: ChangeKind) -> Color32 {
 }
 
 /// The name a `ChangedFile` reaches from an absolute path in the tree, or `None` for a path outside
-/// the folder git was asked about. Git reports repository-relative paths, so matching the left
-/// panel's absolute rows to its statuses means cutting the repository root off the front -- the
-/// same string both sides share; a path that is not below it is not one git named.
+/// the folder git was asked about. The right panel matches each absolute row to a project-relative Git path.
 fn relative_to(root: &str, path: &Path) -> Option<String> {
-    path.strip_prefix(root).ok().map(|rel| rel.to_string_lossy().into_owned())
+    path.strip_prefix(root)
+        .ok()
+        .and_then(Path::to_str)
+        .map(|rel| rel.replace(std::path::MAIN_SEPARATOR, "/"))
 }
 
-/// The status of a path in the tree, looked up by the repository-relative name git uses. The tree
+/// The status of a path in the tree, looked up by its project-relative name. The tree
 /// walks a directory at a time and asks per file; a map built once per paint keeps that a lookup
 /// rather than a scan of every changed path.
 struct FileStatus {

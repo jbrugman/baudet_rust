@@ -88,7 +88,7 @@ impl SessionContext {
 /// git counted an empty change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangedFile {
-    /// Repository-relative path, exactly as git spelled it.
+    /// Path relative to the project folder, using Git's slash separators.
     pub path: String,
     /// Lines added, when git counted them. `None` for a binary path, for `numstat`'s `-`.
     pub additions: Option<u32>,
@@ -160,8 +160,8 @@ impl ChangeKind {
             ('D', ' ') => ChangeKind::Deleted,
             ('D', _) => ChangeKind::Removed,
             (' ', 'D') => ChangeKind::Removed,
-            ('R', _) => ChangeKind::Renamed,
-            ('C', _) => ChangeKind::Copied,
+            ('R', _) | (_, 'R') => ChangeKind::Renamed,
+            ('C', _) | (_, 'C') => ChangeKind::Copied,
             ('M', _) | (_, 'M') => ChangeKind::Modified,
             _ => ChangeKind::Other,
         }
@@ -226,10 +226,9 @@ pub fn probe_git(cwd: &str) -> Option<GitMeta> {
     })
 }
 
-/// The paths `cwd` holds differently from its commit, or `None` when there is no repository to
-/// ask.
+/// Changes inside `cwd`, with paths relative to that folder. Returns `None` if Git cannot answer.
 ///
-/// Two queries and no more. `status --porcelain=v1 -z` names the paths and their state, and
+/// `status --porcelain=v1 -z` names the paths and their state, and
 /// `diff --numstat HEAD` supplies the counts; the `-z` form is what makes this parseable at all,
 /// because git then separates records with NUL and stops quoting non-ASCII paths, so a folder
 /// called `café` arrives as `café` rather than as an octal escape a caller would have to undo.
@@ -239,62 +238,70 @@ pub fn probe_git(cwd: &str) -> Option<GitMeta> {
 /// binary path shows as counted-but-uncountable, `-` in both columns. Neither becomes a zero.
 pub fn probe_changes(cwd: &str) -> Option<Vec<ChangedFile>> {
     probe_git(cwd)?;
-    let status = raw(cwd, &["status", "--porcelain=v1", "-z", "--untracked-files=all"])?;
+    let prefix = raw(cwd, &["rev-parse", "--show-prefix"])?;
+    let prefix = prefix.trim_end_matches('\n');
+    let status = raw(cwd, &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."])?;
     // Counting needs a commit to count against, and before the first commit there is none: measured,
     // `diff --numstat HEAD --` exits 128 with `bad revision 'HEAD'`. A query that cannot be made is
     // not a probe that failed, so paths are still listed and carry git's absence of counts.
-    let counts = raw(cwd, &["diff", "--numstat", "HEAD", "--"]).as_deref().and_then(parse_numstat).unwrap_or_default();
+    let counts =
+        raw(cwd, &["diff", "--no-ext-diff", "--no-textconv", "--no-relative", "--numstat", "HEAD", "--", "."])
+            .as_deref()
+            .and_then(parse_numstat)
+            .unwrap_or_default();
     let mut files = Vec::new();
-    let mut pending_old_path: Option<String> = None;
-    for record in status.split('\0') {
-        if record.is_empty() {
-            continue;
-        }
-        // Two measured shapes. A state record is `XY path`, and porcelain v1 writes the pair
-        // followed by a space only when X is a letter: a written-on-disk file is `" M f.txt"` and
-        // an untracked one is `"?? brandnew.rs"` with no space at all — a parser that insists on
-        // the space loses every untracked path. The other shape is the old name of a rename or
-        // copy, which git emits immediately before its `R`/`C` record as a bare path: no letters,
-        // no space. It is consumed as the origin of the record that follows it, so a rename shows
-        // as one honest row instead of one row plus a phantom.
-        let mut chars = record.chars();
-        let (Some(x), Some(y)) = (chars.next(), chars.next()) else { continue };
-        let path: String;
-        let change;
-        if x != '?' && chars.next() == Some(' ') {
-            change = ChangeKind::from_xy(x, y);
-            path = chars.collect();
-        } else if x == '?' && y == '?' {
-            change = ChangeKind::Untracked;
-            path = record[3..].to_string();
-        } else {
-            pending_old_path = Some(record.to_string());
-            continue;
-        }
-        if path.is_empty() {
-            continue;
-        }
-        // A rename counts against the name it came from, so the row carries the old name rather
-        // than the new one: measured, `git mv g.md sub/café.md` reports `0\t2\tg.md` while status
-        // names `sub/café.md`. A staged rename also has no `HEAD` diff of its own, which is why its
-        // counts are usually absent rather than wrong.
-        let lookup = match &change {
-            ChangeKind::Renamed | ChangeKind::Copied => pending_old_path.clone().unwrap_or_else(|| path.clone()),
-            _ => path.clone(),
-        };
-        let (additions, deletions) = counts.get(&lookup).copied().unwrap_or((None, None));
-        let old_path = if matches!(change, ChangeKind::Renamed | ChangeKind::Copied) {
-            pending_old_path.take()
-        } else {
-            pending_old_path = None;
-            None
-        };
-        files.push(ChangedFile { path, additions, deletions, change, old_path });
+    let mut records = status.split_terminator('\0');
+    while let Some(record) = records.next() {
+        let [x, y, b' ', ..] = record.as_bytes() else { continue };
+        let change = ChangeKind::from_xy(*x as char, *y as char);
+        // In NUL-delimited porcelain Git places the source after the destination.
+        let old_path = if matches!(x, b'R' | b'C') || matches!(y, b'R' | b'C') { records.next() } else { None };
+        let repo_path = &record[3..];
+        let Some(path) = repo_path.strip_prefix(prefix).filter(|p| !p.is_empty()) else { continue };
+        let (additions, deletions) = counts.get(old_path.unwrap_or(repo_path)).copied().unwrap_or((None, None));
+        let old_path = old_path.and_then(|path| path.strip_prefix(prefix)).map(str::to_owned);
+        files.push(ChangedFile { path: path.to_owned(), additions, deletions, change, old_path });
     }
     // Git emits status in path order already; sorting again keeps that true on a repository whose
     // collation differs, which is the only reason it is here.
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Some(files)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum FilePatch {
+    Diff(String),
+    Untracked,
+    Unchanged,
+}
+
+/// Read one project-relative patch, preferring the working tree to the index.
+pub fn probe_patch(cwd: &str, path: &str, old_path: Option<&str>) -> Option<FilePatch> {
+    use std::path::{Component, Path};
+
+    let literal_path = |path: &str| {
+        !path.is_empty() && Path::new(path).components().all(|part| matches!(part, Component::Normal(_)))
+    };
+    if !literal_path(path) || old_path.is_some_and(|path| !literal_path(path)) {
+        return None;
+    }
+    const PATCH_LIMIT: u64 = 1_000_000;
+    let read_patch = |staged: bool| {
+        let mut args = vec!["--literal-pathspecs", "-c", "core.quotePath=false", "diff"];
+        args.extend(staged.then_some("--cached"));
+        args.extend(["--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--", path]);
+        args.extend(old_path);
+        raw_with_limit(cwd, &args, Some(PATCH_LIMIT))
+    };
+    for staged in [false, true] {
+        let output = read_patch(staged)?;
+        if !output.is_empty() {
+            return Some(FilePatch::Diff(output));
+        }
+    }
+    // Resolve this at open time so a file created since the last status refresh still has a patch.
+    let untracked = raw(cwd, &["--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "--", path])?;
+    Some(if untracked.is_empty() { FilePatch::Unchanged } else { FilePatch::Untracked })
 }
 
 /// `numstat` rows as a path map. `None` only when the query itself failed, so an empty repository
@@ -401,6 +408,10 @@ fn non_empty_trimmed(output: String) -> Option<String> {
 /// Used where the bytes between records are the data: `status -z` delimits with NUL and `numstat`
 /// delimits with tabs, and neither survives a trim of the whole stream.
 fn raw(cwd: &str, args: &[&str]) -> Option<String> {
+    raw_with_limit(cwd, args, None)
+}
+
+fn raw_with_limit(cwd: &str, args: &[&str], limit: Option<u64>) -> Option<String> {
     let child = std::process::Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -415,7 +426,7 @@ fn raw(cwd: &str, args: &[&str]) -> Option<String> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
-    wait_output(child)
+    wait_output(child, limit)
 }
 
 /// Collect a child's stdout without ever blocking past the probe's budget.
@@ -425,13 +436,21 @@ fn raw(cwd: &str, args: &[&str]) -> Option<String> {
 /// kill. Same shape here: stdout drains on a worker, the wait has a timeout, and a child that
 /// outlives it is killed. `recv_timeout` rather than a blocking `recv` because the worker can
 /// legitimately outlive a stalled child, and the deadline must end the probe either way.
-fn wait_output(mut child: std::process::Child) -> Option<String> {
+fn wait_output(mut child: std::process::Child, limit: Option<u64>) -> Option<String> {
+    use std::io::Read;
+
     let mut stdout = child.stdout.take()?;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let mut buffer = String::new();
-        let read = std::io::Read::read_to_string(&mut stdout, &mut buffer);
-        let _ = tx.send(read.ok().map(|_| buffer));
+        let output = if let Some(limit) = limit {
+            let mut bytes = Vec::new();
+            stdout.take(limit + 1).read_to_end(&mut bytes).ok().filter(|&size| size as u64 <= limit)
+                .map(|_| String::from_utf8_lossy(&bytes).into_owned())
+        } else {
+            let mut text = String::new();
+            stdout.read_to_string(&mut text).ok().map(|_| text)
+        };
+        let _ = tx.send(output);
     });
     match rx.recv_timeout(GIT_PROBE_TIMEOUT) {
         Ok(Some(output)) => match child.wait().ok() {
@@ -684,6 +703,49 @@ mod changes_tests {
     fn a_plain_folder_has_no_changes_to_show() {
         let dir = tempfile::TempDir::new().unwrap();
         assert_eq!(probe_changes(&dir.path().to_string_lossy()), None);
+    }
+
+    #[test]
+    fn patch_reads_the_worktree_before_the_index_and_treats_paths_literally() {
+        let folder = scratch().expect("Git fixture");
+        let cwd = folder.path().to_str().unwrap();
+        let path = "[f].txt";
+        std::fs::write(folder.path().join(path), "staged\n").unwrap();
+        raw(cwd, &["--literal-pathspecs", "add", "--", path]).expect("stage the literal path");
+        let diff = |path| match probe_patch(cwd, path, None).unwrap() {
+            FilePatch::Diff(patch) => patch,
+            other => panic!("expected a patch for {path}, got {other:?}"),
+        };
+        let staged = diff(path);
+        assert!(staged.contains("+staged\n"));
+        std::fs::write(folder.path().join(path), "unstaged\n").unwrap();
+        let unstaged = diff(path);
+        assert!(unstaged.contains("-staged\n+unstaged\n"));
+        assert!(!unstaged.contains("f.txt"));
+        assert!(probe_patch(cwd, "../other.txt", None).is_none());
+        assert!(diff("bin.dat").contains("Binary files"));
+        assert!(diff("sub/g.md").contains("deleted file mode"));
+        assert_eq!(probe_patch(cwd, "brandnew.rs", None), Some(FilePatch::Untracked));
+    }
+
+    #[test]
+    fn a_project_subfolder_gets_its_own_paths_and_both_sides_of_a_rename() {
+        let folder = scratch().expect("Git fixture");
+        let cwd = folder.path().to_str().unwrap();
+        raw(cwd, &["restore", "--", "sub/g.md"]).expect("restore the tracked file");
+        raw(cwd, &["mv", "sub/g.md", "sub/naïve.md"]).expect("stage a rename");
+        let subfolder = folder.path().join("sub");
+        let subfolder = subfolder.to_str().unwrap();
+        let changes = probe_changes(subfolder).unwrap();
+        assert_eq!(changes.len(), 1, "outside changes are excluded");
+        let change = &changes[0];
+        assert_eq!(change.change, ChangeKind::Renamed);
+        assert_eq!(change.path, "naïve.md");
+        assert_eq!(change.old_path.as_deref(), Some("g.md"));
+        let Some(FilePatch::Diff(patch)) = probe_patch(subfolder, &change.path, change.old_path.as_deref()) else {
+            panic!("expected a rename patch");
+        };
+        assert!(patch.contains("rename from sub/g.md\nrename to sub/naïve.md\n"), "{patch}");
     }
 
     #[test]

@@ -109,3 +109,57 @@ fn het_palet_geeft_de_knoppen_het_veld_dat_de_tekenaar_haalt() {
     assert_eq!(widgets.hovered.weak_bg_fill, baudet_ui::palette::BUTTON_HOVER);
     assert_eq!(widgets.active.weak_bg_fill, baudet_ui::palette::BUTTON_PRESSED);
 }
+
+#[test]
+fn beide_chatknoppen_passen_onderin_een_smal_venster() {
+    let ctx = egui::Context::default();
+    baudet_ui::palette::install(&ctx);
+    let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+    let mut narrow = input();
+    narrow.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(650.0, 360.0)));
+    ctx.run_ui(narrow.clone(), |ui| app.paint(ui)).drop_without_applying_deltas();
+    let out = ctx.run_ui(narrow, |ui| app.paint(ui));
+    let composer = egui::containers::PanelState::load(&ctx, egui::Id::new("composer")).unwrap().outer_rect;
+    for key in [baudet_i18n::Key::SendButton, baudet_i18n::Key::StopButton] {
+        let label = baudet_i18n::Texts::get(key);
+        assert!(
+            out.shapes.iter().any(|shape| {
+                let egui::Shape::Text(text) = &shape.shape else { return false };
+                let rect = egui::Rect::from_min_size(text.pos, text.galley.size());
+                text.galley.text() == label && composer.contains_rect(rect) && shape.clip_rect.contains_rect(rect)
+            }),
+            "{label} is niet volledig zichtbaar in {composer:?}"
+        );
+    }
+    out.drop_without_applying_deltas();
+}
+
+#[test]
+fn de_koplijn_blijft_buiten_de_tekst_van_hidden_files() {
+    let ctx = egui::Context::default();
+    baudet_ui::palette::install(&ctx);
+    let mut app = TranscriptApp::new(TranscriptApp::demo_backend())
+        .with_status_balk("http://localhost:1234/v1 • local endpoint".into());
+    ctx.run_ui(input(), |ui| app.paint(ui)).drop_without_applying_deltas();
+    let out = ctx.run_ui(input(), |ui| app.paint(ui));
+    let label = baudet_i18n::Texts::get(baudet_i18n::Key::FileTreeHidden);
+    let text_rect = out
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == label => {
+                Some(egui::Rect::from_min_size(text.pos, text.galley.size()))
+            }
+            _ => None,
+        })
+        .expect("Hidden files moet zichtbaar zijn");
+    for shape in &out.shapes {
+        if let egui::Shape::LineSegment { points: [a, b], .. } = shape.shape {
+            if a.y == b.y {
+                let line = egui::Rect::from_two_pos(a, b).intersect(shape.clip_rect);
+                assert!(!line.intersects(text_rect), "scheidingslijn {line:?} kruist {label} op {text_rect:?}");
+            }
+        }
+    }
+    out.drop_without_applying_deltas();
+}

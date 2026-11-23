@@ -352,6 +352,8 @@ impl SettingsView {
         // niemand aan zat niet op de fabrieksstand terugvallen.
         self.stored_context.left_divider = settings.left_divider;
         self.stored_context.right_divider = settings.right_divider;
+        self.stored_context.right_panel_width = settings.right_panel_width;
+        self.stored_context.diff_window_size = settings.diff_window_size;
         self.stored_context.files_divider = settings.files_divider;
         // De kiezer laat het bestandwoord zien en niet een vertaalde naam: hetzelfde argument als
         // bij de systeemprompt daarboven (`SettingsPanel.kt:258-261` over de raw stored text). Wat
@@ -435,6 +437,8 @@ impl SettingsView {
             learned_context_key: self.stored_context.learned_context_key.clone(),
             left_divider: self.stored_context.left_divider,
             right_divider: self.stored_context.right_divider,
+            right_panel_width: self.stored_context.right_panel_width,
+            diff_window_size: self.stored_context.diff_window_size,
             files_divider: self.stored_context.files_divider,
             language: self.language,
         })
@@ -447,6 +451,7 @@ impl SettingsView {
         crate::layout::Dividers {
             left: self.stored_context.left_divider,
             right: self.stored_context.right_divider,
+            right_width: self.stored_context.right_panel_width,
             files: self.stored_context.files_divider,
         }
     }
@@ -455,7 +460,16 @@ impl SettingsView {
     pub fn set_dividers(&mut self, dividers: &crate::layout::Dividers) {
         self.stored_context.left_divider = dividers.left;
         self.stored_context.right_divider = dividers.right;
+        self.stored_context.right_panel_width = dividers.right_width;
         self.stored_context.files_divider = dividers.files;
+    }
+
+    pub(crate) fn diff_window_size(&self) -> Option<[f32; 2]> {
+        self.stored_context.diff_window_size
+    }
+
+    pub(crate) fn set_diff_window_size(&mut self, size: [f32; 2]) {
+        self.stored_context.diff_window_size = Some(size);
     }
 
     /// De taal die het gelezen bestand draagt, voor de vensterbouwer die vóór de eerste pass
@@ -477,6 +491,7 @@ impl SettingsView {
         let mut settings = self.draft()?;
         settings.left_divider = dividers.left;
         settings.right_divider = dividers.right;
+        settings.right_panel_width = dividers.right_width;
         settings.files_divider = dividers.files;
         Ok(settings)
     }
@@ -1809,7 +1824,7 @@ git com"
         // die niemand voor een taalwijziging maakt — die mag eenmaal gekozen taal niet wissen.
         panel.adopt(&panel.draft().unwrap());
         assert_eq!(panel.language, Language::Nl);
-        let dividers = crate::layout::Dividers { left: 1, right: 2, files: 3 };
+        let dividers = crate::layout::Dividers { left: 1, right: 2, right_width: 4, files: 3 };
         assert_eq!(panel.geometry_draft(&dividers).unwrap().language, Language::Nl);
     }
 

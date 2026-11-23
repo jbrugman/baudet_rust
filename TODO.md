@@ -7,13 +7,11 @@ gebouwd én getest; `[ ]` = bestaat niet of niet volledig. Twistt de lijst met d
 
 ## Beslisregel (bij elk item hieronder)
 
-1. **Zeker?** Gewoon bouwen op `main`.
-2. **Niet zeker of richtingbepalend?** Snapshot (commit + `git tag`), nieuwe `codex/*`-branch,
-   README-aanpassing met besluit + reden erbij, `main` onaangeroerd, doorbouwen. Altijd een punt om
-   naar terug te keren; een omgegooide poging ruimt niets op.
-3. **Dragende regel van deze port:** een widget bestaat pas als het domein eronder bestaat. Eerst het
+1. **Dragende regel van deze port:** een widget bestaat pas als het domein eronder bestaat. Eerst het
    domein (crate + tests), dan de UI die het toont. De eerste ronde bouwde widgets die niets bedienden
    omdat het domein ontbrak — niet herhalen.
+2. **Lokale modellen blijven van de frontend af.** Geef ze geen opdrachten die bestanden onder
+   `crates/baudet-ui` wijzigen.
 
 ## Hoe een item wordt aangepakt
 
@@ -72,7 +70,7 @@ writes/gepinde calls blijven serieel.
 - [x] Lay-out uit `Main.kt:150-170`: `[ ProjectSidebar | Chat/Settings ]  [ FileTree ]`. Sidebar links, bestandsboom rechts; README-besluit "projecten links". commit `af9b336`.
 - [x] Linker `ProjectSidebar`: projecten-boom + sessies eronder + `Unassigned` + Add-project + read/write/execute-vakjes + contextmenu (hernoemen, map koppelen/ontkoppelen, archiveren, verwijderen met cascade + bevestigingsriem). Domein in `sidebar.rs`, tekening in `panels::project_sidebar`, 12 testen in `tests/project_tree.rs`. `ui/ProjectSidebar.kt` (embed-match 0.53). commit `af9b336`.
 - [x] Twee onafhankelijke toolbar-toggles: sidebar in/uit (west) en bestandsboom in/uit (oost) — `sidebarToggle` + de NORTH-toolbar in `Main.kt:176-184,247-269`. De toggle is een eigen `Widget` met het id van de aanroeper, geplaatst met `Ui::put` op een eigen vierkant op de rand van de kop (niet als knop in de rij — een wikkel daar erft de volle root-breedte en wordt onbereikbaar, gemeten). Verbergen tekent het paneel gewoon niet; `PanelState` onthoudt de breedte, dus hij keert er exact op terug. Tests: 4 in `tests/panel_toggles.rs` (klik → vlag om + breedte behouden, weer klik → terug op dezelfde breedte). commit `254a951`.
-- [~] Git-kleuren in de bestandsboom: de boom **rechts** kleurt nu bestandsrijen met de rgb-waarden van de origineler (`BaudetPalette.kt:65-67`: added/modified/renamed groen 46,160,67 · deleted rood 210,70,70 · untracked blauw 130,170,220), opgezocht per repository-relatief pad uit `probe_changes`; mappen blijven kleurloos zoals in `FileTreePanel.colorFor`. De rechterstrook deelt nu de mappenboom en de `changes`-lijst in één `FileTreePanel`, en schakelt van de diff-inkten naar dezelfde tabel, zodat een pad overal één kleur leest. **Restant:** dubbelklik = patch-venster (`DiffViewDialog`) staat nog als item G (`git/` + `diff/`); unit-tests in `panels::tests` (kleurentabel, `relative_to`, `FileStatus`). commit `254a951`.
+- [x] De rechter bestandsboom en wijzigingenlijst gebruiken dezelfde Git-statuskleuren uit `BaudetPalette.kt:65-67`. Paden zijn relatief aan de gekoppelde projectmap. Dubbelklik in beide lijsten opent de patchviewer voor één bestand (G). Geverifieerd in `panels::tests` en `tests/git_diff_view.rs`.
 - Splitsing van C: de **sessie-lading** (`OpenSession` → transcript uit de rollout) staat als item D; `SidebarIntent::OpenSession` onthoudt nu alleen het gekozen sessie-id.
 
 ## D. Sessies (na C)
@@ -169,14 +167,23 @@ writes/gepinde calls blijven serieel.
 - [ ] `Compactor`/`CompactionPlan`/`CompactionOutcome` (vouwen over meerdere calls, eerlijk bij niets) — `session/Compactor*.kt` + compaction-fold.puml.
 
 ## G. Git- en diff-laag (nodig voor C + E)
-- [~] `GitCommand` is omgezet naar `git_command.rs` (zie item E). **Restant:** `GitInspector`/`GitStatus`/`FileChange` — `git/`.
-- [ ] `UnifiedDiff`/`LineDiff`/`DiffHighlight`/`DiffLineKind` + `NewFileDiff` — `diff/` (embed 0.70) + `ui/NewFileDiff.kt`.
-- [ ] `DiffViewDialog` (gekleurde git patch) — `ui/DiffViewDialog.kt`.
-- [ ] Dubbelklik in de linker bestandsboom opent die patch voor één pad (kleuren staan er al; de dialoog is dit venster) — sluit het restant van item C af.
+- [x] `GitCommand` staat bij item E. Git-status, wijzigingstypen en patches per pad staan in
+  `baudet-core/src/context.rs`. De status gebruikt projectrelatieve paden, ook in een submap
+  van een repository. Een hernoeming neemt beide namen mee. De viewer vraagt eerst de unstaged
+  patch op en valt terug op de index.
+- [x] `UnifiedDiff`, `LineDiff` en classificatie van diffregels staan in `baudet-tool/src/diff.rs`.
+  De viewer gebruikt dezelfde classificatie. `diff_view.rs` toont nieuwe, untracked tekstbestanden
+  als toevoegingen en begrenst wat er van een bestand wordt ingelezen en getoond.
+- [x] Gekleurde patchviewer in `baudet-ui/src/diff_view.rs`. Git en bestandslezing gebeuren buiten
+  de UI-thread. Leesbare tekstbestanden hebben een aparte bestandsweergave. Het venster onthoudt
+  zijn afmetingen via de instellingen.
+- [x] Dubbelklik in de rechter bestandsboom en in de wijzigingenlijst opent de patch van dat bestand.
+  `tests/git_diff_view.rs` controleert beide ingangen, de patchkleuren en de bestandsweergave.
+  Git-tests dekken onder meer staged en unstaged, submappen, hernoemingen, verwijderingen en binaire bestanden.
 
 ## H. i18n (na C)
 - [x] `Key`/`Language`/`Texts` NL/EN/FR/DE, runtime wissel, EN default — `i18n/` (embed 0.61). Lokaal-honesty-note reger.
-      Crate `baudet-i18n`: 264 sleutels × 4 talen, byte-voor-byte uit `i18n/Key.kt`, en de generator
+      Crate `baudet-i18n`: 264 sleutels uit `i18n/Key.kt` en 3 Rust-sleutels voor de patchviewer, elk in 4 talen. De generator
       (`/tmp/i18n/gen.py` + `keys.json`) is de bron — een gegenereerd bestand repareer je in de
       generator, niet in de output. Draad door de UI: `settings.language` (serde-lezer die een
       onbekend woord op En laat vallen), `Texts::set_language` bij het openen (`AppState.kt:195`) en

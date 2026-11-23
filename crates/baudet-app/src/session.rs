@@ -429,11 +429,8 @@ impl AppState {
             active.oldest_loaded_seq = older_seq;
             return 0;
         }
-        // Gemeten: de opslag levert per beurt `tu_N/msg` vóór `tu_N/user` (de emitter sluit de
-        // beurt in die volgorde af, en `persist` appendt zoals hij ze kreeg). `active.items` is
-        // chronologisch omgekeerd daarvan - de vraag van een beurt staat er langer. De opslag-pagina
-        // is chronologisch; omkeren en vooraan-inserten maakt er de items-volgorde van. De cursor
-        // (`older_seq`) komt rechtstreeks van de opslag en is onafhankelijk van deze lijstvolgorde.
+        // De opslag levert de pagina chronologisch. Voeg vanaf de laatste rij vooraan in
+        // zodat die volgorde bewaard blijft.
         for row in older.into_iter().rev() {
             active.items.insert(0, row);
         }
@@ -443,11 +440,8 @@ impl AppState {
         // dat er niets ouder meer is en het scrollen eindigt - niet dat er een nieuwe knip nodig is.
         active.oldest_loaded_seq = older_seq;
         let mut rows = self.rows.lock().unwrap();
-        // `new_ids` is chronologisch, precies zoals `active.items` en het scherm eruit horen te
-        // zien. Prepanden van de eerste naar de laatste zet de pagina vooraan in die volgorde;
-        // `prepend_for_screen` laat een id die al stond op zijn plaats, dus een grenspagina
-        // verdubbelt of verplaatst niets.
-        for id in &new_ids {
+        // Voor het scherm geldt dezelfde invoegvolgorde.
+        for id in new_ids.iter().rev() {
             let Some(row) = active.items.iter().find(|held| held.item_id() == id) else { continue };
             rows.prepend_for_screen(row.clone());
         }
@@ -478,13 +472,12 @@ impl AppState {
 
     /// Zet een lading regels op het scherm, in de volgorde waarin de opslag ze gaf.
     ///
-    /// Alleen tekenen: geen spoor en geen model-verleden, want beide dragen die regels al. Na
-    /// [`Rows::clear`] kent `Rows` geen enkele id, dus elk item gaat vooraan en de lijst groeit zo,
-    /// in de volgorde van de lading, tot het scherm oud-naar-nieuw is.
+    /// Elke rij gaat vooraan. Door de lading van achter naar voren in te voegen, blijft de
+    /// volgorde oud naar nieuw.
     fn draw(&self, items: &[Item]) {
         let mut rows = self.rows.lock().unwrap();
         rows.clear();
-        for item in items {
+        for item in items.iter().rev() {
             rows.prepend_for_screen(item.clone());
         }
     }
