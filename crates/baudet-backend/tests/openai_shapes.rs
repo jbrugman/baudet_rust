@@ -116,6 +116,20 @@ fn reasoning_by_another_name_is_still_reasoning() {
 }
 
 #[test]
+fn reasoning_delivered_at_the_end_is_rendered_once() {
+    for event in [
+        r#"{"type":"response.reasoning_summary_text.done","text":"the summary"}"#,
+        r#"{"type":"response.completed","response":{"output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"the summary"}]}]}}"#,
+    ] {
+        let mut turn = TurnAccumulator::new();
+        let delta = turn.feed(None, event).unwrap();
+        assert_eq!(delta.reasoning.as_deref(), Some("the summary"));
+        assert!(turn.feed(None, event).is_none());
+        assert_eq!(turn.finish().reasoning, "the summary");
+    }
+}
+
+#[test]
 fn an_unknown_event_is_counted_and_sampled_but_never_fatal() {
     let mut turn = TurnAccumulator::new();
     let delta = turn.feed(None, r#"{"type":"response.output_text.delta","delta":"a"}"#).unwrap();

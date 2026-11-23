@@ -411,10 +411,16 @@ impl SettingsView {
         if self.fetching {
             return;
         }
+        let _ = tx.send(self.fetch_command());
+    }
+
+    fn fetch_command(&mut self) -> SettingsCommand {
         self.fetching = true;
         self.status = format!("asking {}…", self.base_url.trim());
-        let key = self.draft().ok().and_then(|draft| draft.resolved_key());
-        let _ = tx.send(SettingsCommand::Fetch { endpoint: self.base_url.trim().to_string(), api_key: key });
+        SettingsCommand::Fetch {
+            endpoint: self.base_url.trim().to_string(),
+            api_key: Settings::resolve_key(Some(&self.api_key), &self.api_key_env_var),
+        }
     }
 
     pub fn pick_model(&mut self, tx: &std::sync::mpsc::Sender<SettingsCommand>) {
@@ -643,7 +649,7 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
             view.status = format!("scanning {}…", view.base_url.trim());
             commands.push(SettingsCommand::Probe {
                 endpoint: view.base_url.trim().to_string(),
-                api_key: Some(view.api_key.clone()).filter(|k| !k.trim().is_empty()),
+                api_key: Settings::resolve_key(Some(&view.api_key), &view.api_key_env_var),
             });
         }
         if let Some(word) = view.protocol_word() {
@@ -653,12 +659,7 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
     ui.set_min_width(rij_breed);
     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter)) && focused;
     if (fetch_now || enter) && !view.fetching {
-        view.fetching = true;
-        view.status = format!("asking {}…", view.base_url.trim());
-        commands.push(SettingsCommand::Fetch {
-            endpoint: view.base_url.trim().to_string(),
-            api_key: Some(view.api_key.clone()).filter(|k| !k.trim().is_empty()),
-        });
+        commands.push(view.fetch_command());
     }
 }
 

@@ -56,6 +56,7 @@ struct Snapshot {
     has_more_older: bool,
     reason: Option<String>,
     rejected_draft: Option<(String, Option<String>)>,
+    compaction: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +84,8 @@ pub struct TranscriptApp {
     rows: Vec<Row>,
     busy: bool,
     status: String,
+    compaction: Option<String>,
+    compacting: bool,
     intents: mpsc::Sender<Intent>,
     snapshots: ampcc::UnboundedReceiver<Snapshot>,
     approvals: Arc<crate::approval::Approvals>,
@@ -125,7 +128,7 @@ impl TranscriptApp {
     fn new_inner(backend: Arc<dyn Backend>, live_settings: bool) -> TranscriptApp {
         let (intent_tx, intent_rx) = mpsc::channel::<Intent>();
         let (snap_tx, snap_rx) = ampcc::unbounded_channel();
-        let state = Arc::new(AppState::new(backend, "You are Baudet's Rust rewrite."));
+        let state = Arc::new(AppState::new(backend, baudet_settings::DEFAULT_SYSTEM_PROMPT));
         let root = Some(baudet_store::data_dir());
         let worker_root = root.clone();
         let approvals = Arc::new(crate::approval::Approvals::default());
@@ -155,6 +158,8 @@ impl TranscriptApp {
             rows: Vec::new(),
             busy: false,
             status: "idle".to_string(),
+            compaction: None,
+            compacting: false,
             intents: intent_tx,
             snapshots: snap_rx,
             approvals,
@@ -368,6 +373,10 @@ impl TranscriptApp {
 
         let mut newest = None;
         while let Ok(mut snapshot) = self.snapshots.try_recv() {
+            if let Some(result) = snapshot.compaction.take() {
+                self.compaction = Some(result);
+                self.compacting = false;
+            }
             if let Some((mut text, image)) = snapshot.rejected_draft.take() {
                 if !text.is_empty() && !self.input.is_empty() {
                     text.push('\n');
@@ -381,7 +390,7 @@ impl TranscriptApp {
             newest = Some(snapshot);
         }
         if let Some(report) = newest {
-            self.loading = report.loading;
+            self.loading = report.loading || self.compacting;
             self.more_older = report.has_more_older;
             self.busy = report.busy;
             if !report.rows.is_empty() || report.reason.is_none() {
@@ -533,6 +542,7 @@ impl TranscriptApp {
                         self.status = "busy — finish the turn first".to_string();
                         continue;
                     }
+                    self.compaction = None;
                     self.current_session = Some(id.clone());
                     let project = self.current_project.clone();
                     let _ = self.intents.send(Intent::LoadSession { id, project });
@@ -540,16 +550,18 @@ impl TranscriptApp {
                     self.status = "loading session".to_string();
                 }
                 SidebarIntent::StartChat(project) => {
-                    if self.busy {
+                    if self.busy || self.loading {
                         self.status = "busy — finish the turn first".to_string();
                         continue;
                     }
+                    self.compaction = None;
                     self.current_session = None;
                     self.current_project = project.clone();
                     let _ = self.intents.send(Intent::NewSession(project));
                     self.status = "new conversation".to_string();
                 }
                 SidebarIntent::Deleted => {
+                    self.compaction = None;
                     self.current_session = None;
                     let _ = self.intents.send(Intent::NewSession(self.current_project.clone()));
                     self.status = "removed from the catalogue".to_string();
@@ -682,9 +694,6 @@ impl TranscriptApp {
     }
 
     fn thinking_dock(&mut self, ui: &mut egui::Ui) {
-        if self.thinking_hidden {
-            return;
-        }
         let thought: Vec<&str> = self.rows.iter().rev()
             .take_while(|row| row.kind != baudet_core::ItemKind::UserMessage)
             .filter(|row| row.kind == baudet_core::ItemKind::Reasoning && !row.body.is_empty())
@@ -694,12 +703,15 @@ impl TranscriptApp {
         }
         ui.horizontal(|ui| {
             ui.strong(Texts::get(Key::ReasoningLabel));
-            if ui.small_button(Texts::get(Key::CloseButton)).on_hover_text(Texts::get(Key::TipThinkingToggle)).clicked() {
-                self.thinking_hidden = true;
+            let arrow = if self.thinking_hidden { "▸" } else { "▾" };
+            if ui.small_button(arrow).on_hover_text(Texts::get(Key::TipThinkingToggle)).clicked() {
+                self.thinking_hidden = !self.thinking_hidden;
             }
         });
-        ScrollArea::vertical().id_salt("reasoning-dock").max_height(135.0).stick_to_bottom(true)
-            .show(ui, |ui| { for text in thought.into_iter().rev() { crate::markdown::show(ui, text, true); } });
+        if !self.thinking_hidden {
+            ScrollArea::vertical().id_salt("reasoning-dock").max_height(135.0).stick_to_bottom(true)
+                .show(ui, |ui| { for text in thought.into_iter().rev() { crate::markdown::show(ui, text, true); } });
+        }
     }
 
     fn ask_for_older(&mut self, ui: &mut egui::Ui) {
@@ -735,6 +747,17 @@ impl TranscriptApp {
         self
     }
 
+    fn start_compaction(&mut self) {
+        self.compaction = Some(match self.intents.send(Intent::Compact) {
+            Ok(()) => {
+                self.loading = true;
+                self.compacting = true;
+                Texts::get(Key::Summarising).to_owned()
+            }
+            Err(error) => Texts::fmt(Key::CompactionFailed, &[&error]),
+        });
+    }
+
     fn composer(&mut self, ui: &mut egui::Ui) {
         self.thinking_dock(ui);
         if self.attachment.is_some() {
@@ -755,16 +778,22 @@ impl TranscriptApp {
             })
             .inner;
         if compact_clicked {
-            let _ = self.intents.send(Intent::Compact);
-            self.loading = true;
-            self.status = Texts::get(Key::Summarising).to_owned();
+            self.start_compaction();
+        }
+        if let Some(message) = &self.compaction {
+            ui.add(egui::Label::new(message).wrap());
         }
 
+        let composer_id = ui.make_persistent_id(COMPOSER_FIELD);
+        let send_requested = can_start
+            && !self.loading
+            && ui.memory(|memory| memory.has_focus(composer_id))
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Enter));
         let response = ui.add_enabled(
             self.server_beurt,
             egui::TextEdit::multiline(&mut self.input)
-                .id_salt(COMPOSER_FIELD)
-                .hint_text("Ask something…  (Enter sends)")
+                .id(composer_id)
+                .hint_text("Ask something…  (Ctrl+Enter sends)")
                 .desired_rows(2)
                 .lock_focus(false)
                 .desired_width(f32::INFINITY),
@@ -772,8 +801,6 @@ impl TranscriptApp {
         if self.settings.honesty_footer() {
             ui.add(egui::Label::new(egui::RichText::new(Texts::get(Key::LocalHonestyNote)).small().weak()).wrap());
         }
-        let send_requested =
-            ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift) && response.has_focus();
         if self.server_beurt
             && response.has_focus()
             && ui.input(|i| {
@@ -791,6 +818,7 @@ impl TranscriptApp {
             && !self.loading
             && (!self.input.trim().is_empty() || self.attachment.is_some())
         {
+            self.compaction = None;
             let text = std::mem::take(&mut self.input);
             let _ = self.intents.send(Intent::Submit(text, self.attachment.take()));
             self.thinking_hidden = false;
@@ -885,6 +913,109 @@ impl Drop for TranscriptApp {
 #[cfg(test)]
 mod geometry_tests {
     use super::*;
+
+    #[test]
+    fn enter_inserts_a_newline_and_ctrl_enter_submits_the_draft_once() {
+        let mut app = TranscriptApp::new(TranscriptApp::demo_backend()).with_server(String::new());
+        let (tx, intents) = mpsc::channel();
+        app.intents = tx;
+        app.input = "first line".into();
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let id = ui.make_persistent_id(COMPOSER_FIELD);
+            ui.memory_mut(|memory| memory.request_focus(id));
+            app.composer(ui);
+        }).drop_without_applying_deltas();
+
+        for modifiers in [egui::Modifiers::NONE, egui::Modifiers::CTRL] {
+            let raw = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }],
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |ui| app.composer(ui)).drop_without_applying_deltas();
+            if modifiers == egui::Modifiers::NONE {
+                assert_eq!(app.input, "first line\n");
+                assert!(matches!(intents.try_recv(), Err(mpsc::TryRecvError::Empty)));
+            }
+        }
+        assert!(matches!(intents.try_recv(), Ok(Intent::Submit(text, None)) if text == "first line\n"));
+        assert!(matches!(intents.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn reasoning_can_be_collapsed_and_reopened() {
+        let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+        app.rows.push(Row::from(&Item::Reasoning(baudet_core::ReasoningItem {
+            item_id: "test/reasoning".into(),
+            text: "Thinking summary".into(),
+            status: ItemStatus::Completed,
+        })));
+        let ctx = egui::Context::default();
+        let mut paint = |events| {
+            let raw = egui::RawInput { events, ..Default::default() };
+            let output = ctx.run_ui(raw, |ui| app.thinking_dock(ui));
+            let labels: Vec<_> = output.shapes.iter().filter_map(|shape| {
+                let egui::Shape::Text(text) = &shape.shape else { return None };
+                Some((text.galley.text().to_owned(), text.pos + text.galley.size() / 2.0))
+            }).collect();
+            output.drop_without_applying_deltas();
+            labels
+        };
+
+        for (arrow, visible) in [("▾", true), ("▸", false), ("▾", true)] {
+            let labels = paint(Vec::new());
+            assert!(labels.iter().any(|(text, _)| text == Texts::get(Key::ReasoningLabel)));
+            assert_eq!(labels.iter().any(|(text, _)| text == "Thinking summary"), visible);
+            let pos = labels.iter().find(|(text, _)| text == arrow).unwrap().1;
+            for pressed in [true, false] {
+                paint(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        pressed,
+                        button: egui::PointerButton::Primary,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_no_op_compaction_stays_visible_after_another_snapshot() {
+        let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+        app.start_compaction();
+        assert_eq!(app.compaction.as_deref(), Some(Texts::get(Key::Summarising)));
+        app.intents.send(Intent::LoadOlder).unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while app.snapshots.len() < 3 {
+            assert!(std::time::Instant::now() < deadline, "compaction did not publish its result");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+            ..Default::default()
+        };
+        ctx.run_ui(input.clone(), |ui| app.paint(ui)).drop_without_applying_deltas();
+        assert_eq!(app.compaction.as_deref(), Some(Texts::get(Key::TooFewTurns)));
+        let output = ctx.run_ui(input, |ui| app.paint(ui));
+        let visible = output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == Texts::get(Key::TooFewTurns))
+        });
+        output.drop_without_applying_deltas();
+        assert!(visible, "the composer must show why nothing was compacted");
+        assert!(!app.loading);
+    }
 
     #[test]
     fn the_composer_footer_follows_the_setting() {
@@ -1011,6 +1142,7 @@ fn worker_loop(
             has_more_older: state.paging().0,
             reason,
             rejected_draft,
+            compaction: None,
         });
     };
     publish(&state, false, None, None, None);
@@ -1025,23 +1157,21 @@ fn worker_loop(
             Intent::UseCatalog(replacement) => catalog = Some(replacement),
             Intent::Compact => {
                 use baudet_app::compaction::{CompactionOutcome, CompactionPlan};
-                if let Some(reason) = &connection_problem {
-                    publish(&state, false, disk, Some(reason.clone()), None);
-                    continue;
-                }
-                let settings = settings_file.read();
-                let plan = CompactionPlan::from(&settings.settings().context_limits());
-                let reason = match state.compact(&plan) {
-                    Ok(CompactionOutcome::NothingToFold) => Texts::get(Key::TooFewTurns).to_owned(),
-                    Ok(CompactionOutcome::Compacted { summary, .. }) => {
-                        Texts::fmt(Key::CompactionDone, &[&summary.chars().count()])
+                let result = connection_problem.clone().unwrap_or_else(|| {
+                    let settings = settings_file.read();
+                    let plan = CompactionPlan::from(&settings.settings().context_limits());
+                    match state.compact(&plan) {
+                        Ok(CompactionOutcome::NothingToFold) => Texts::get(Key::TooFewTurns).to_owned(),
+                        Ok(CompactionOutcome::Compacted { summary, .. }) => {
+                            Texts::fmt(Key::CompactionDone, &[&summary.chars().count()])
+                        }
+                        Ok(CompactionOutcome::OversizedTurn { max_chars }) => {
+                            Texts::fmt(Key::CompactionOversizedTurn, &[&max_chars])
+                        }
+                        Ok(CompactionOutcome::SummaryRefused(reason)) => Texts::fmt(Key::CompactionRefused, &[&reason]),
+                        Err(error) => Texts::fmt(Key::CompactionFailed, &[&error]),
                     }
-                    Ok(CompactionOutcome::OversizedTurn { max_chars }) => {
-                        Texts::fmt(Key::CompactionOversizedTurn, &[&max_chars])
-                    }
-                    Ok(CompactionOutcome::SummaryRefused(reason)) => Texts::fmt(Key::CompactionRefused, &[&reason]),
-                    Err(error) => Texts::fmt(Key::CompactionFailed, &[&error]),
-                };
+                });
                 let rows: Vec<Row> = state.rows().iter().map(Row::from).collect();
                 let _ = snapshots.send(Snapshot {
                     turns: (disk.unwrap_or(0), rows.len()),
@@ -1050,9 +1180,11 @@ fn worker_loop(
                     loading: false,
                     stored: state.persists(),
                     has_more_older: state.paging().0,
-                    reason: Some(reason),
+                    reason: None,
                     rejected_draft: None,
+                    compaction: Some(result),
                 });
+                continue;
             }
             Intent::Submit(text, image) => {
                 if let Some(reason) = &connection_problem {
@@ -1196,6 +1328,7 @@ fn worker_loop(
                                 has_more_older: state.paging().0,
                                 reason: Some(reason),
                                 rejected_draft: None,
+                                compaction: None,
                             });
                             continue;
                         }
@@ -1236,6 +1369,7 @@ fn after_turn(
             has_more_older: state.paging().0,
             reason: Some(reason),
             rejected_draft: None,
+            compaction: None,
         });
     }
     if let (Some(catalog), false) = (catalog.as_ref(), id.is_empty()) {
@@ -1275,6 +1409,7 @@ fn load_session(
                 has_more_older: state.paging().0,
                 reason: Some(reason),
                 rejected_draft: None,
+                compaction: None,
             });
             false
         }
@@ -1778,18 +1913,20 @@ pub fn run_from(startup: Startup) -> eframe::Result {
     if startup.screenshot.is_some() {
         builder = builder.with_window_level(egui::WindowLevel::AlwaysOnBottom);
     }
-    let mut options = eframe::NativeOptions {
+    let options = eframe::NativeOptions {
         viewport: builder,
         renderer: eframe::Renderer::Glow,
+        #[cfg(target_os = "macos")]
+        event_loop_builder: if startup.screenshot.is_some() {
+            use winit::platform::macos::EventLoopBuilderExtMacOS as _;
+            Some(Box::new(|builder| {
+                builder.with_activate_ignoring_other_apps(false);
+            }))
+        } else {
+            None
+        },
         ..Default::default()
     };
-    #[cfg(target_os = "macos")]
-    if startup.screenshot.is_some() {
-        use winit::platform::macos::EventLoopBuilderExtMacOS as _;
-        options.event_loop_builder = Some(Box::new(|builder| {
-            builder.with_activate_ignoring_other_apps(false);
-        }));
-    }
     let screenshot = startup.screenshot.clone();
     let workspace = startup.workspace.clone();
     let settings = startup.settings;

@@ -197,10 +197,14 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Baudet, an accurate, critical c
 
 impl Settings {
     pub fn resolved_key(&self) -> Option<String> {
-        if let Some(typed) = self.api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+        Self::resolve_key(self.api_key.as_deref(), &self.api_key_env_var)
+    }
+
+    pub fn resolve_key(typed: Option<&str>, env_name: &str) -> Option<String> {
+        if let Some(typed) = typed.map(str::trim).filter(|k| !k.is_empty()) {
             return Some(typed.to_string());
         }
-        let name = self.api_key_env_var.trim();
+        let name = env_name.trim();
         let name = if name.is_empty() { DEFAULT_KEY_ENV_VAR } else { name };
         std::env::var(name).ok().filter(|value| !value.trim().is_empty())
     }

@@ -236,19 +236,23 @@ impl AppState {
         self.live_turns.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).map_err(|_| TurnBusy)?;
         let choices = self.choices.lock().unwrap().clone();
         let backend = self.backend();
-        let limits = settings.map(|settings| Self::context_limits(&*backend, settings, &choices));
         let thread_id = "th_1".to_string();
         let (turn_id, history, system) = {
             let mut active = self.active.lock().unwrap();
             let summary = active.summary.as_deref();
-            let (history, system) = match limits.as_ref() {
-                Some(limits) => match self.chat_context(&active.messages, summary, user_text, limits) {
-                    Ok(context) => context,
-                    Err(error) => {
-                        self.finish();
-                        return Err(error);
+            let (history, system) = match settings {
+                Some(settings) => {
+                    let limits = Self::context_limits(&*backend, settings, &choices);
+                    match Self::chat_context(
+                        settings.resolved_system_prompt(), &active.messages, summary, user_text, &limits,
+                    ) {
+                        Ok(context) => context,
+                        Err(error) => {
+                            self.finish();
+                            return Err(error);
+                        }
                     }
-                },
+                }
                 None => (history_events(&active.messages), baudet_store::instructions(&self.system, summary, false)),
             };
             let turn_id = format!("tu_{}", self.turn_counter.fetch_add(1, Ordering::SeqCst) + 1);
@@ -297,7 +301,7 @@ impl AppState {
     }
 
     fn chat_context(
-        &self,
+        base_prompt: &str,
         prior: &[Msg],
         summary: Option<&str>,
         user_text: &str,
@@ -313,13 +317,13 @@ impl AppState {
         let prior = &prior[first..];
         let prompt_chars = cost_chars(&Msg::user(user_text));
         let prior_chars = prior.iter().map(cost_chars).sum::<usize>();
-        let mut system = instructions(&self.system, summary, first > 0);
+        let mut system = instructions(base_prompt, summary, first > 0);
         let budget = limits.trim_budget(100);
         let trim = !prior.is_empty()
             && limits.strategy != ContextStrategy::StopAtLimit
             && limits.over((prompt_chars + prior_chars + system.chars().count()).div_ceil(3) as u64, budget as u32);
         if trim {
-            system = instructions(&self.system, summary, true);
+            system = instructions(base_prompt, summary, true);
         }
         let input_tokens = (prompt_chars + system.chars().count()).div_ceil(3);
         let history_tokens = if limits.strategy == ContextStrategy::StopAtLimit {

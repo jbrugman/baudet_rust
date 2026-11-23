@@ -112,7 +112,7 @@ fn chatknoppen_staan_op_volgorde_boven_het_invoerveld() {
     };
     use baudet_i18n::{Key, Texts};
     let buttons = [Key::SendButton, Key::CompactButton, Key::StopButton].map(|key| visible_text(Texts::get(key)));
-    let input = visible_text("Ask something…  (Enter sends)");
+    let input = visible_text("Ask something…  (Ctrl+Enter sends)");
     for button in buttons {
         assert!(button.bottom() <= input.top(), "{button:?} hoort boven het invoerveld");
     }

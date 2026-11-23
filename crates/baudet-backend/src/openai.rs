@@ -221,6 +221,16 @@ impl TurnAccumulator {
         }
         if name.starts_with("response.") {
             self.absorb(name, object);
+            if self.reasoning.is_empty() {
+                let reasoning = if name.ends_with("reasoning_summary_text.done") || name.ends_with("reasoning_text.done") {
+                    string_field(object, "text")
+                } else if matches!(name, "response.completed" | "response.incomplete") {
+                    reasoning_summary(object)
+                } else {
+                    None
+                };
+                return reasoning.map(|reasoning| Delta { text: None, reasoning: Some(reasoning) });
+            }
         }
         None
     }
@@ -272,11 +282,6 @@ impl TurnAccumulator {
                 self.text.push_str(&text);
             }
         }
-        if name.ends_with("reasoning_summary_text.done") && self.reasoning.is_empty() {
-            if let Some(text) = string_field(object, "text") {
-                self.reasoning.push_str(&text);
-            }
-        }
     }
 
     // A function call may appear in both item and terminal events.
@@ -311,6 +316,19 @@ impl TurnAccumulator {
 
 fn string_field(object: &Map<String, Value>, key: &str) -> Option<String> {
     object.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn reasoning_summary(event: &Map<String, Value>) -> Option<String> {
+    let response = event.get("response").and_then(Value::as_object).unwrap_or(event);
+    let blocks = response.get("output")?.as_array()?.iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+        .filter_map(|item| item.get("summary").and_then(Value::as_array))
+        .flatten()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("summary_text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    (!blocks.is_empty()).then(|| blocks.join("\n\n"))
 }
 
 pub(crate) fn parse_usage(usage: &Map<String, Value>) -> Usage {

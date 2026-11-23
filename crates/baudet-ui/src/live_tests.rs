@@ -29,9 +29,10 @@ fn read_request(socket: &TcpStream) -> (String, String, Value) {
             auth = Some(value.trim().to_owned());
         }
     }
-    let mut body = vec![0; length.unwrap()];
+    let mut body = vec![0; length.unwrap_or_default()];
     reader.read_exact(&mut body).unwrap();
-    (request_line, auth.unwrap(), serde_json::from_slice(&body).unwrap())
+    let body = if body.is_empty() { Value::Null } else { serde_json::from_slice(&body).unwrap() };
+    (request_line, auth.unwrap(), body)
 }
 
 fn listen() -> (TcpListener, String) {
@@ -44,6 +45,87 @@ fn start_stream(socket: &mut TcpStream, data: &str) {
     write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {data}\n\n")
         .unwrap();
     socket.flush().unwrap();
+}
+
+fn click_settings_button(
+    ctx: &egui::Context,
+    view: &mut SettingsView,
+    commands: &mpsc::Sender<SettingsCommand>,
+    label: &str,
+) {
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 1800.0))),
+        ..Default::default()
+    };
+    let output = ctx.run_ui(input.clone(), |ui| settings::body(ui, view, commands));
+    let pos = output.shapes.iter().find_map(|shape| match &shape.shape {
+        egui::Shape::Text(text) if text.galley.text() == label => Some(text.pos + text.galley.size() / 2.0),
+        _ => None,
+    });
+    output.drop_without_applying_deltas();
+    let pos = pos.unwrap_or_else(|| panic!("missing settings button: {label}"));
+    for pressed in [true, false] {
+        let mut input = input.clone();
+        input.events = vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                pressed,
+                button: egui::PointerButton::Primary,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        ctx.run_ui(input, |ui| settings::body(ui, view, commands)).drop_without_applying_deltas();
+    }
+}
+
+#[test]
+fn settings_buttons_send_the_environment_key_to_the_endpoint() {
+    const ENV_NAME: &str = "BAUDET_SETTINGS_LIVE_AUTH_TEST";
+    const TEST_KEY: &str = "settings-fixture-key";
+    let (listener, base_url) = listen();
+    let server = std::thread::spawn(move || {
+        for (expected, data) in [
+            ("GET /v1/models ", r#"{"data":[{"id":"fixture-model"}]}"#),
+            ("GET /v1/models ", r#"{"data":[{"id":"fixture-model"}]}"#),
+            ("POST /v1/chat/completions ", r#"{"choices":[{"message":{"content":"ok"}}]}"#),
+        ] {
+            let (mut socket, _) = listener.accept().unwrap();
+            let (path, auth, _) = read_request(&socket);
+            assert!(path.starts_with(expected));
+            assert_eq!(auth, format!("Bearer {TEST_KEY}"));
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{data}",
+                data.len()
+            ).unwrap();
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let file = SettingsFile::at(dir.path().join("settings.json"));
+    file.write(&Settings { base_url, api_key_env_var: ENV_NAME.into(), ..Default::default() }).unwrap();
+    let mut view = SettingsView::new();
+    view.load(&file);
+    let (commands, edits) = mpsc::channel();
+    let (report, events) = mpsc::channel();
+    let worker_file = file.clone();
+    let worker = std::thread::spawn(move || settings_worker_loop(edits, report, None, worker_file));
+    let ctx = egui::Context::default();
+
+    unsafe { std::env::set_var(ENV_NAME, TEST_KEY) };
+    click_settings_button(&ctx, &mut view, &commands, Texts::get(Key::FetchModels));
+    let listing = events.recv_timeout(WAIT).unwrap();
+    assert!(matches!(&listing, SettingsEvent::Listing(Ok(models), _) if models.len() == 1));
+    view.apply_event(listing);
+    click_settings_button(&ctx, &mut view, &commands, "Scan endpoint");
+    let probe = events.recv_timeout(WAIT);
+    unsafe { std::env::remove_var(ENV_NAME) };
+    assert!(matches!(probe, Ok(SettingsEvent::Probed(Ok(Some(Protocol::ChatCompletions)), _))));
+    assert_eq!(file.read().settings().api_key, None);
+
+    drop(commands);
+    worker.join().unwrap();
+    server.join().unwrap();
 }
 
 fn wait_for_snapshot(snapshots: &mut ampcc::UnboundedReceiver<Snapshot>, matches: impl Fn(&Snapshot) -> bool) {
@@ -68,6 +150,7 @@ fn stop_releases_a_silent_stream_and_the_next_turn_uses_the_saved_connection() {
         assert!(path.starts_with("POST /v1/responses "));
         assert_eq!(auth, "Bearer first-test-key");
         assert_eq!(body["model"], "first-model");
+        assert_eq!(body["instructions"], baudet_settings::DEFAULT_SYSTEM_PROMPT);
         assert_eq!(body["temperature"], 0.3);
         assert!(body.get("top_p").is_none());
         start_stream(&mut socket, r#"{"type":"response.output_text.delta","delta":"partial answer"}"#);
@@ -128,6 +211,7 @@ fn stop_releases_a_silent_stream_and_the_next_turn_uses_the_saved_connection() {
     assert!(matches!(events.recv_timeout(WAIT).unwrap(), SettingsEvent::ConnectionChanged(None)));
     assert!(matches!(events.recv_timeout(WAIT).unwrap(), SettingsEvent::Saved(Ok(()))));
     next.max_output_tokens = Some(123);
+    next.system_prompt = "Use the project glossary.\nKeep identifiers intact.".into();
     settings.send(SettingsCommand::Save(next)).unwrap();
     assert!(matches!(events.recv_timeout(WAIT).unwrap(), SettingsEvent::Saved(Ok(()))));
     assert!(matches!(closure.try_recv(), Err(mpsc::TryRecvError::Empty)));
@@ -148,6 +232,8 @@ fn stop_releases_a_silent_stream_and_the_next_turn_uses_the_saved_connection() {
     assert_eq!(body["temperature"], 0.6);
     assert_eq!(body["top_p"], 0.8);
     assert_eq!(body["max_tokens"], 123);
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert_eq!(body["messages"][0]["content"], "Use the project glossary.\nKeep identifiers intact.");
     assert_eq!(body["messages"][2]["content"], "partial answer");
     wait_for_snapshot(&mut frames, |frame| !frame.busy && frame.rows.iter().any(|row| row.body == "second answer"));
     assert_eq!(state.disk_items(), Some(4));

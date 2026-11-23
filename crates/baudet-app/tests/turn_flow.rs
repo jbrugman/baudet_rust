@@ -108,6 +108,7 @@ fn ordinary_chat_refuses_an_over_budget_turn_before_recording_or_sending_it() {
     let settings = baudet_settings::Settings {
         context_strategy: baudet_settings::config::ContextStrategy::StopAtLimit,
         context_budget_tokens: 50,
+        system_prompt: "system prompt".into(),
         ..Default::default()
     };
 
