@@ -14,7 +14,15 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 600;
 
 #[derive(Debug, Default)]
-pub struct ExecuteTool;
+pub struct ExecuteTool {
+    workspace: bool,
+}
+
+impl ExecuteTool {
+    pub fn for_project() -> Self {
+        Self { workspace: cfg!(any(target_os = "macos", target_os = "linux")) }
+    }
+}
 
 impl Tool for ExecuteTool {
     fn name(&self) -> &str {
@@ -26,6 +34,9 @@ impl Tool for ExecuteTool {
     }
 
     fn description(&self) -> &str {
+        if self.workspace {
+            return "Run a shell command within the project sandbox and its granted permissions. Returns stdout, stderr and the exit code.";
+        }
         "Run a shell command (bash; python or other interpreters may be invoked from it) \
          with the project folder as its working directory. The command runs only \
          after the user approves it. Scripts written to the system temp folder are \
@@ -69,30 +80,56 @@ impl Tool for ExecuteTool {
 
         let timeout = timeout_arg(args).unwrap_or(DEFAULT_TIMEOUT_SECONDS).clamp(1, MAX_TIMEOUT_SECONDS);
 
-        let trusted = command_signature::pinned(command);
-        let family = command_signature::trusted_entry(command);
-        let pre_approved = ctx.auto_allow().contains(&trusted)
-            || (ctx.auto_approve_safe && safe_commands::is_safe(command))
-            || family.as_deref().is_some_and(|key| ctx.trusted_commands().iter().any(|t| t == key));
+        if !self.workspace {
+            let trusted = command_signature::pinned(command);
+            let family = command_signature::trusted_entry(command);
+            let pre_approved = ctx.auto_allow().contains(&trusted)
+                || (ctx.auto_approve_safe && safe_commands::is_safe(command))
+                || family.as_deref().is_some_and(|key| ctx.trusted_commands().iter().any(|t| t == key));
 
-        if !pre_approved && !(ctx.approve_command)(command, &cwd.to_string_lossy(), timeout as u32) {
-            return ToolResult::fail("run_command: the user declined to run this command");
+            if !pre_approved && !(ctx.approve_command)(command, &cwd.to_string_lossy(), timeout as u32) {
+                return fail("the user declined to run this command");
+            }
         }
 
-        let script = match stage_script(&temp, command) {
+        let private_temp = if self.workspace {
+            match tempfile::Builder::new().prefix("baudet-workspace-").tempdir_in(&temp) {
+                Ok(dir) => Some(dir),
+                Err(_) => return fail("could not create a private workspace temp folder"),
+            }
+        } else {
+            None
+        };
+        let temp = private_temp.as_ref().map_or(temp.as_path(), |dir| dir.path());
+        let script = match stage_script(temp, command) {
             Ok(path) => path,
             Err(reason) => return fail(reason),
         };
-        let outcome = run_staged(&script, &cwd, &temp, timeout);
+        #[cfg(target_os = "macos")]
+        let outcome = if self.workspace {
+            run_in_workspace(&script, &cwd, temp, timeout, ctx)
+                .ok_or_else(|| "could not start the macOS workspace sandbox".to_owned())
+        } else {
+            run_staged(&script, &cwd, temp, timeout).ok_or_else(command_start_error)
+        };
+        #[cfg(target_os = "linux")]
+        let outcome = if self.workspace {
+            run_in_linux_workspace(&script, &cwd, temp, timeout, ctx)
+        } else {
+            run_staged(&script, &cwd, temp, timeout).ok_or_else(command_start_error)
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let outcome = run_staged(&script, &cwd, temp, timeout).ok_or_else(command_start_error);
         fs::remove_file(&script).ok();
         let outcome = match outcome {
-            Some(outcome) => outcome,
-            None => return fail("the command could not be started or completed"),
+            Ok(outcome) => outcome,
+            Err(reason) => return fail(&reason),
         };
 
         let head = match outcome.exit_code {
             Some(code) => format!("exit code: {code}"),
-            None => format!("run_command timed out after {timeout}s (no exit code)"),
+            None if outcome.timed_out => format!("run_command timed out after {timeout}s (no exit code)"),
+            None => "run_command terminated without an exit code".to_owned(),
         };
         ToolResult {
             ok: !outcome.timed_out && outcome.exit_code == Some(0),
@@ -104,6 +141,10 @@ impl Tool for ExecuteTool {
             ..Default::default()
         }
     }
+}
+
+fn command_start_error() -> String {
+    "the command could not be started or completed".into()
 }
 
 fn stage_script(temp: &Path, command: &str) -> Result<PathBuf, &'static str> {
@@ -133,6 +174,100 @@ fn run_staged(script: &Path, cwd: &Path, temp: &Path, timeout: u64) -> Option<cr
         command.env("TMPDIR", temp);
     })
     .ok()
+}
+
+#[cfg(target_os = "macos")]
+fn run_in_workspace(
+    script: &Path,
+    cwd: &Path,
+    temp: &Path,
+    timeout: u64,
+    ctx: &ToolContext,
+) -> Option<crate::process_runner::ProcessOutcome> {
+    let mut profile = String::from(
+        r#"(version 1)
+(deny default)
+(import "dyld-support.sb")
+(allow process-exec process-fork sysctl-read)
+(allow file-read-metadata)
+(allow file-read-data
+    (subpath "/System/Library")
+    (subpath "/usr/lib")
+    (subpath "/usr/share")
+    (subpath "/bin")
+    (subpath "/usr/bin")
+    (literal "/dev/null")
+    (literal "/dev/urandom")
+    (subpath (param "TEMP")))
+(allow file-write* (subpath (param "TEMP")) (literal "/dev/null"))
+"#,
+    );
+    if ctx.read_granted {
+        profile.push_str("(allow file-read-data (subpath (param \"PROJECT\")))\n");
+    }
+    if ctx.write_granted {
+        profile.push_str("(allow file-write* (subpath (param \"PROJECT\")))\n");
+    }
+    let project_param = format!("PROJECT={}", cwd.to_str()?);
+    let temp_param = format!("TEMP={}", temp.to_str()?);
+    let argv = [
+        "/usr/bin/sandbox-exec",
+        "-D",
+        &project_param,
+        "-D",
+        &temp_param,
+        "-p",
+        &profile,
+        "/bin/bash",
+        script.to_str()?,
+    ];
+    ProcessRunner::run_with(&argv, cwd, Duration::from_secs(timeout), |command| {
+        command.env_clear().env("PATH", "/usr/bin:/bin").env("HOME", temp).env("TMPDIR", temp);
+    })
+    .ok()
+}
+
+#[cfg(target_os = "linux")]
+fn run_in_linux_workspace(
+    script: &Path,
+    cwd: &Path,
+    temp: &Path,
+    timeout: u64,
+    ctx: &ToolContext,
+) -> Result<crate::process_runner::ProcessOutcome, String> {
+    let (Some(project_path), Some(temp_path)) = (cwd.to_str(), temp.to_str()) else {
+        return Err("Linux workspace paths must be valid UTF-8".into());
+    };
+    if ctx.write_granted && !ctx.read_granted {
+        return Err("Linux workspace shell writes also require project Read permission".into());
+    }
+
+    let script_name = script.file_name().and_then(|name| name.to_str()).ok_or_else(command_start_error)?;
+    let sandbox_script = format!("/tmp/{script_name}");
+    let mut argv = vec![
+        "/usr/bin/bwrap",
+        "--unshare-user", "--disable-userns", "--unshare-pid", "--unshare-net",
+        "--unshare-ipc", "--unshare-uts", "--die-with-parent", "--new-session",
+        "--ro-bind", "/usr", "/usr",
+        "--ro-bind-try", "/bin", "/bin",
+        "--ro-bind-try", "/lib", "/lib",
+        "--ro-bind-try", "/lib64", "/lib64",
+        "--ro-bind-try", "/etc/ld.so.cache", "/etc/ld.so.cache",
+        "--dev", "/dev",
+        "--proc", "/proc",
+        "--bind", temp_path, "/tmp",
+    ];
+    if ctx.read_granted {
+        let mount = if ctx.write_granted { "--bind" } else { "--ro-bind" };
+        argv.extend([mount, project_path, "/workspace"]);
+    } else {
+        argv.extend(["--dir", "/workspace"]);
+    }
+    argv.extend(["--chdir", "/workspace", "--", "/bin/bash", &sandbox_script]);
+    ProcessRunner::run_with(&argv, cwd, Duration::from_secs(timeout), |command| {
+        command.env_clear().env("PATH", "/usr/bin:/bin").env("HOME", "/tmp").env("TMPDIR", "/tmp");
+    })
+    .map_err(|error| format!("could not start the Linux workspace sandbox (install Bubblewrap): {error}"))
 }
 
 fn timeout_arg(args: &Value) -> Option<u64> {
@@ -177,19 +312,19 @@ mod tests {
     }
 
     fn run(args: Value, ctx: &ToolContext) -> ToolResult {
-        ExecuteTool.execute(&args, ctx)
+        ExecuteTool::default().execute(&args, ctx)
     }
 
     #[test]
     fn it_refuses_without_the_execute_right_and_without_a_command() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ToolContext::default();
-        let no_right = ExecuteTool.execute(&json!({"command": "true"}), &ctx);
+        let no_right = ExecuteTool::default().execute(&json!({"command": "true"}), &ctx);
         assert_eq!(no_right.output, "run_command: the project does not grant the Execute right");
 
         let granted = ToolContext { root: Some(dir.path().to_path_buf()), exec_granted: true, ..Default::default() };
         for args in [json!({}), json!({"command": ""}), json!({"command": "   "})] {
-            let result = ExecuteTool.execute(&args, &granted);
+            let result = ExecuteTool::default().execute(&args, &granted);
             assert_eq!(result.output, "run_command: needs a command argument", "{args}");
         }
     }
@@ -203,7 +338,7 @@ mod tests {
         let mut ctx = ctx(dir.path(), &rec, false);
         ctx.root = Some(bestand);
         assert_eq!(
-            ExecuteTool.execute(&json!({"command": "true"}), &ctx).output,
+            ExecuteTool::default().execute(&json!({"command": "true"}), &ctx).output,
             "run_command: the project folder is not an existing directory"
         );
     }
@@ -286,7 +421,7 @@ mod tests {
         let rec = recorder(false);
         let mut context = ctx(dir.path(), &rec, false);
         context.auto_allow_provider = Box::new(move || source.lock().unwrap().clone());
-        let result = ExecuteTool.execute(&json!({"command": command}), &context);
+        let result = ExecuteTool::default().execute(&json!({"command": command}), &context);
         assert!(result.ok);
         assert!(result.output.contains("gepind"));
         assert!(rec.asked.lock().unwrap().is_empty());
@@ -362,18 +497,66 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rec = recorder(true);
         let context = ctx(dir.path(), &rec, true);
-        assert_eq!(ExecuteTool.item_kind(), ItemKind::CommandExecution);
+        assert_eq!(ExecuteTool::default().item_kind(), ItemKind::CommandExecution);
         assert!(
-            ExecuteTool.can_run_parallel(&json!({"command": "ls"}), &context),
+            ExecuteTool::default().can_run_parallel(&json!({"command": "ls"}), &context),
             "bewezen lezen mag naast zijn buren"
         );
         assert!(
-            !ExecuteTool.can_run_parallel(&json!({"command": "rm -r iets"}), &context),
+            !ExecuteTool::default().can_run_parallel(&json!({"command": "rm -r iets"}), &context),
             "iets dat kan schrijven racet niet"
         );
         assert!(
-            !ExecuteTool.can_run_parallel(&json!({"command": "ls"}), &ctx(dir.path(), &rec, false)),
+            !ExecuteTool::default().can_run_parallel(&json!({"command": "ls"}), &ctx(dir.path(), &rec, false)),
             "met de gate uit is er wél een goedkeuring nodig, dus geen fan-out"
         );
+    }
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod workspace_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    #[cfg_attr(target_os = "linux", ignore = "requires Bubblewrap and user namespaces")]
+    fn workspace_enforces_project_permissions_without_command_approval() {
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let marker = outside.path().join("private.txt");
+        fs::write(&marker, "private").unwrap();
+        fs::write(project.path().join("input.txt"), "input").unwrap();
+        symlink(&marker, project.path().join("outside-link")).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut ctx = ToolContext::for_folder(project.path(), true, true, true);
+        ctx.approve_command = Box::new(|_, _, _| panic!("workspace command requested approval"));
+        let command = format!(
+            r#"test "$(cat input.txt)" = input &&
+               echo written > output.txt &&
+               test -z "${{BAUDET_WORKSPACE_TEST_SECRET+x}}" &&
+               test "$HOME" = "$TMPDIR" &&
+               /bin/bash -c 'echo temp > "$TMPDIR/child.txt"' &&
+               ! /bin/bash -c 'cat outside-link' &&
+               ! /bin/bash -c 'echo escaped > outside-link' &&
+               ! /bin/bash -c 'echo escaped > "$1"' _ '{}' &&
+               ! /bin/bash -c 'echo escaped > /dev/tcp/127.0.0.1/{}'"#,
+            marker.display(),
+            address.port(),
+        );
+        let tool = ExecuteTool::for_project();
+        let result = tool.execute(&json!({"command": command}), &ctx);
+        assert!(result.ok, "{}", result.output);
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "private");
+        assert_eq!(fs::read_to_string(project.path().join("output.txt")).unwrap(), "written\n");
+
+        ctx.write_granted = false;
+        let result = tool.execute(&json!({"command": "echo denied > output.txt"}), &ctx);
+        assert!(!result.ok);
+        assert_eq!(fs::read_to_string(project.path().join("output.txt")).unwrap(), "written\n");
+
+        ctx.read_granted = false;
+        let result = tool.execute(&json!({"command": "cat input.txt"}), &ctx);
+        assert!(!result.ok);
     }
 }

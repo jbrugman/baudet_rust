@@ -100,7 +100,7 @@ pub fn protocol_for(enabled: &[&str], extra: &[ExtraTool]) -> String {
         out.push_str("  {\"tool\": \"edit_file\", \"arguments\": {\"file\": \"relative/path\", \"edits\": [{\"old_text\": \"...\", \"new_text\": \"...\"}]}}\n\n");
     }
     if can_run {
-        out.push_str("Run a shell command in the project folder (the user approves it first), for example to build or test:\n");
+        out.push_str("Run a shell command in the project folder. The project settings determine whether approval is required.\n");
         out.push_str("  {\"tool\": \"run_command\", \"arguments\": {\"command\": \"mvn -B test\"}}\n\n");
     }
     if can_git {

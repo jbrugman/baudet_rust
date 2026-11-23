@@ -60,7 +60,7 @@ Section: devel
 Priority: optional
 Maintainer: Justus Brugman
 Depends: ${linked:+$linked, }$runtime
-Recommends: xdg-desktop-portal-gtk | xdg-desktop-portal-kde
+Recommends: bubblewrap, xdg-desktop-portal-gtk | xdg-desktop-portal-kde
 Description: Desktop client for local and self-hosted model APIs
 CONTROL
 

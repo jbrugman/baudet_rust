@@ -90,7 +90,7 @@ impl AppState {
             tools.push(Box::new(EditFileTool));
         }
         if exec {
-            tools.push(Box::new(ExecuteTool));
+            tools.push(Box::new(ExecuteTool::for_project()));
         }
         tools.extend(run.servers.tools(&s.mcp_servers, &run.cancelled));
         let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();

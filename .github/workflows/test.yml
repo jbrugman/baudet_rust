@@ -1,0 +1,49 @@
+# baudet_rust-testpoort. Eerder ontbrak deze volledig: de CI bouwde alleen pakketten,
+# de 600 tests draaiden nergens. Deze job vangt terugkerende fouten (de linux-fix van
+# commit c05d493 en zijn regressiontest waren hier onmogelijk geweest zonder deze stap).
+#
+# Bewust GEEN cargo fmt --check en GEEN cargo clippy -D warnings: er staan ~90
+# fmt-afwijkingen en ~20 clippy-warnings op de plank; die poorten groenen kost een
+# grote losse diff en hoort in een eigen wijziging, niet in de minimale CI-stap.
+#
+# Geen externe cache-action: rustup leest `rust-toolchain.toml` (kanaal 1.95.0) zelf,
+# en Cargo pakt de platform-gebonden crate-hashes (Linux-cache zou macOS/Windows breken).
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Zelfde Linux als de lokale verificatie-container; ubuntu-24.04 is ook hier de basis.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Systeem-sysdeps voor eframe/0.36 (features wayland+x11) en rfd (xdg-portal+wayland).
+      # Rust bouwt deze crates ook zonder X-server, maar pkg-config vindt ze alleen met headers.
+      - name: Systeem-sysdeps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config ca-certificates bubblewrap \
+            libssl-dev libdrm-dev libgbm-dev libxkbcommon-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxinerama-dev libxxf86vm-dev \
+            libwayland-dev wayland-protocols \
+            libatk1.0-dev libatk-bridge2.0-dev libcups2-dev libgtk-3-dev libasound2-dev \
+            libdbus-1-dev libegl-dev libgles-dev libseccomp-dev libinput-dev
+
+      # rustup/darwin staat al op de runner; rust-toolchain.toml selects 1.95.0 + clippy + rustfmt.
+      - name: Workspace-tests
+        run: cargo test --workspace --locked --no-fail-fast
+
+      - name: Linux workspace isolation
+        env:
+          BAUDET_WORKSPACE_TEST_SECRET: fixture
+        run: cargo test --workspace --locked workspace_enforces_project_permissions_without_command_approval -- --ignored
