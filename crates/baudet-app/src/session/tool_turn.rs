@@ -38,7 +38,7 @@ impl AppState {
         tool_gate::decide(settings.tool_mode != ToolMode::Off, project).is_active()
     }
 
-    pub fn run_tools(&self, text: &str, image: Option<&str>, run: ToolTurn<'_>) -> Result<(), TurnBusy> {
+    pub fn run_tools(&self, text: &str, image: Option<&str>, run: ToolTurn<'_>) -> Result<Option<String>, TurnBusy> {
         if !Self::tools_active(run.settings, Some(run.project)) {
             return Err(TurnBusy);
         }
@@ -48,7 +48,7 @@ impl AppState {
         result
     }
 
-    fn tool_turn(&self, text: &str, image: Option<&str>, run: ToolTurn<'_>) -> Result<(), TurnBusy> {
+    fn tool_turn(&self, text: &str, image: Option<&str>, run: ToolTurn<'_>) -> Result<Option<String>, TurnBusy> {
         let turn_id = format!("tu_{}", self.turn_counter.fetch_add(1, Ordering::SeqCst) + 1);
         let sink = Sink {
             app: self,
@@ -105,7 +105,8 @@ impl AppState {
         let registry = ToolRegistry::new(tools);
         let ctx = tool_context(run, root, read, write, exec);
         let choices = self.choices.lock().unwrap().clone();
-        let limits = s.context_limits();
+        let backend = self.backend();
+        let limits = Self::context_limits(&*backend, s, &choices);
         let previous = previous.as_deref().filter(|_| {
             s.use_server_session
                 && s.use_responses_api
@@ -114,7 +115,7 @@ impl AppState {
                 && limits.strategy.supports_server_session()
         });
         let source =
-            Source { backend: &*self.backend, choices, system, summary, limits, cancelled: Arc::clone(&ctx.1) };
+            Source { backend: &*backend, choices, system, summary, limits, cancelled: Arc::clone(&ctx.1) };
         let outcome = tokio::runtime::Builder::new_current_thread().build().expect("local tool runtime").block_on(
             ToolLoop::new(&source, &registry, s.max_tool_iterations)
                 .chain_response_id(previous.is_some())
@@ -144,10 +145,10 @@ impl AppState {
                 response_id,
                 usage: None,
                 final_event: None,
-                incomplete_reason: failure,
+                incomplete_reason: failure.clone(),
             });
         }
-        Ok(())
+        Ok(failure)
     }
 }
 
@@ -243,6 +244,7 @@ impl TurnSource for Source<'_> {
             );
             let trimmed = history.len() + 1 < request.history.len() && request.previous_response_id.is_none();
             let mut handle = match self.backend.send(SendRequest {
+                turn_id: None,
                 system: baudet_store::instructions(&self.system, self.summary.as_deref(), trimmed),
                 user_text,
                 history: history_events(&history),

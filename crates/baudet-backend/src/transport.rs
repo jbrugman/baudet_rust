@@ -5,17 +5,25 @@ use crate::sse::Framer;
 use crate::{Backend, BackendError, SendRequest, TurnHandle};
 use baudet_core::{CoreError, ItemStatus, ThreadEvent, Turn};
 use serde_json::Value;
-use std::io::Read;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use tokio::sync::Notify;
 use std::time::Duration;
 
 // The streaming read timeout re-arms whenever another chunk arrives.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(1_800);
 
-const READ_BYTES: usize = 64 * 1024;
+fn http_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("HTTP runtime")
+    })
+}
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Credential {
     pub value: Option<String>,
     pub source: String,
@@ -39,7 +47,7 @@ impl Credential {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
     pub base_url: String,
     pub credential: Credential,
@@ -56,25 +64,12 @@ impl Endpoint {
 
 struct Shared {
     endpoint: Endpoint,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
     reasoning: Option<String>,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
     last: Mutex<Option<String>>,
     turn_counter: std::sync::atomic::AtomicUsize,
-}
-
-// Blocking HTTP runs outside the application worker.
-fn spawn_turn(
-    shared: Arc<Shared>,
-    request: SendRequest,
-    thread_id: String,
-    turn_id: String,
-    tx: tokio::sync::mpsc::UnboundedSender<ThreadEvent>,
-    cancelled: Arc<AtomicBool>,
-    result: Arc<Mutex<Option<Turn>>>,
-) {
-    std::thread::spawn(move || {
-        shared.run(&request, &thread_id, &turn_id, &tx, &cancelled, &result);
-    });
 }
 
 pub struct ResponsesBackend {
@@ -83,8 +78,17 @@ pub struct ResponsesBackend {
 
 impl ResponsesBackend {
     pub fn new(endpoint: Endpoint, reasoning: Option<String>) -> Result<ResponsesBackend, BackendError> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(READ_TIMEOUT)
+        Self::with_sampling(endpoint, reasoning, None, None)
+    }
+
+    pub fn with_sampling(
+        endpoint: Endpoint,
+        reasoning: Option<String>,
+        temperature: Option<f64>,
+        top_p: Option<f64>,
+    ) -> Result<ResponsesBackend, BackendError> {
+        let client = reqwest::Client::builder()
+            .read_timeout(READ_TIMEOUT)
             .build()
             .map_err(|error| BackendError::Core(CoreError::Http { status: 0, detail: error.to_string() }))?;
         Ok(ResponsesBackend {
@@ -92,6 +96,8 @@ impl ResponsesBackend {
                 endpoint,
                 client,
                 reasoning,
+                temperature,
+                top_p,
                 last: Mutex::new(None),
                 turn_counter: std::sync::atomic::AtomicUsize::new(0),
             }),
@@ -108,22 +114,31 @@ impl ResponsesBackend {
 }
 
 impl Shared {
-    fn run(
+    async fn run(
         &self,
         request: &SendRequest,
         thread_id: &str,
         turn_id: &str,
         tx: &tokio::sync::mpsc::UnboundedSender<ThreadEvent>,
-        cancelled: &AtomicBool,
+        cancelled: &Notify,
         result: &Mutex<Option<Turn>>,
     ) {
         let _ = tx.send(ThreadEvent::TurnStarted { thread_id: thread_id.to_string(), turn_id: turn_id.to_string() });
-        let outcome = self.stream(request, thread_id, turn_id, tx, cancelled);
-        if cancelled.load(Ordering::SeqCst) {
+        let mut state = StreamState::new(thread_id);
+        let outcome = tokio::select! {
+            biased;
+            _ = cancelled.notified() => None,
+            outcome = self.stream(request, turn_id, tx, &mut state) => Some(outcome),
+        };
+        let Some(outcome) = outcome else {
+            for event in state.close_open_rows(turn_id, ItemStatus::Interrupted) {
+                let _ = tx.send(event);
+            }
             return;
-        }
+        };
         match outcome {
-            Ok(turn) => {
+            Ok(mut turn) => {
+                turn.incomplete_reason = turn.incomplete_reason.map(|detail| redact(&detail, &self.endpoint.credential));
                 *result.lock().unwrap() = Some(turn.clone());
                 *self.last.lock().unwrap() = turn.final_event.clone();
                 let _ = tx.send(ThreadEvent::TurnCompleted {
@@ -150,13 +165,12 @@ impl Shared {
         }
     }
 
-    fn stream(
+    async fn stream(
         &self,
         request: &SendRequest,
-        thread_id: &str,
         turn_id: &str,
         tx: &tokio::sync::mpsc::UnboundedSender<ThreadEvent>,
-        cancelled: &AtomicBool,
+        state: &mut StreamState,
     ) -> Result<Turn, BackendError> {
         let reasoning = request.reasoning.as_deref().or(self.reasoning.as_deref());
         let model = request.model.as_deref().filter(|m| !m.trim().is_empty()).unwrap_or(&self.endpoint.model);
@@ -174,6 +188,8 @@ impl Shared {
             image: request.image.as_deref(),
             max_output_tokens: request.max_output_tokens,
             reasoning,
+            temperature: self.temperature,
+            top_p: self.top_p,
             store: self.endpoint.store,
         };
         let body = match self.endpoint.protocol {
@@ -187,10 +203,11 @@ impl Shared {
         let mut response = call
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .send()
+            .await
             .map_err(|error| BackendError::Core(CoreError::Http { status: 0, detail: error.to_string() }))?;
         let status = response.status();
         if !status.is_success() {
-            let detail = response.text().unwrap_or_default();
+            let detail = response.text().await.unwrap_or_default();
             return Err(BackendError::Core(CoreError::Http {
                 status: status.as_u16(),
                 detail: redact(detail.trim(), &self.endpoint.credential),
@@ -203,7 +220,7 @@ impl Shared {
             .unwrap_or("")
             .to_string();
         if !content_type.contains("text/event-stream") {
-            let detail = response.text().unwrap_or_default();
+            let detail = response.text().await.unwrap_or_default();
             let detail = redact(detail.trim(), &self.endpoint.credential);
             let looks_like_json = detail.starts_with('{') || detail.starts_with('[');
             let said = if looks_like_json {
@@ -219,28 +236,23 @@ impl Shared {
         }
 
         let mut accumulator = TurnAccumulator::new();
-        let mut state = StreamState::new(thread_id);
         let mut framer = Framer::new();
         let mut pending: Vec<u8> = Vec::new();
-        let mut buffer = vec![0u8; READ_BYTES];
         let mut terminal_seen = false;
 
         loop {
-            if cancelled.load(Ordering::SeqCst) {
-                return Err(BackendError::Abandoned);
-            }
-            match response.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(read) => {
-                    pending.extend_from_slice(&buffer[..read]);
+            match response.chunk().await {
+                Ok(None) => break,
+                Ok(Some(chunk)) => {
+                    pending.extend_from_slice(&chunk);
                     while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
                         let line = pending.drain(..=newline).collect::<Vec<u8>>();
                         let line = String::from_utf8_lossy(&line);
                         let line = line.trim_end_matches(['\r', '\n']);
                         if let Some(event) = framer.push_line(line) {
                             terminal_seen |=
-                                self.publish(&event.event, &event.data, &mut accumulator, &mut state, turn_id, tx);
-                            if terminal_seen || cancelled.load(Ordering::SeqCst) {
+                                self.publish(&event.event, &event.data, &mut accumulator, state, turn_id, tx);
+                            if terminal_seen {
                                 break;
                             }
                         }
@@ -260,7 +272,7 @@ impl Shared {
             }
         }
         if let Some(event) = framer.finish() {
-            self.publish(&event.event, &event.data, &mut accumulator, &mut state, turn_id, tx);
+            self.publish(&event.event, &event.data, &mut accumulator, state, turn_id, tx);
         }
         let turn = accumulator.finish();
         for closing in state.close_open_rows(turn_id, ItemStatus::Completed) {
@@ -291,12 +303,12 @@ impl Shared {
     }
 }
 
-impl Backend for ResponsesBackend {
-    fn complete_once(&self, system: &str, user_text: &str, max_tokens: u32) -> Result<Turn, BackendError> {
-        let mut body = chat_summary_body(&self.inner.endpoint.model, system, user_text, max_tokens);
-        if let Protocol::Responses = self.inner.endpoint.protocol {
+impl Shared {
+    async fn complete_once(&self, system: &str, user_text: &str, max_tokens: u32) -> Result<Turn, BackendError> {
+        let mut body = chat_summary_body(&self.endpoint.model, system, user_text, max_tokens);
+        if let Protocol::Responses = self.endpoint.protocol {
             let shape = crate::openai::RequestShape {
-                model: &self.inner.endpoint.model,
+                model: &self.endpoint.model,
                 system,
                 history: &[],
                 user_text,
@@ -306,28 +318,29 @@ impl Backend for ResponsesBackend {
                 max_output_tokens: Some(max_tokens.max(1)),
                 reasoning: Some(crate::openai::REASONING_NONE),
                 store: false,
+                ..Default::default()
             };
             body = request_body(&shape);
             body.insert("stream".into(), Value::Bool(false));
         }
         let mut call = self
-            .inner
             .client
-            .post(self.inner.endpoint.url_for(self.inner.endpoint.protocol))
+            .post(self.endpoint.url_for(self.endpoint.protocol))
             .json(&Value::Object(body));
-        if let Some(key) = &self.inner.endpoint.credential.value {
+        if let Some(key) = &self.endpoint.credential.value {
             call = call.bearer_auth(key);
         }
         let response = call
             .send()
+            .await
             .map_err(|error| BackendError::Core(CoreError::Http { status: 0, detail: error.to_string() }))?;
         let status = response.status();
         let text =
-            response.text().map_err(|error| BackendError::Core(CoreError::Incomplete { detail: error.to_string() }))?;
+            response.text().await.map_err(|error| BackendError::Core(CoreError::Incomplete { detail: error.to_string() }))?;
         if !status.is_success() {
             return Err(BackendError::Core(CoreError::Http {
                 status: status.as_u16(),
-                detail: redact(text.trim(), &self.inner.endpoint.credential),
+                detail: redact(text.trim(), &self.endpoint.credential),
             }));
         }
         let value: Value = serde_json::from_str(&text)
@@ -356,12 +369,12 @@ impl Backend for ResponsesBackend {
             .ok_or(BackendError::Core(CoreError::Unanswered { request: "completeOnce" }))?;
         let usage = value.get("usage").and_then(Value::as_object).map(crate::openai::parse_usage);
         let mut turn = Turn::text(answer);
-        let finish = match self.inner.endpoint.protocol {
+        let finish = match self.endpoint.protocol {
             Protocol::Responses => value.get("status").and_then(Value::as_str).map(|status| (status, "completed")),
             Protocol::ChatCompletions => value.pointer("/choices/0/finish_reason").and_then(Value::as_str)
                 .map(|reason| (reason, "stop")),
         };
-        if !finish.is_some_and(|(actual, expected)| actual == expected) {
+        if finish.is_none_or(|(actual, expected)| actual != expected) {
             turn.final_event = None;
             turn.incomplete_reason = value.pointer("/incomplete_details/reason").and_then(Value::as_str)
                 .or(finish.map(|(actual, _)| actual)).map(str::to_owned);
@@ -371,24 +384,32 @@ impl Backend for ResponsesBackend {
         Ok(turn)
     }
 
+}
+
+impl Backend for ResponsesBackend {
+    fn context_endpoint(&self) -> Option<(&str, &str)> {
+        Some((&self.inner.endpoint.base_url, &self.inner.endpoint.model))
+    }
+
+    fn complete_once(&self, system: &str, user_text: &str, max_tokens: u32) -> Result<Turn, BackendError> {
+        http_runtime().block_on(self.inner.complete_once(system, user_text, max_tokens))
+    }
+
     fn send(&self, request: SendRequest) -> Result<TurnHandle, BackendError> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let turn_id = format!("tu_{}", self.inner.turn_counter.fetch_add(1, Ordering::SeqCst) + 1);
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let thread_id = "th_1".to_string();
-        // A handle cancels only its own request.
+        let turn_id = request.turn_id.clone().unwrap_or_else(|| {
+            format!("tu_{}", self.inner.turn_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1)
+        });
+        let cancelled = Arc::new(Notify::new());
         let worker_cancelled = Arc::clone(&cancelled);
         let worker_turn_id = turn_id.clone();
         let result = Arc::new(Mutex::new(None));
-        spawn_turn(Arc::clone(&self.inner), request, thread_id, worker_turn_id, tx, worker_cancelled, Arc::clone(&result));
-        let cancel_state = Arc::clone(&cancelled);
-        Ok(TurnHandle::new(
-            turn_id.clone(),
-            rx,
-            move |_| {
-            },
-            move || cancel_state.store(true, Ordering::SeqCst),
-        ).with_result(result))
+        let worker_result = Arc::clone(&result);
+        let shared = Arc::clone(&self.inner);
+        http_runtime().spawn(async move {
+            shared.run(&request, "th_1", &worker_turn_id, &tx, &worker_cancelled, &worker_result).await;
+        });
+        Ok(TurnHandle::new(turn_id, rx, |_| {}, move || cancelled.notify_one()).with_result(result))
     }
 
     fn resolve_approval(&self, _item_id: &str, _decision: baudet_core::ApprovalDecision) {}

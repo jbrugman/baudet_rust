@@ -28,17 +28,17 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use tokio::sync::mpsc as ampcc;
 
+#[cfg(test)]
+#[path = "live_tests.rs"]
+mod live_tests;
+
 enum Intent {
     Submit(String, Option<String>),
     UseCatalog(baudet_projects::Catalog),
     Compact,
     Stop,
     Quit,
-    Configure {
-        model: Option<String>,
-        reasoning: Option<String>,
-        max_output_tokens: Option<u32>,
-    },
+    Configure(Option<Result<Arc<dyn Backend>, String>>, Box<baudet_settings::Settings>),
     LoadSession {
         id: String,
         project: Option<String>,
@@ -55,6 +55,7 @@ struct Snapshot {
     turns: (usize, usize),
     has_more_older: bool,
     reason: Option<String>,
+    rejected_draft: Option<(String, Option<String>)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +119,10 @@ pub struct TranscriptApp {
 
 impl TranscriptApp {
     pub fn new(backend: Arc<dyn baudet_backend::Backend>) -> TranscriptApp {
+        Self::new_inner(backend, false)
+    }
+
+    fn new_inner(backend: Arc<dyn Backend>, live_settings: bool) -> TranscriptApp {
         let (intent_tx, intent_rx) = mpsc::channel::<Intent>();
         let (snap_tx, snap_rx) = ampcc::unbounded_channel();
         let state = Arc::new(AppState::new(backend, "You are Baudet's Rust rewrite."));
@@ -128,12 +133,16 @@ impl TranscriptApp {
         let sidebar = SidebarModel::open_default();
         // The sidebar and worker must see the same permission grants and session records.
         let catalog = sidebar.catalog().clone();
-        let worker = std::thread::spawn(move || {
-            worker_loop(state, worker_root, intent_rx, snap_tx, worker_approvals, catalog)
-        });
         let (settings_tx, settings_rx) = mpsc::channel::<SettingsCommand>();
+        let worker_settings = settings_tx.clone();
+        let worker = std::thread::spawn(move || {
+            worker_loop(state, worker_root, intent_rx, snap_tx, worker_approvals, catalog, worker_settings)
+        });
         let (report_tx, settings_events) = mpsc::channel::<SettingsEvent>();
-        let settings_worker = std::thread::spawn(move || settings_worker_loop(settings_rx, report_tx));
+        let configure = live_settings.then(|| intent_tx.clone());
+        let settings_worker = std::thread::spawn(move || {
+            settings_worker_loop(settings_rx, report_tx, configure, baudet_settings::SettingsFile::default_location())
+        });
         let mut settings = SettingsView::new();
         settings.load(&baudet_settings::SettingsFile::default_location());
         Texts::set_language(settings.language());
@@ -189,10 +198,6 @@ impl TranscriptApp {
     pub fn with_workspace(mut self, path: impl AsRef<std::path::Path>) -> TranscriptApp {
         self.workspace.open(&path.as_ref().to_string_lossy());
         self
-    }
-
-    fn with_backend(backend: Arc<dyn Backend>) -> TranscriptApp {
-        TranscriptApp::new(backend)
     }
 
     pub fn with_tab(mut self, tab: Tab) -> TranscriptApp {
@@ -354,28 +359,33 @@ impl TranscriptApp {
         self.update_min_window_width(ui.ctx());
 
         while let Ok(event) = self.settings_events.try_recv() {
-            if let SettingsEvent::Adopted { model, reasoning, max_output_tokens } = &event {
-                let _ = self.intents.send(Intent::Configure {
-                    model: model.clone(),
-                    reasoning: reasoning.clone(),
-                    max_output_tokens: *max_output_tokens,
-                });
+            if let SettingsEvent::ConnectionChanged(problem) = &event {
+                self.server_beurt = problem.is_none();
+                self.fell_back.clone_from(problem);
             }
             self.settings.apply_event(event);
         }
 
         let mut newest = None;
-        while let Ok(snapshot) = self.snapshots.try_recv() {
+        while let Ok(mut snapshot) = self.snapshots.try_recv() {
+            if let Some((mut text, image)) = snapshot.rejected_draft.take() {
+                if !text.is_empty() && !self.input.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&self.input);
+                self.input = text;
+                if self.attachment.is_none() {
+                    self.attachment = image;
+                }
+            }
             newest = Some(snapshot);
         }
         if let Some(report) = newest {
             self.loading = report.loading;
             self.more_older = report.has_more_older;
+            self.busy = report.busy;
             if !report.rows.is_empty() || report.reason.is_none() {
                 self.rows = report.rows;
-                self.busy = report.busy;
-                self.loading = report.loading;
-                self.more_older = report.has_more_older;
             }
             self.status = match (&report.reason, &self.fell_back, report.busy, report.loading) {
                 (Some(reason), _, _, _) => reason.clone(),
@@ -735,48 +745,61 @@ impl TranscriptApp {
                 }
             });
         }
-        if ui.add_enabled(self.server_beurt && !self.busy && !self.loading, egui::Button::new(Texts::get(Key::CompactButton))).clicked() {
+        let can_start = self.server_beurt && !self.busy && !self.loading;
+        let (send_clicked, compact_clicked, stop_clicked) = ui
+            .horizontal_wrapped(|ui| {
+                let send = ui.add_enabled(can_start, egui::Button::new(Texts::get(Key::SendButton))).clicked();
+                let compact = ui.add_enabled(can_start, egui::Button::new(Texts::get(Key::CompactButton))).clicked();
+                let stop = ui.add_enabled(self.busy, egui::Button::new(Texts::get(Key::StopButton))).clicked();
+                (send, compact, stop)
+            })
+            .inner;
+        if compact_clicked {
             let _ = self.intents.send(Intent::Compact);
             self.loading = true;
             self.status = Texts::get(Key::Summarising).to_owned();
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let stop_clicked = ui.add_enabled(self.busy, egui::Button::new(Texts::get(Key::StopButton))).clicked();
-            let send_clicked = ui
-                .add_enabled(self.server_beurt && !self.busy && !self.loading, egui::Button::new(Texts::get(Key::SendButton)))
-                .clicked();
-            let response = ui.add_enabled(
-                self.server_beurt,
-                egui::TextEdit::multiline(&mut self.input)
-                    .id_salt(COMPOSER_FIELD)
-                    .hint_text("Ask something…  (Enter sends)")
-                    .desired_rows(2)
-                    .lock_focus(false)
-                    .desired_width(f32::INFINITY),
-            );
-            let send_requested =
-                ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift) && response.has_focus();
-            if self.server_beurt && response.has_focus() && ui.input(|i| {
+
+        let response = ui.add_enabled(
+            self.server_beurt,
+            egui::TextEdit::multiline(&mut self.input)
+                .id_salt(COMPOSER_FIELD)
+                .hint_text("Ask something…  (Enter sends)")
+                .desired_rows(2)
+                .lock_focus(false)
+                .desired_width(f32::INFINITY),
+        );
+        if self.settings.honesty_footer() {
+            ui.add(egui::Label::new(egui::RichText::new(Texts::get(Key::LocalHonestyNote)).small().weak()).wrap());
+        }
+        let send_requested =
+            ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift) && response.has_focus();
+        if self.server_beurt
+            && response.has_focus()
+            && ui.input(|i| {
                 ((i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(egui::Key::V))
                     || i.events.iter().any(|event| matches!(event, egui::Event::Paste(_)))
-            }) {
-                if let Some(image) = crate::clipboard::image_data_url() {
-                    self.attachment = Some(image);
-                    ui.request_repaint();
-                }
+            })
+        {
+            if let Some(image) = crate::clipboard::image_data_url() {
+                self.attachment = Some(image);
+                ui.request_repaint();
             }
-            if (send_clicked || send_requested) && self.server_beurt && !self.busy && !self.loading
-                && (!self.input.trim().is_empty() || self.attachment.is_some()) {
-                let text = std::mem::take(&mut self.input);
-                let _ = self.intents.send(Intent::Submit(text, self.attachment.take()));
-                self.thinking_hidden = false;
-                self.busy = true;
-                self.status = "starting".to_string();
-            }
-            if stop_clicked {
-                let _ = self.intents.send(Intent::Stop);
-            }
-        });
+        }
+        if (send_clicked || send_requested)
+            && can_start
+            && !self.loading
+            && (!self.input.trim().is_empty() || self.attachment.is_some())
+        {
+            let text = std::mem::take(&mut self.input);
+            let _ = self.intents.send(Intent::Submit(text, self.attachment.take()));
+            self.thinking_hidden = false;
+            self.busy = true;
+            self.status = "starting".to_string();
+        }
+        if stop_clicked {
+            let _ = self.intents.send(Intent::Stop);
+        }
     }
 }
 
@@ -864,6 +887,26 @@ mod geometry_tests {
     use super::*;
 
     #[test]
+    fn the_composer_footer_follows_the_setting() {
+        let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+        let folder = tempfile::tempdir().unwrap();
+        let file = baudet_settings::SettingsFile::at(folder.path().join("settings.json"));
+        let ctx = egui::Context::default();
+
+        for enabled in [true, false] {
+            let settings = baudet_settings::Settings { honesty_footer: enabled, ..Default::default() };
+            file.write(&settings).unwrap();
+            app.settings.load(&file);
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| app.composer(ui));
+            let visible = output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == Texts::get(Key::LocalHonestyNote))
+            });
+            output.drop_without_applying_deltas();
+            assert_eq!(visible, enabled);
+        }
+    }
+
+    #[test]
     fn opgeslagen_breedtes_openen_op_dezelfde_maat_in_een_ander_venster() {
         let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
         let dir = tempfile::tempdir().unwrap();
@@ -894,6 +937,52 @@ mod geometry_tests {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn the_worker_learns_from_the_endpoint_and_model_that_received_the_turn() {
+    use baudet_backend::{BackendError, SendRequest, TurnHandle};
+
+    struct BackendWithEndpoint(ScriptedBackend);
+
+    impl Backend for BackendWithEndpoint {
+        fn send(&self, request: SendRequest) -> Result<TurnHandle, BackendError> {
+            self.0.send(request)
+        }
+
+        fn context_endpoint(&self) -> Option<(&str, &str)> {
+            Some(("http://test-endpoint/v1", "default-model"))
+        }
+    }
+
+    let script = Script::new().event(ThreadEvent::TurnCompleted {
+        thread_id: "th_1".into(),
+        turn_id: "tu_1".into(),
+        response_id: None,
+        usage: None,
+        final_event: None,
+        incomplete_reason: Some("Maximum context length is 8,192 tokens".into()),
+    });
+    let state = Arc::new(AppState::new(Arc::new(BackendWithEndpoint(ScriptedBackend::new(vec![script]))), "test"));
+    state.set_request_choices(Some("chosen-model".into()), None, None);
+    let folder = tempfile::tempdir().unwrap();
+    let catalog = baudet_projects::Catalog::open(folder.path()).unwrap();
+    let (intents, worker_intents) = mpsc::channel();
+    let (snapshots, _reports) = ampcc::unbounded_channel();
+    let (settings, commands) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        worker_loop(state, None, worker_intents, snapshots, Arc::default(), catalog, settings);
+    });
+
+    intents.send(Intent::Submit("question".into(), None)).unwrap();
+    let learned = commands.recv_timeout(std::time::Duration::from_secs(3));
+    intents.send(Intent::Quit).unwrap();
+    worker.join().unwrap();
+    assert!(matches!(
+        learned,
+        Ok(SettingsCommand::LearnContext { key, tokens: 8192 }) if key == "http://test-endpoint/v1|chosen-model"
+    ));
+}
+
 // Only this worker starts a turn or switches sessions.
 fn worker_loop(
     state: Arc<AppState>,
@@ -902,11 +991,15 @@ fn worker_loop(
     snapshots: ampcc::UnboundedSender<Snapshot>,
     approvals: Arc<crate::approval::Approvals>,
     catalog: baudet_projects::Catalog,
+    settings_tx: mpsc::Sender<SettingsCommand>,
 ) {
     let loading = Arc::new(AtomicBool::new(false));
+    let settings_file = root.as_ref().map(|path| baudet_settings::SettingsFile::at(path.join("settings.json")))
+        .unwrap_or_else(baudet_settings::SettingsFile::default_location);
+    let mut connection_problem: Option<String> = None;
     let mut disk: Option<usize> = None;
     let mut catalog = Some(catalog);
-    let publish = |state: &AppState, busy: bool, disk: Option<usize>| {
+    let publish = |state: &AppState, busy: bool, disk: Option<usize>, reason, rejected_draft| {
         let rows = state.rows().iter().map(Row::from).collect::<Vec<_>>();
         let on_screen = rows.len();
         let _ = snapshots.send(Snapshot {
@@ -916,10 +1009,12 @@ fn worker_loop(
             stored: state.persists(),
             turns: (disk.unwrap_or(0), on_screen),
             has_more_older: state.paging().0,
-            reason: None,
+            reason,
+            rejected_draft,
         });
     };
-    publish(&state, false, None);
+    publish(&state, false, None, None, None);
+    let mut learned_windows = std::collections::BTreeMap::new();
     let servers = Arc::new(std::sync::Mutex::new(baudet_tool::mcp::McpServers::default()));
     while let Ok(intent) = intents.recv() {
         if matches!(intent, Intent::LoadSession { .. }) {
@@ -930,7 +1025,11 @@ fn worker_loop(
             Intent::UseCatalog(replacement) => catalog = Some(replacement),
             Intent::Compact => {
                 use baudet_app::compaction::{CompactionOutcome, CompactionPlan};
-                let settings = baudet_settings::SettingsFile::default_location().read();
+                if let Some(reason) = &connection_problem {
+                    publish(&state, false, disk, Some(reason.clone()), None);
+                    continue;
+                }
+                let settings = settings_file.read();
                 let plan = CompactionPlan::from(&settings.settings().context_limits());
                 let reason = match state.compact(&plan) {
                     Ok(CompactionOutcome::NothingToFold) => Texts::get(Key::TooFewTurns).to_owned(),
@@ -952,23 +1051,42 @@ fn worker_loop(
                     stored: state.persists(),
                     has_more_older: state.paging().0,
                     reason: Some(reason),
+                    rejected_draft: None,
                 });
             }
             Intent::Submit(text, image) => {
-                let current = baudet_settings::SettingsFile::default_location().read();
-                let settings = current.settings().clone();
+                if let Some(reason) = &connection_problem {
+                    publish(&state, false, disk, Some(reason.clone()), Some((text, image)));
+                    continue;
+                }
+                let current = settings_file.read();
+                let mut settings = current.settings().clone();
+                let context_key = state.context_key();
+                if let Some(key) = context_key.as_ref() {
+                    if let Some(&tokens) = learned_windows.get(key) {
+                        settings.record_context_window(key.clone(), tokens);
+                    }
+                }
                 let project = state.project().and_then(|id| catalog.as_ref()?.project(&id));
                 let tool_project = project.filter(|project| AppState::tools_active(&settings, Some(project)));
                 let handle = if tool_project.is_none() {
-                    let Ok(sent) = state.send_with_image(&text, image.clone()) else {
-                        publish(&state, state.live_turns() > 0, disk);
-                        continue;
+                    use baudet_app::session::SendError;
+                    let sent = match state.send_with_context(&text, image.clone(), &settings) {
+                        Ok(sent) => sent,
+                        Err(SendError::ContextLimit) => {
+                            publish(&state, false, disk, Some(Texts::get(Key::ContextTooLong).to_owned()), Some((text, image)));
+                            continue;
+                        }
+                        Err(SendError::Busy(_)) => {
+                            publish(&state, state.live_turns() > 0, disk, None, None);
+                            continue;
+                        }
                     };
                     sent.take_reader()
                 } else {
                     None
                 };
-                publish(&state, true, disk);
+                publish(&state, true, disk, None, None);
                 let folder = Arc::clone(&state);
                 let watched = Arc::new(AtomicBool::new(true));
                 let flag = Arc::clone(&watched);
@@ -977,24 +1095,35 @@ fn worker_loop(
                 let approvals = Arc::clone(&approvals);
                 let servers = Arc::clone(&servers);
                 let drain = std::thread::spawn(move || {
-                    if let Some(project) = tool_project {
+                    let failure = if let Some(project) = tool_project {
                         let approval_cancelled = Arc::clone(&tool_cancelled);
-                        let _ = folder.run_tools(&text, image.as_deref(), baudet_app::session::tool_turn::ToolTurn {
+                        folder.run_tools(&text, image.as_deref(), baudet_app::session::tool_turn::ToolTurn {
                             project: &project,
                             settings: &settings,
                             servers: &mut servers.lock().unwrap(),
                             approval: Arc::new(move |request| approvals.request(request, &approval_cancelled)),
                             cancelled: tool_cancelled,
-                        });
+                        }).ok().flatten()
                     } else if let Some(handle) = handle {
+                        let mut failure = None;
                         let (tx, _rx) = ampcc::unbounded_channel();
-                        pump(&handle, |event| folder.apply(event), &tx);
+                        pump(&handle, |event| {
+                            if let ThreadEvent::TurnCompleted { incomplete_reason, .. } = event {
+                                failure.clone_from(incomplete_reason);
+                            }
+                            folder.apply(event)
+                        }, &tx);
                         folder.finish();
-                    }
+                        failure
+                    } else {
+                        None
+                    };
                     flag.store(false, Ordering::SeqCst);
+                    failure
                 });
+                let mut pending_configuration = None;
                 while watched.load(Ordering::SeqCst) {
-                    publish(&state, true, disk);
+                    publish(&state, true, disk, None, None);
                     match intents.recv_timeout(std::time::Duration::from_millis(32)) {
                         Ok(Intent::UseCatalog(replacement)) => catalog = Some(replacement),
                         Ok(Intent::Stop) => {
@@ -1007,30 +1136,45 @@ fn worker_loop(
                             cancelled.store(true, Ordering::Relaxed);
                             state.cancel_turn();
                             drain.join().ok();
-                            publish(&state, false, disk);
+                            publish(&state, false, disk, None, None);
                             return;
                         }
-                        Ok(Intent::Configure { .. }) => {
+                        Ok(Intent::Configure(backend, settings)) => {
+                            let backend = backend.or_else(|| pending_configuration.take().and_then(|(backend, _)| backend));
+                            pending_configuration = Some((backend, settings));
                         }
                         Ok(Intent::LoadSession { .. } | Intent::NewSession(_) | Intent::LoadOlder) => {
                         }
                         Err(_) => {}
                     }
                 }
-                drain.join().ok();
+                let failure = drain.join().ok().flatten();
                 disk = after_turn(&state, &catalog, &snapshots);
+                if let Some((backend, settings)) = pending_configuration {
+                    apply_configuration(&state, backend, *settings, &mut connection_problem);
+                }
+                if baudet_core::error::looks_like_context_overflow(failure.as_deref()) {
+                    if let (Some(key), Some(tokens)) =
+                        (context_key, baudet_core::error::claimed_context_tokens_of(failure.as_deref()))
+                    {
+                        learned_windows.insert(key.clone(), tokens);
+                        let _ = settings_tx.send(SettingsCommand::LearnContext { key, tokens });
+                    }
+                    publish(&state, false, disk, Some(Texts::get(Key::ContextOverflow).to_owned()), None);
+                    continue;
+                }
             }
             Intent::Stop => state.cancel_turn(),
-            Intent::Configure { model, reasoning, max_output_tokens } => {
-                state.set_request_choices(model, reasoning, max_output_tokens)
+            Intent::Configure(backend, settings) => {
+                apply_configuration(&state, backend, *settings, &mut connection_problem);
             }
             Intent::LoadSession { id, project } => {
                 if !load_session(&state, root.as_deref(), &id, project.as_deref(), &loading, &snapshots) {
-                    publish(&state, state.live_turns() > 0, disk);
+                    publish(&state, state.live_turns() > 0, disk, None, None);
                     continue;
                 }
                 disk = state.disk_items();
-                publish(&state, state.live_turns() > 0, disk);
+                publish(&state, state.live_turns() > 0, disk, None, None);
             }
             Intent::NewSession(project) => {
                 state.switch_project(project.clone());
@@ -1051,6 +1195,7 @@ fn worker_loop(
                                 turns: (0, 0),
                                 has_more_older: state.paging().0,
                                 reason: Some(reason),
+                                rejected_draft: None,
                             });
                             continue;
                         }
@@ -1058,7 +1203,7 @@ fn worker_loop(
                             catalog.upsert_session(&id, Some(&model), project.as_deref(), 0).ok();
                         }
                     }
-                    None => state.adopt(baudet_store::session::Session::new("", &state.model())),
+                    None => state.adopt(baudet_store::session::Session::new("", state.model())),
                 }
                 disk = state.disk_items();
             }
@@ -1071,7 +1216,7 @@ fn worker_loop(
                 }
             }
         }
-        publish(&state, state.live_turns() > 0, disk);
+        publish(&state, state.live_turns() > 0, disk, None, None);
     }
 }
 
@@ -1090,6 +1235,7 @@ fn after_turn(
             turns: (state.disk_items().unwrap_or(0), 0),
             has_more_older: state.paging().0,
             reason: Some(reason),
+            rejected_draft: None,
         });
     }
     if let (Some(catalog), false) = (catalog.as_ref(), id.is_empty()) {
@@ -1128,13 +1274,37 @@ fn load_session(
                 turns: state.transcript_len(),
                 has_more_older: state.paging().0,
                 reason: Some(reason),
+                rejected_draft: None,
             });
             false
         }
     }
 }
 
-fn settings_worker_loop(commands: mpsc::Receiver<SettingsCommand>, report: mpsc::Sender<SettingsEvent>) {
+fn apply_configuration(
+    state: &AppState,
+    backend: Option<Result<Arc<dyn Backend>, String>>,
+    settings: baudet_settings::Settings,
+    connection_problem: &mut Option<String>,
+) {
+    if let Some(backend) = backend {
+        match backend {
+            Ok(backend) => {
+                state.replace_backend(backend);
+                *connection_problem = None;
+            }
+            Err(reason) => *connection_problem = Some(reason),
+        }
+    }
+    state.set_request_choices(settings.model, settings.reasoning, settings.max_output_tokens);
+}
+
+fn settings_worker_loop(
+    commands: mpsc::Receiver<SettingsCommand>,
+    report: mpsc::Sender<SettingsEvent>,
+    configure: Option<mpsc::Sender<Intent>>,
+    file: baudet_settings::SettingsFile,
+) {
     while let Ok(command) = commands.recv() {
         match command {
             command @ (SettingsCommand::ApplyMcp { .. } | SettingsCommand::ClearMcpAllow | SettingsCommand::AllowMcp(_)) => {
@@ -1155,18 +1325,41 @@ fn settings_worker_loop(commands: mpsc::Receiver<SettingsCommand>, report: mpsc:
                 ));
             }
             SettingsCommand::Save(mut settings) => {
-                let file = baudet_settings::SettingsFile::default_location();
                 let current = file.read();
                 // MCP settings have dedicated commands on this worker. Preserve their latest values.
                 settings.mcp_servers = current.settings().mcp_servers.clone();
                 settings.mcp_allow_servers = current.settings().mcp_allow_servers.clone();
+                settings.learned_context_windows = current.settings().learned_context_windows.clone();
                 let outcome = file.write(&settings);
-                let _ = report.send(SettingsEvent::Adopted {
-                    model: settings.model,
-                    reasoning: settings.reasoning,
-                    max_output_tokens: settings.max_output_tokens,
-                });
+                if outcome.is_ok() {
+                    if let Some(configure) = &configure {
+                        let old = current.settings();
+                        let changed = endpoint_from_settings(old) != endpoint_from_settings(&settings)
+                            || old.reasoning != settings.reasoning
+                            || old.temperature != settings.temperature
+                            || old.top_p != settings.top_p;
+                        let backend = changed.then(|| {
+                            endpoint_from_settings(&settings).and_then(|endpoint| configured_backend(&settings, endpoint))
+                        });
+                        let connection = backend.as_ref().map(|result| result.as_ref().err().cloned());
+                        let _ = configure.send(Intent::Configure(backend, Box::new(settings)));
+                        if let Some(problem) = connection {
+                            let _ = report.send(SettingsEvent::ConnectionChanged(problem));
+                        }
+                    }
+                }
                 let _ = report.send(SettingsEvent::Saved(outcome));
+            }
+            SettingsCommand::LearnContext { key, tokens } => {
+                let mut settings = file.read().settings().clone();
+                if settings.learned_window(&key) != Some(tokens) {
+                    settings.record_context_window(key.clone(), tokens);
+                    if let Err(error) = file.write(&settings) {
+                        let _ = report.send(SettingsEvent::Saved(Err(error)));
+                        continue;
+                    }
+                }
+                let _ = report.send(SettingsEvent::ContextLearned { key, tokens });
             }
             SettingsCommand::ApplyTrusted(lines) => {
                 let mut kept: Vec<String> = Vec::new();
@@ -1359,7 +1552,7 @@ fn probe_dialect(
     };
     let status = answer.status().as_u16();
     let text = answer.text().unwrap_or_default();
-    let value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::Value::String(text));
+    let value = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
     baudet_backend::protocol::judge_probe(baudet_backend::protocol::Protocol::ChatCompletions, status, &value)
 }
 
@@ -1467,6 +1660,7 @@ pub fn run() -> eframe::Result {
 pub struct Startup {
     pub screenshot: Option<std::path::PathBuf>,
     pub workspace: Option<std::path::PathBuf>,
+    pub data_dir: Option<std::path::PathBuf>,
     pub settings: bool,
     pub fetch_models: bool,
     pub endpoint: Option<std::path::PathBuf>,
@@ -1502,6 +1696,14 @@ impl Startup {
                 }
             } else if let Some(rest) = arg.strip_prefix("--workspace=") {
                 out.workspace = Some(std::path::PathBuf::from(rest));
+            } else if arg == "--home" || arg.starts_with("--home=") {
+                let path = match arg.strip_prefix("--home=") {
+                    Some(path) => Some(path.to_owned()),
+                    None => args.next().filter(|path| !path.starts_with("--")),
+                };
+                let path = path.filter(|path| !path.is_empty())
+                    .ok_or_else(|| format!("{USAGE}\n--home needs a folder"))?;
+                out.data_dir = Some(std::path::PathBuf::from(path));
             } else if arg == "--settings" {
                 out.settings = true;
             } else if arg == "--fetch-models" {
@@ -1532,7 +1734,7 @@ impl Startup {
 }
 
 const USAGE: &str =
-    "usage: baudet-ui [--screenshot=<file.png>] [--workspace=<folder>] [--settings] [--fetch-models] [--endpoint=<address>] [--demo] [--send=<question>] [--discover]";
+    "usage: baudet-ui [--screenshot=<file.png>] [--workspace=<folder>] [--home=<folder>] [--settings] [--fetch-models] [--endpoint=<address>] [--demo] [--send=<question>] [--discover]";
 const HELP: &str = "
 Baudet - a local-first coding assistant
 
@@ -1541,6 +1743,7 @@ usage: baudet-ui [option]
   --screenshot <file>   draw the window, save a picture of it to <file> and exit,
   --screenshot=<file>   without taking focus from what you are doing
   --workspace <folder>  open <folder> in the filetree panel on startup
+  --home <folder>       store settings and conversations in <folder>, overriding BAUDET_HOME
   --settings            open the settings panel on startup
   --fetch-models        on startup, ask the endpoint for its models (with --settings,
                         the picture waits for the listing so it cannot miss the fetch)
@@ -1558,6 +1761,9 @@ usage: baudet-ui [option]
   -h, --help            show this text";
 
 pub fn run_from(startup: Startup) -> eframe::Result {
+    if let Some(path) = startup.data_dir.clone() {
+        baudet_store::set_data_dir(path).map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
+    }
     if startup.discover {
         let key = baudet_settings::SettingsFile::default_location().read().settings().resolved_key();
         println!("{}", describe_discovery(&discover_local(key)));
@@ -1597,7 +1803,7 @@ pub fn run_from(startup: Startup) -> eframe::Result {
         options,
         Box::new(move |cc| {
             palette::install(&cc.egui_ctx);
-            let mut app = TranscriptApp::with_backend(backend);
+            let mut app = TranscriptApp::new_inner(backend, !demo);
             let balk = status_balk(
                 startup.demo,
                 fell_back.as_deref(),
@@ -1618,12 +1824,8 @@ pub fn run_from(startup: Startup) -> eframe::Result {
                 app = app.with_endpoint(&address.to_string_lossy());
             }
             if !demo {
-                let choices = app.settings.draft().ok();
-                let _ = app.intents.send(Intent::Configure {
-                    model: choices.as_ref().and_then(|draft| draft.model.clone()),
-                    reasoning: choices.as_ref().and_then(|draft| draft.reasoning.clone()),
-                    max_output_tokens: choices.as_ref().and_then(|draft| draft.max_output_tokens),
-                });
+                let file = baudet_settings::SettingsFile::default_location();
+                let _ = app.intents.send(Intent::Configure(None, Box::new(file.read().settings().clone())));
             }
             if fetch_models {
                 app = app.with_fetch_models();
@@ -1693,7 +1895,7 @@ pub fn chosen_backend(startup: &Startup) -> (Arc<dyn Backend>, Option<String>) {
     settings.protocol = Some(word.clone());
     let _ = file.write(&settings);
     match endpoint_from_settings(&settings) {
-        Ok(endpoint) => live_backend(&settings, endpoint, Some(format!("scanned {address}: {word}"))),
+        Ok(endpoint) => live_backend(&settings, endpoint, None),
         Err(reason) => (TranscriptApp::demo_backend(), Some(format!("scripted player: {reason}"))),
     }
 }
@@ -1703,11 +1905,16 @@ fn live_backend(
     endpoint: Endpoint,
     notice: Option<String>,
 ) -> (Arc<dyn Backend>, Option<String>) {
-    let reasoning = settings.reasoning.clone();
-    match ResponsesBackend::new(endpoint, reasoning) {
-        Ok(backend) => (Arc::new(backend) as Arc<dyn Backend>, notice),
+    match configured_backend(settings, endpoint) {
+        Ok(backend) => (backend, notice),
         Err(error) => (TranscriptApp::demo_backend(), Some(format!("scripted player: {error}"))),
     }
+}
+
+fn configured_backend(settings: &baudet_settings::Settings, endpoint: Endpoint) -> Result<Arc<dyn Backend>, String> {
+    ResponsesBackend::with_sampling(endpoint, settings.reasoning.clone(), Some(settings.temperature), settings.top_p)
+        .map(|backend| Arc::new(backend) as Arc<dyn Backend>)
+        .map_err(|error| error.to_string())
 }
 
 fn endpoint_from_settings(settings: &baudet_settings::Settings) -> Result<Endpoint, String> {

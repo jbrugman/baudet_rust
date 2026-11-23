@@ -34,6 +34,7 @@ fn een_venster_kiest_zonder_vlag_de_server_en_met_demo_het_script() {
         );
 
         let request = baudet_backend::SendRequest {
+            turn_id: None,
             system: "test".to_string(),
             user_text: "toets of dit de vervoerder is".to_string(),
             history: Vec::new(),

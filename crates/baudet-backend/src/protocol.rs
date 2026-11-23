@@ -46,6 +46,7 @@ impl Protocol {
 // Chat uses message content parts and a different token-limit field from Responses.
 pub fn chat_request_body(shape: &crate::openai::RequestShape<'_>) -> Map<String, Value> {
     let mut body = Map::new();
+    crate::openai::insert_sampling(&mut body, shape);
     body.insert("model".into(), shape.model.into());
     body.insert("stream".into(), Value::Bool(true));
     let mut stream_options = Map::new();

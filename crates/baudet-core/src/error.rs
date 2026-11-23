@@ -17,11 +17,20 @@ pub fn claimed_context_tokens_of(message: Option<&str>) -> Option<u32> {
         return None;
     }
     let text = raw.to_lowercase();
-    for capture in LIMIT_CAPTURES.iter().filter_map(|re| first_number(re, &text)) {
-        let cleaned: String = capture.chars().filter(|c| *c != ',' && *c != '_' && !c.is_whitespace()).collect();
-        if let Ok(value) = cleaned.parse::<u32>() {
-            if (MIN_WINDOW..=MAX_WINDOW).contains(&value) {
+    for anchor in LIMIT_ANCHORS {
+        for (start, _) in text.match_indices(anchor) {
+            let after = text[start + anchor.len()..].trim_start();
+            let after = after.strip_prefix("is ").or_else(|| after.strip_prefix("of ")).unwrap_or(after);
+            let end = after.find(|c| !number_char(c)).unwrap_or(after.len());
+            if let Some(value) = parse_window(&after[..end]) {
                 return Some(value);
+            }
+            if anchor == "maximum context length" {
+                let before = text[..start].trim_end();
+                let number = before.rsplit(|c| !number_char(c)).next().unwrap_or_default();
+                if let Some(value) = parse_window(number) {
+                    return Some(value);
+                }
             }
         }
     }
@@ -46,24 +55,15 @@ const OVERFLOW_WORDS: [&str; 6] = [
     "input is too long",
 ];
 
-const LIMIT_CAPTURES: [&str; 4] = [
-    "maximum context length is %n",
-    "%n maximum context length",
-    "context window %n",
-    "token limit %n",
-];
+const LIMIT_ANCHORS: [&str; 4] = ["maximum context length", "context window", "context length limit", "token limit"];
 
-fn first_number(pattern: &str, text: &str) -> Option<String> {
-    let (prefix, _) = pattern.split_once("%n")?;
-    let anchor = text.find(prefix)?;
-    let rest = &text[anchor + prefix.len()..];
-    let start = rest.find(|c: char| c.is_ascii_digit())?;
-    if start > 20 {
-        return None;
-    }
-    let digits: String =
-        rest[start..].chars().take_while(|c| c.is_ascii_digit() || matches!(c, ',' | '_' | ' ')).collect();
-    Some(digits)
+fn number_char(c: char) -> bool {
+    c.is_ascii_digit() || matches!(c, ',' | '_' | ' ')
+}
+
+fn parse_window(text: &str) -> Option<u32> {
+    let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+    digits.parse().ok().filter(|value| (MIN_WINDOW..=MAX_WINDOW).contains(value))
 }
 
 impl CoreError {
@@ -79,5 +79,23 @@ impl CoreError {
             CoreError::Http { detail, .. } => claimed_context_tokens_of(Some(detail)),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claimed_context_tokens_of;
+
+    #[test]
+    fn only_explicit_model_limits_are_learned() {
+        for message in [
+            "Maximum context length of 8,192 tokens, but the request used 10,024",
+            "10,024 tokens > 8,192 maximum context length",
+            "context_length_exceeded: context window 8_192",
+        ] {
+            assert_eq!(claimed_context_tokens_of(Some(message)), Some(8192), "{message}");
+        }
+        assert_eq!(claimed_context_tokens_of(Some("maximum context length exceeded by 800 tokens")), None);
+        assert_eq!(claimed_context_tokens_of(Some("too many tokens: request used 10,024")), None);
     }
 }

@@ -24,7 +24,7 @@ impl Sent {
 }
 
 pub struct AppState {
-    backend: Arc<dyn Backend>,
+    backend: Mutex<Arc<dyn Backend>>,
     system: String,
     choices: Mutex<RequestChoices>,
     rows: Mutex<Rows>,
@@ -47,10 +47,18 @@ pub struct RequestChoices {
 #[error("a turn is already running; stop it first")]
 pub struct TurnBusy;
 
+#[derive(Debug, thiserror::Error)]
+pub enum SendError {
+    #[error(transparent)]
+    Busy(#[from] TurnBusy),
+    #[error("the request exceeds the local context limit")]
+    ContextLimit,
+}
+
 // A turn has exactly one stream reader.
 pub fn pump(
     handle: &Arc<Mutex<TurnHandle>>,
-    apply: impl Fn(&ThreadEvent) -> bool,
+    mut apply: impl FnMut(&ThreadEvent) -> bool,
     forward: &mpsc::UnboundedSender<ThreadEvent>,
 ) {
     loop {
@@ -67,10 +75,6 @@ pub fn pump(
             Err(mpsc::error::TryRecvError::Disconnected) => break,
         }
     }
-}
-
-fn history_of(session: &Session) -> Vec<ThreadEvent> {
-    history_events(&session.messages)
 }
 
 // The backend reverses this list before putting it on the wire.
@@ -107,10 +111,6 @@ fn msg_of(item: &Item) -> Option<Msg> {
 }
 
 impl AppState {
-    fn system_with_summary(&self, summary: Option<&str>) -> String {
-        baudet_store::instructions(&self.system, summary, false)
-    }
-
     // Commit storage before changing the conversation in memory.
     pub fn compact(&self, plan: &crate::compaction::CompactionPlan) -> Result<crate::compaction::CompactionOutcome, String> {
         use crate::compaction::{CompactionOutcome, Compactor, SUMMARY_PROMPT};
@@ -121,8 +121,9 @@ impl AppState {
                 let active = self.active.lock().unwrap();
                 (active.messages.clone(), active.summary.clone())
             };
+            let backend = self.backend();
             let outcome = Compactor::fold(plan, &messages, summary.as_deref(), |source, cap| {
-                self.backend.complete_once(SUMMARY_PROMPT, source, cap).map_err(|error| error.to_string())
+                backend.complete_once(SUMMARY_PROMPT, source, cap).map_err(|error| error.to_string())
             })?;
             if let CompactionOutcome::Compacted { summary, folded } = &outcome {
                 let retained = &messages[*folded..];
@@ -144,7 +145,7 @@ impl AppState {
 
     pub fn new(backend: Arc<dyn Backend>, system: impl Into<String>) -> AppState {
         AppState {
-            backend,
+            backend: Mutex::new(backend),
             system: system.into(),
             choices: Mutex::new(RequestChoices::default()),
             rows: Mutex::new(Rows::new()),
@@ -155,6 +156,15 @@ impl AppState {
             live: Mutex::new(None),
             project: Mutex::new(None),
         }
+    }
+
+    fn backend(&self) -> Arc<dyn Backend> {
+        Arc::clone(&self.backend.lock().unwrap())
+    }
+
+    pub fn replace_backend(&self, backend: Arc<dyn Backend>) {
+        *self.backend.lock().unwrap() = backend;
+        self.active.lock().unwrap().previous_response_id = None;
     }
 
     pub fn set_request_choices(
@@ -179,32 +189,85 @@ impl AppState {
     }
 
     pub fn send_with_image(&self, user_text: &str, image: Option<String>) -> Result<Sent, TurnBusy> {
-        self.live_turns.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).map_err(|_| TurnBusy)?;
-        let index = self.turn_counter.fetch_add(1, Ordering::SeqCst);
-        let turn_id = format!("tu_{}", index + 1);
-        let thread_id = "th_1".to_string();
+        self.send_inner(user_text, image, None).map_err(|_| TurnBusy)
+    }
 
-        let question = Item::UserMessage(baudet_core::UserMessageItem {
-            item_id: format!("{turn_id}/user"),
-            text: user_text.to_string(),
-            status: ItemStatus::Completed,
-        });
-        let history;
-        let system;
-        {
+    pub fn send_with_context(
+        &self,
+        user_text: &str,
+        image: Option<String>,
+        settings: &baudet_settings::Settings,
+    ) -> Result<Sent, SendError> {
+        self.send_inner(user_text, image, Some(settings))
+    }
+
+    pub fn context_key(&self) -> Option<String> {
+        let choices = self.choices.lock().unwrap();
+        let backend = self.backend();
+        let (url, model) = Self::context_endpoint(&*backend, &choices)?;
+        (!model.is_empty()).then(|| baudet_store::window_key(url, model))
+    }
+
+    fn context_endpoint<'a>(backend: &'a dyn Backend, choices: &'a RequestChoices) -> Option<(&'a str, &'a str)> {
+        let (url, default_model) = backend.context_endpoint()?;
+        let model = choices.model.as_deref().filter(|value| !value.trim().is_empty()).unwrap_or(default_model);
+        Some((url, model))
+    }
+
+    fn context_limits(
+        backend: &dyn Backend,
+        settings: &baudet_settings::Settings,
+        choices: &RequestChoices,
+    ) -> baudet_store::ContextLimits {
+        let mut limits = match Self::context_endpoint(backend, choices) {
+            Some((url, model)) => settings.context_limits_for(url, model),
+            None => settings.context_limits(),
+        };
+        limits.max_output_tokens = choices.max_output_tokens.unwrap_or(0);
+        limits
+    }
+
+    fn send_inner(
+        &self,
+        user_text: &str,
+        image: Option<String>,
+        settings: Option<&baudet_settings::Settings>,
+    ) -> Result<Sent, SendError> {
+        self.live_turns.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).map_err(|_| TurnBusy)?;
+        let choices = self.choices.lock().unwrap().clone();
+        let backend = self.backend();
+        let limits = settings.map(|settings| Self::context_limits(&*backend, settings, &choices));
+        let thread_id = "th_1".to_string();
+        let (turn_id, history, system) = {
             let mut active = self.active.lock().unwrap();
-            history = history_of(&active);
-            system = self.system_with_summary(active.summary.as_deref());
+            let summary = active.summary.as_deref();
+            let (history, system) = match limits.as_ref() {
+                Some(limits) => match self.chat_context(&active.messages, summary, user_text, limits) {
+                    Ok(context) => context,
+                    Err(error) => {
+                        self.finish();
+                        return Err(error);
+                    }
+                },
+                None => (history_events(&active.messages), baudet_store::instructions(&self.system, summary, false)),
+            };
+            let turn_id = format!("tu_{}", self.turn_counter.fetch_add(1, Ordering::SeqCst) + 1);
+            let question = Item::UserMessage(baudet_core::UserMessageItem {
+                item_id: format!("{turn_id}/user"),
+                text: user_text.to_string(),
+                status: ItemStatus::Completed,
+            });
             active.messages.push(Msg::user(user_text));
             let mut rows = self.rows.lock().unwrap();
             let mut emitter =
                 Emitter::storing(&mut rows, &mut active.items, &thread_id, &turn_id);
             emitter.started(question.clone());
             emitter.completed(question);
-        }
+            (turn_id, history, system)
+        };
 
-        let choices = self.choices.lock().unwrap().clone();
         let request = SendRequest {
+            turn_id: Some(turn_id.clone()),
             system,
             user_text: user_text.to_string(),
             history,
@@ -216,11 +279,11 @@ impl AppState {
             reasoning: choices.reasoning.clone(),
         };
 
-        let handle = match self.backend.send(request) {
+        let handle = match backend.send(request) {
             Ok(handle) => Arc::new(Mutex::new(handle)),
             Err(_) => {
                 self.live_turns.fetch_sub(1, Ordering::SeqCst);
-                return Err(TurnBusy);
+                return Err(TurnBusy.into());
             }
         };
         *self.live.lock().unwrap() = Some(Arc::clone(&handle));
@@ -231,6 +294,57 @@ impl AppState {
             handle: Arc::clone(&handle),
             reader: Mutex::new(Some(handle)),
         })
+    }
+
+    fn chat_context(
+        &self,
+        prior: &[Msg],
+        summary: Option<&str>,
+        user_text: &str,
+        limits: &baudet_store::ContextLimits,
+    ) -> Result<(Vec<ThreadEvent>, String), SendError> {
+        use baudet_store::{cost_chars, instructions, ContextStrategy};
+
+        let first = if limits.strategy.trims_by_turn_count() {
+            prior.len().saturating_sub(limits.keep_recent_messages.saturating_sub(1))
+        } else {
+            0
+        };
+        let prior = &prior[first..];
+        let prompt_chars = cost_chars(&Msg::user(user_text));
+        let prior_chars = prior.iter().map(cost_chars).sum::<usize>();
+        let mut system = instructions(&self.system, summary, first > 0);
+        let budget = limits.trim_budget(100);
+        let trim = !prior.is_empty()
+            && limits.strategy != ContextStrategy::StopAtLimit
+            && limits.over((prompt_chars + prior_chars + system.chars().count()).div_ceil(3) as u64, budget as u32);
+        if trim {
+            system = instructions(&self.system, summary, true);
+        }
+        let input_tokens = (prompt_chars + system.chars().count()).div_ceil(3);
+        let history_tokens = if limits.strategy == ContextStrategy::StopAtLimit {
+            prior_chars.div_ceil(3)
+        } else {
+            0
+        };
+        if limits.over((input_tokens + history_tokens) as u64, limits.hard_ceiling()) {
+            return Err(SendError::ContextLimit);
+        }
+        if !trim {
+            return Ok((history_events(prior), system));
+        }
+        let room = budget.saturating_sub(input_tokens + limits.max_output_tokens as usize);
+        let history = if room == 0 {
+            Vec::new()
+        } else {
+            let bounded = baudet_store::bound(prior, limits.strategy, room, limits.keep_recent_messages);
+            if bounded.iter().map(cost_chars).sum::<usize>() <= room.saturating_mul(3) {
+                history_events(&bounded)
+            } else {
+                Vec::new()
+            }
+        };
+        Ok((history, system))
     }
 
     pub fn emit(&self, item: &Item) {

@@ -16,6 +16,7 @@ pub enum SettingsCommand {
     },
     Probe { endpoint: String, api_key: Option<String> },
     Save(Settings),
+    LearnContext { key: String, tokens: u32 },
     ApplyTrusted(Vec<String>),
     ClearTrusted,
     ClearAlways,
@@ -31,8 +32,9 @@ pub enum SettingsEvent {
     },
     Listing(Result<Vec<Model>, ListingError>, String),
     Probed(Result<Option<Protocol>, String>, String),
-    Adopted { model: Option<String>, reasoning: Option<String>, max_output_tokens: Option<u32> },
+    ConnectionChanged(Option<String>),
     Saved(Result<(), WriteError>),
+    ContextLearned { key: String, tokens: u32 },
     TrustedApplied {
         trusted: Vec<String>,
         always: Vec<String>,
@@ -137,6 +139,10 @@ impl SettingsView {
         self.transcript_wrap
     }
 
+    pub(crate) fn honesty_footer(&self) -> bool {
+        self.honesty_footer
+    }
+
     pub fn new() -> SettingsView {
         SettingsView::default()
     }
@@ -192,6 +198,7 @@ impl SettingsView {
         self.stored_context.use_server_session = settings.use_server_session;
         self.stored_context.learned_context_window = settings.learned_context_window;
         self.stored_context.learned_context_key = settings.learned_context_key.clone();
+        self.stored_context.learned_context_windows = settings.learned_context_windows.clone();
         self.stored_context.left_divider = settings.left_divider;
         self.stored_context.right_divider = settings.right_divider;
         self.stored_context.right_panel_width = settings.right_panel_width;
@@ -200,11 +207,7 @@ impl SettingsView {
         self.language = settings.language;
         self.fetched_for = None;
         self.listing_answered = false;
-        if settings.learned_context_window > 0
-            && settings.learned_context_key == baudet_store::window_key(&settings.base_url, settings.model_name())
-        {
-            self.model_window = Some(settings.learned_context_window);
-        }
+        self.model_window = settings.learned_window(&settings.context_limits().identity_key());
         self.probed = None;
         self.probing = false;
     }
@@ -256,6 +259,7 @@ impl SettingsView {
             auto_allow_commands: self.stored_context.auto_allow_commands.clone(),
             learned_context_window: self.stored_context.learned_context_window,
             learned_context_key: self.stored_context.learned_context_key.clone(),
+            learned_context_windows: self.stored_context.learned_context_windows.clone(),
             left_divider: self.stored_context.left_divider,
             right_divider: self.stored_context.right_divider,
             right_panel_width: self.stored_context.right_panel_width,
@@ -334,7 +338,15 @@ impl SettingsView {
                     Err(problem) => self.status = problem,
                 }
             }
-            SettingsEvent::Adopted { .. } => {}
+            SettingsEvent::ConnectionChanged(_) => {}
+            SettingsEvent::ContextLearned { key, tokens } => {
+                if let Ok(endpoint) = baudet_settings::Provider::from_base_url(&self.base_url) {
+                    if key == baudet_store::window_key(endpoint.base_url(), self.model.as_deref().unwrap_or("")) {
+                        self.model_window = Some(tokens);
+                    }
+                }
+                self.stored_context.record_context_window(key, tokens);
+            }
             SettingsEvent::McpUpdated { servers, allowed, refresh_servers, status, outcome } => {
                 match outcome {
                     Ok(()) => {

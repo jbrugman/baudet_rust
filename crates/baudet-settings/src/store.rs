@@ -183,6 +183,7 @@ mod tests {
             auto_allow_commands: vec!["cargo test".into()],
             learned_context_window: 32_768,
             learned_context_key: "http://studio:8000/v1|Qwen3.8-Flash".into(),
+            learned_context_windows: [("http://studio:8000/v1|other-model".into(), 8192)].into(),
             left_divider: 301,
             right_divider: 745,
             right_panel_width: 320,

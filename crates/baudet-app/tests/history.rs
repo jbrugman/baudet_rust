@@ -188,6 +188,7 @@ fn de_draad_zet_systeem_transcript_vraag_in_die_volgorde() {
         max_output_tokens: None,
         reasoning: None,
         store: false,
+        ..Default::default()
     };
     let body = chat_request_body(&shape);
     let roles: Vec<&str> = body["messages"].as_array().unwrap().iter().map(|m| m["role"].as_str().unwrap()).collect();

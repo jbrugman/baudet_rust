@@ -64,6 +64,16 @@ fn a_workspace_without_a_folder_is_an_error_not_a_window() {
 }
 
 #[test]
+fn the_data_folder_accepts_both_spellings_and_requires_a_path() {
+    for args in [&["b", "--home", "data"][..], &["b", "--home=data"][..]] {
+        assert_eq!(parse(args).unwrap().data_dir.unwrap(), std::path::Path::new("data"));
+    }
+    for args in [&["b", "--home"][..], &["b", "--home="][..], &["b", "--home", "--demo"][..]] {
+        assert!(parse(args).is_err());
+    }
+}
+
+#[test]
 fn the_two_options_can_be_given_in_any_order() {
     let startup = parse(&["b", "--workspace=/tmp/bron", "--screenshot=/tmp/a.png"]).unwrap();
     assert_eq!(startup.workspace.as_deref(), Some(std::path::Path::new("/tmp/bron")));

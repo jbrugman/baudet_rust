@@ -77,6 +77,51 @@ fn state_for(events: Vec<ThreadEvent>) -> (Arc<ScriptedBackend>, Arc<AppState>) 
 }
 
 #[test]
+fn ordinary_chat_bounds_only_the_wire_history() {
+    use baudet_settings::config::ContextStrategy;
+
+    for (strategy, budget) in [(ContextStrategy::RecentMessages, 0), (ContextStrategy::RollingWindow, 200)] {
+        let (backend, state) = state_for(answer("th_1", "tu_1"));
+        run_turn(&state, &"old input ".repeat(100));
+        let settings = baudet_settings::Settings {
+            context_strategy: strategy,
+            context_budget_tokens: budget,
+            context_keep_recent_messages: 2,
+            ..Default::default()
+        };
+        let sent = state.send_with_context("new question", Some("image".into()), &settings).unwrap();
+        let (request, _) = backend.last_request().unwrap();
+        let replay = baudet_backend::protocol::wire_history(&request.history);
+        assert!(replay.iter().all(|item| !item.content.contains("old input")));
+        assert!(replay.iter().any(|item| item.content == "Hallo"));
+        assert_eq!(request.user_text, "new question");
+        assert_eq!(request.image.as_deref(), Some("image"));
+        assert!(request.system.contains(baudet_store::CONTEXT_LOSS_NOTE));
+        assert_eq!(sent.messages_before, 2);
+        assert_eq!(state.transcript_len(), (3, 3));
+    }
+}
+
+#[test]
+fn ordinary_chat_refuses_an_over_budget_turn_before_recording_or_sending_it() {
+    let (backend, state) = state_for(vec![]);
+    let settings = baudet_settings::Settings {
+        context_strategy: baudet_settings::config::ContextStrategy::StopAtLimit,
+        context_budget_tokens: 50,
+        ..Default::default()
+    };
+
+    assert!(matches!(
+        state.send_with_context(&"long ".repeat(100), Some("image".into()), &settings),
+        Err(baudet_app::session::SendError::ContextLimit)
+    ));
+    assert_eq!(state.live_turns(), 0);
+    assert!(state.rows().is_empty());
+    assert_eq!(backend.turns_started(), 0);
+    assert_eq!(state.send_with_context("short", None, &settings).unwrap().turn_id, "tu_1");
+}
+
+#[test]
 fn the_instruction_is_a_row_before_the_answer_arrives() {
     let (_backend, state) = state_for(vec![]);
     let sent = state.send("en?").unwrap();

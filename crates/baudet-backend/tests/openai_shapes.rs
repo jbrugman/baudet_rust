@@ -166,6 +166,19 @@ fn a_terminal_event_without_a_reason_still_names_the_error_code() {
 }
 
 #[test]
+fn a_context_failure_preserves_the_window_reported_in_the_message() {
+    for event in [
+        r#"{"type":"response.failed","error":{"code":"context_length_exceeded","message":"Maximum context length is 8,192 tokens."}}"#,
+        r#"{"error":{"code":"context_length_exceeded","message":"Maximum context length is 8,192 tokens."}}"#,
+    ] {
+        let mut turn = TurnAccumulator::new();
+        turn.feed(None, event);
+        let failure = turn.finish().incomplete_reason;
+        assert_eq!(baudet_core::error::claimed_context_tokens_of(failure.as_deref()), Some(8192));
+    }
+}
+
+#[test]
 fn a_stream_that_only_reports_an_error_says_so() {
     let mut turn = TurnAccumulator::new();
     turn.feed(None, r#"{"type":"error","error":{"message":"model is loading"}}"#);

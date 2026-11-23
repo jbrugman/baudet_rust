@@ -1,6 +1,6 @@
 
 use baudet_core::{ApprovalDecision, CommandExecutionItem, Item, ItemKind, ItemStatus, ThreadEvent};
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 
 #[derive(Debug, Default)]
 pub struct Rows {
@@ -49,12 +49,15 @@ impl Rows {
 
     pub fn prepend_for_screen(&mut self, item: Item) {
         let id = item.item_id().to_string();
-        if self.items.contains_key(&id) {
-            self.items.insert(id, item);
-            return;
+        match self.items.entry(id) {
+            Entry::Occupied(mut entry) => {
+                entry.insert(item);
+            }
+            Entry::Vacant(entry) => {
+                self.order.insert(0, entry.key().clone());
+                entry.insert(item);
+            }
         }
-        self.order.insert(0, id.clone());
-        self.items.insert(id, item);
     }
 
     fn text_of(&self, item_id: &str) -> String {

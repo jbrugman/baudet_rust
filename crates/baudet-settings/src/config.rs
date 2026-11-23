@@ -1,6 +1,7 @@
 
 use baudet_i18n::Language;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -120,6 +121,8 @@ pub struct Settings {
     pub auto_allow_commands: Vec<String>,
     pub learned_context_window: u32,
     pub learned_context_key: String,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub learned_context_windows: BTreeMap<String, u32>,
     pub left_divider: i32,
     pub right_divider: i32,
     pub right_panel_width: i32,
@@ -169,6 +172,7 @@ impl Default for Settings {
             auto_allow_commands: Vec::new(),
             learned_context_window: 0,
             learned_context_key: String::new(),
+            learned_context_windows: BTreeMap::new(),
             left_divider: 0,
             right_divider: 0,
             right_panel_width: 0,
@@ -222,6 +226,13 @@ impl Settings {
     }
 
     pub fn context_limits(&self) -> baudet_store::ContextLimits {
+        let endpoint = crate::Provider::from_base_url(&self.base_url);
+        let base_url = endpoint.as_ref().map_or(self.base_url.as_str(), crate::Provider::base_url);
+        self.context_limits_for(base_url, self.model_name())
+    }
+
+    pub fn context_limits_for(&self, base_url: &str, model: &str) -> baudet_store::ContextLimits {
+        let key = baudet_store::window_key(base_url, model);
         baudet_store::ContextLimits {
             strategy: match self.context_strategy {
                 ContextStrategy::RecentMessages => baudet_store::ContextStrategy::RecentMessages,
@@ -230,23 +241,34 @@ impl Settings {
             },
             budget_tokens: self.context_budget_tokens,
             max_output_tokens: self.max_output_tokens.unwrap_or(0),
-            learned_context_window: self.learned_context_window,
-            learned_context_key: self.learned_context_key.clone(),
+            learned_context_window: self.learned_window(&key).unwrap_or(0),
+            learned_context_key: key,
             keep_recent_messages: usize::try_from(self.context_keep_recent_messages.max(1)).unwrap_or(usize::MAX),
-            model: self.model_name().to_string(),
-            base_url: self.base_url.clone(),
+            model: model.to_owned(),
+            base_url: base_url.to_owned(),
         }
     }
 
-    // Record the window under the endpoint and model that reported it.
+    pub fn learned_window(&self, key: &str) -> Option<u32> {
+        self.learned_context_windows.get(key).copied().or_else(|| {
+            (self.learned_context_key == key).then_some(self.learned_context_window)
+        }).filter(|tokens| *tokens > 0)
+    }
+
     pub fn learn_context_window(&mut self, claimed: Option<u32>, base_url: &str) {
         let Some(claimed) = claimed.filter(|claimed| *claimed > 0) else { return };
         let key = baudet_store::window_key(base_url, self.model_name());
-        if self.learned_context_window == claimed && self.learned_context_key == key {
-            return;
-        }
+        self.record_context_window(key.clone(), claimed);
         self.learned_context_window = claimed;
         self.learned_context_key = key;
+    }
+
+    pub fn record_context_window(&mut self, key: String, tokens: u32) {
+        if self.learned_context_window > 0 && !self.learned_context_key.is_empty() {
+            self.learned_context_windows.entry(self.learned_context_key.clone())
+                .or_insert(self.learned_context_window);
+        }
+        self.learned_context_windows.insert(key, tokens);
     }
 }
 
@@ -645,11 +667,13 @@ mod tests {
         assert_eq!(settings.learned_context_key, "http://b:8000/v1|gemma-3-4b-it");
         assert_eq!(
             settings.context_limits().context_window(),
-            Some(32_768),
-            "een getal dat op een andere server leerde, geld hier niet"
+            Some(12_288),
+            "learning on another endpoint preserves the first endpoint's limit"
         );
         settings.base_url = "http://b:8000/v1".into();
         assert_eq!(settings.context_limits().context_window(), Some(4_096));
+        settings.model = Some("other-model".into());
+        assert_eq!(settings.context_limits().context_window(), None);
     }
 
     #[test]

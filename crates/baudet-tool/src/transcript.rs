@@ -81,7 +81,7 @@ pub fn split_for_window(history: &[Msg]) -> (Vec<Msg>, String) {
     let user_text = history.last().map(|msg| scrub(&msg.content)).unwrap_or_default();
     let prior = history[..history.len().saturating_sub(1)]
         .iter()
-        .map(|msg| scrubbed(msg))
+        .map(scrubbed)
         .collect();
     (prior, user_text)
 }
@@ -90,7 +90,7 @@ pub fn for_call(history: &[Msg]) -> (Vec<Msg>, String) {
     let user_text = history.last().map(|msg| scrub(&msg.content)).unwrap_or_default();
     let prior = history[..history.len().saturating_sub(1)]
         .iter()
-        .map(|msg| scrubbed(msg))
+        .map(scrubbed)
         .collect::<Vec<_>>();
     (fit(&prior, MAX_REPLAY_CHARS), user_text)
 }

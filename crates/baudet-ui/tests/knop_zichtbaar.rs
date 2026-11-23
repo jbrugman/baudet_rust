@@ -90,7 +90,7 @@ fn het_palet_geeft_de_knoppen_het_veld_dat_de_tekenaar_haalt() {
 }
 
 #[test]
-fn beide_chatknoppen_passen_onderin_een_smal_venster() {
+fn chatknoppen_staan_op_volgorde_boven_het_invoerveld() {
     let ctx = egui::Context::default();
     baudet_ui::palette::install(&ctx);
     let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
@@ -99,15 +99,27 @@ fn beide_chatknoppen_passen_onderin_een_smal_venster() {
     ctx.run_ui(narrow.clone(), |ui| app.paint(ui)).drop_without_applying_deltas();
     let out = ctx.run_ui(narrow, |ui| app.paint(ui));
     let composer = egui::containers::PanelState::load(&ctx, egui::Id::new("composer")).unwrap().outer_rect;
-    for key in [baudet_i18n::Key::SendButton, baudet_i18n::Key::StopButton] {
-        let label = baudet_i18n::Texts::get(key);
-        assert!(
-            out.shapes.iter().any(|shape| {
-                let egui::Shape::Text(text) = &shape.shape else { return false };
+    let visible_text = |label| {
+        out.shapes
+            .iter()
+            .find_map(|shape| {
+                let egui::Shape::Text(text) = &shape.shape else { return None };
                 let rect = egui::Rect::from_min_size(text.pos, text.galley.size());
-                text.galley.text() == label && composer.contains_rect(rect) && shape.clip_rect.contains_rect(rect)
-            }),
-            "{label} is niet volledig zichtbaar in {composer:?}"
+                (text.galley.text() == label && composer.contains_rect(rect) && shape.clip_rect.contains_rect(rect))
+                    .then_some(rect)
+            })
+            .unwrap_or_else(|| panic!("{label} is niet volledig zichtbaar in {composer:?}"))
+    };
+    use baudet_i18n::{Key, Texts};
+    let buttons = [Key::SendButton, Key::CompactButton, Key::StopButton].map(|key| visible_text(Texts::get(key)));
+    let input = visible_text("Ask something…  (Enter sends)");
+    for button in buttons {
+        assert!(button.bottom() <= input.top(), "{button:?} hoort boven het invoerveld");
+    }
+    for [first, next] in [[buttons[0], buttons[1]], [buttons[1], buttons[2]]] {
+        assert!(
+            next.top() >= first.bottom() || next.left() >= first.right() && next.bottom() > first.top(),
+            "onverwachte knopvolgorde {first:?}, {next:?}"
         );
     }
     out.drop_without_applying_deltas();

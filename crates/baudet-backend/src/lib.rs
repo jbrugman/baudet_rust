@@ -11,6 +11,7 @@ pub mod transport;
 
 #[derive(Debug, Clone, Default)]
 pub struct SendRequest {
+    pub turn_id: Option<String>,
     pub system: String,
     pub user_text: String,
     pub history: Vec<ThreadEvent>,
@@ -76,6 +77,10 @@ impl TurnHandle {
 // The backend owns transport. Each handle exposes a single event stream.
 pub trait Backend: Send + Sync {
     fn send(&self, request: SendRequest) -> Result<TurnHandle, BackendError>;
+
+    fn context_endpoint(&self) -> Option<(&str, &str)> {
+        None
+    }
 
     // A separate, non-streaming call for an explicitly completed summary.
     fn complete_once(&self, system: &str, user_text: &str, max_tokens: u32) -> Result<baudet_core::Turn, BackendError> {

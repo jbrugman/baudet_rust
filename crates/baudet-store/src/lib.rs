@@ -23,9 +23,23 @@ pub use rollout::Rollout;
 pub use transcript::Transcript;
 pub use window::{bound, trim, ContextStrategy};
 
+static DATA_DIR_OVERRIDE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_data_dir(path: std::path::PathBuf) -> std::io::Result<()> {
+    let path = std::path::absolute(path)?;
+    if DATA_DIR_OVERRIDE.get_or_init(|| path.clone()) == &path {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("the data directory was already set"))
+    }
+}
+
 pub fn data_dir() -> std::path::PathBuf {
-    if let Ok(home) = std::env::var("BAUDET_HOME") {
-        return std::path::PathBuf::from(home);
+    if let Some(path) = DATA_DIR_OVERRIDE.get() {
+        return path.clone();
+    }
+    if let Some(path) = std::env::var_os("BAUDET_HOME") {
+        return std::path::PathBuf::from(path);
     }
     let home = std::env::var("HOME").map(std::path::PathBuf::from).unwrap_or_default();
     if cfg!(target_os = "macos") {
@@ -53,5 +67,10 @@ mod tests {
         let fallback = data_dir();
         assert!(fallback.is_absolute() || fallback.as_os_str().is_empty());
         assert!(!fallback.to_string_lossy().contains("baudet-data"));
+        std::env::set_var("BAUDET_HOME", "/tmp/baudet-env-test");
+        let cli_dir = std::path::PathBuf::from("cli-data");
+        set_data_dir(cli_dir.clone()).unwrap();
+        assert_eq!(data_dir(), std::path::absolute(cli_dir).unwrap());
+        std::env::remove_var("BAUDET_HOME");
     }
 }

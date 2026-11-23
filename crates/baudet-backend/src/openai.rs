@@ -21,6 +21,8 @@ pub struct RequestShape<'a> {
     pub image: Option<&'a str>,
     pub max_output_tokens: Option<u32>,
     pub reasoning: Option<&'a str>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
     pub store: bool,
 }
 
@@ -33,6 +35,7 @@ pub fn request_body(shape: &RequestShape<'_>) -> Map<String, Value> {
     }
     body.insert("stream".into(), Value::Bool(true));
     body.insert("store".into(), Value::Bool(shape.store));
+    insert_sampling(&mut body, shape);
     if let Some(tokens) = shape.max_output_tokens.filter(|t| *t > 0) {
         body.insert("max_output_tokens".into(), Value::from(tokens));
     }
@@ -81,6 +84,14 @@ pub fn request_body(shape: &RequestShape<'_>) -> Map<String, Value> {
     });
     body.insert("input".into(), Value::Array(input));
     body
+}
+
+pub(crate) fn insert_sampling(body: &mut Map<String, Value>, shape: &RequestShape<'_>) {
+    for (name, setting) in [("temperature", shape.temperature), ("top_p", shape.top_p)] {
+        if let Some(value) = setting.and_then(serde_json::Number::from_f64) {
+            body.insert(name.into(), Value::Number(value));
+        }
+    }
 }
 
 fn text_message(role: &str, content: &str) -> Value {
@@ -137,6 +148,7 @@ impl TurnAccumulator {
         let name = string_field(&object, "type")
             .or_else(|| event.map(str::to_string))
             .or_else(|| string_field(&object, "object"))
+            .or_else(|| object.contains_key("error").then(|| "error".to_owned()))
             .unwrap_or_else(|| NO_TYPE.to_string());
         self.record(&name, data);
         let delta = self.extract(&name, &object, &payload);
@@ -161,7 +173,7 @@ impl TurnAccumulator {
             events: self.events,
             samples: self.samples,
             reasoning: self.reasoning,
-            incomplete_reason: self.incomplete_reason.or_else(|| self.stream_error),
+            incomplete_reason: self.incomplete_reason.or(self.stream_error),
             function_calls: self.calls,
         }
     }
@@ -232,7 +244,17 @@ impl TurnAccumulator {
                         response
                             .get("error")
                             .and_then(Value::as_object)
-                            .and_then(|e| string_field(e, "code").or_else(|| string_field(e, "message")))
+                            .and_then(|e| {
+                                let code = string_field(e, "code");
+                                let message = string_field(e, "message");
+                                if let (Some(code), Some(message)) = (&code, &message) {
+                                    let detail = format!("{code}: {message}");
+                                    if baudet_core::error::looks_like_context_overflow(Some(&detail)) {
+                                        return Some(detail);
+                                    }
+                                }
+                                code.or(message)
+                            })
                     })
                     .or_else(|| Some(name.to_string()));
             }
