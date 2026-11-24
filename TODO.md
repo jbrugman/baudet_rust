@@ -15,6 +15,12 @@ Do not give them tasks that modify files under `crates/baudet-ui`.
       **Compact** should report when there is nothing to compact.
       After saving a different endpoint, send a message and verify that it reaches the new server.
 
+## Local model tooling
+
+- [ ] Add programmatic tool calling so model-written scripts can call registered tools and filter their results locally.
+      Return only the script's final output to the model to reduce context use and model round trips.
+      Apply the existing project permissions and approval rules to every tool call.
+
 ## Reliability
 
 - [ ] Open the window immediately when the protocol is missing or the server is unreachable.
