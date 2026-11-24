@@ -118,6 +118,13 @@ On Ubuntu, `apt` installs the package's shared library dependencies.
 
 GitHub Actions runs these scripts on pull requests, pushes to `main`, tags starting with `v`, and manual runs.
 
+### Release versions
+
+The first release is `v0.1.0`.
+Eligible pushes to `main` increase the patch version after the first release.
+All three packages must build before the workflow updates the workspace version and publishes a GitHub release.
+Merges from `norelease`, `norelease/*`, and Dependabot still run CI and do not trigger a release or version bump.
+
 ### Signing on macOS
 
 CI builds are signed ad hoc.

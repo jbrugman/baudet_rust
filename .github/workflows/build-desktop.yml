@@ -10,33 +10,89 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'desktop-main-release' || github.run_id }}
+  queue: max
+
 jobs:
+  version:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      release: ${{ steps.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare release version
+        id: prepare
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 packaging/release_version.py
+      - uses: actions/upload-artifact@v4
+        if: steps.prepare.outputs.version != ''
+        with:
+          name: release-manifests
+          path: |
+            Cargo.toml
+            Cargo.lock
+          if-no-files-found: error
+          overwrite: true
+
   macos:
+    needs: version
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        if: needs.version.outputs.release != ''
+        with:
+          name: release-manifests
       - run: bash packaging/build-macos.sh
       - uses: actions/upload-artifact@v4
         with:
           name: Baudet-macOS-universal
           path: target/dist/Baudet-macOS-universal.dmg
           if-no-files-found: error
+          overwrite: true
 
   windows:
+    needs: version
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        if: needs.version.outputs.release != ''
+        with:
+          name: release-manifests
       - run: pwsh -NoProfile -File packaging/build-windows.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: Baudet-windows-x64
           path: target/dist/Baudet-windows-x64.zip
           if-no-files-found: error
+          overwrite: true
 
   linux:
+    needs: version
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        if: needs.version.outputs.release != ''
+        with:
+          name: release-manifests
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
@@ -47,3 +103,29 @@ jobs:
           name: Baudet-Ubuntu-24.04-x64
           path: target/dist/baudet_*_amd64.deb
           if-no-files-found: error
+          overwrite: true
+
+  release:
+    if: needs.version.outputs.release != ''
+    needs: [version, macos, windows, linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.release }}
+      SOURCE_SHA: ${{ github.sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-manifests
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Baudet-*
+          path: release-assets
+          merge-multiple: true
+      - name: Tag and publish the desktop packages
+        run: bash packaging/publish-release.sh
