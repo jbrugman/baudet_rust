@@ -1,82 +1,81 @@
 # Baudet
 
-Baudet is een lichte desktopapp voor gesprekken met een AI-model en werken aan code.
-De app maakt via HTTP verbinding met een modelserver op je eigen computer of op een
-externe server. Je model draait op die server. Baudet ondersteunt de OpenAI-compatibele
-Responses API en Chat Completions API.
+Baudet is a lightweight desktop coding assistant for models served on your own computer or a self-hosted server. It connects over HTTP using the OpenAI-compatible Responses or Chat Completions API. The model server handles inference.
 
-- **Chat** met streaming, Markdown, klembordafbeeldingen en lokaal bewaarde gesprekken.
-  **Stop** breekt een lopende aanvraag af. 
-  **Compact** vat oudere modelcontext samen en laat het zichtbare gesprek intact.
-- **Projecten** koppelen gesprekken aan een lokale map. Je bepaalt per project of tools
-  mogen lezen, schrijven en commando’s uitvoeren.
-- **Git en MCP** bieden een bestandsboom met Git-status, een diffviewer en ondersteuning
-  voor lokale MCP-servers via stdio.
+## About
 
-## Snel starten
+This is the Rust and egui version of [the original Kotlin Baudet](https://github.com/jbrugman/Baudet). The name is French for donkey, a nod to the local model doing the heavy lifting.
 
-Download een pakket onder **Artifacts** bij een geslaagde run van
+## Why it was started
+
+Local models often have smaller context windows, and servers vary in what they report about tokens, reasoning, and tool calls. Baudet was started to make those differences manageable in everyday coding. It lets you choose how much chat history to send, compact older context on the client, and keep streamed reasoning separate from the answer. Project permissions give the model a defined workspace for reading, editing, and running commands.
+
+## Current state
+
+**What works**
+
+- Model discovery and selection, endpoint configuration, and streaming over both supported APIs. Responses can reuse server-side context with `previous_response_id` when the selected settings and server support it.
+- Markdown, clipboard images, locally saved chats, a resizable reasoning panel, and client-side compaction. **Stop** interrupts a stream and keeps the partial reply. **Compact** reports its outcome.
+- Projects with folder-level read, write, and execute permissions. The file tree and Git changes refresh when files change on disk. Double-click a file to open its diff or preview.
+- Model-driven file reads and edits, Git operations, shell commands, and MCP servers over stdio. Project shell commands use Seatbelt on macOS and Bubblewrap on Linux. MCP uses its own approval rules.
+
+**What's still open**
+
+- Reasoning controls, server-side sessions, and tool calls depend on support from the model server. A complete MCP run against a real server remains on the release checklist.
+- The packaged apps still need a launch check on all three platforms. Windows workspace isolation and approval for extra folders or network access from the shell are still open.
+- The diff viewer supports inspection. Source edits are made through the file tool or an external editor.
+
+See [TODO.md](TODO.md) for the remaining work and verification steps.
+
+## Quick start
+
+Download a package under **Artifacts** from a successful run of
 [Build desktop packages](.github/workflows/build-desktop.yml).
 
-| Platform | Pakket | Openen |
+| Platform | Package | How to open it |
 |---|---|---|
-| macOS | `Baudet-macOS-universal.dmg` voor Apple Silicon en Intel | Open de DMG en sleep `Baudet.app` naar Programma’s. Zie [macOS ondertekenen](#macos-ondertekenen) voor distributie via Gatekeeper. |
-| Windows x64 | `Baudet-windows-x64.zip` | Pak het archief uit en open `Baudet.exe`. |
-| Ubuntu 24.04 x64 | `baudet_<versie>_amd64.deb` | Installeer het gedownloade bestand met `sudo apt install ./baudet_0.1.0_amd64.deb`, met de versie uit je download. |
+| macOS | `Baudet-macOS-universal.dmg` for Apple Silicon and Intel | Open the DMG and drag `Baudet.app` to Applications. See [Signing on macOS](#signing-on-macos) for Gatekeeper distribution. |
+| Windows x64 | `Baudet-windows-x64.zip` | Extract the archive and open `Baudet.exe`. |
+| Ubuntu 24.04 x64 | `baudet_<version>_amd64.deb` | Run `sudo apt install ./baudet_0.1.0_amd64.deb` with the filename from your download. Install Bubblewrap for workspace shell commands if it is missing. |
 
-Met Rust en de [bouwvereisten hieronder](#zelf-bouwen) kun je ook meteen de demo openen.
-De demo gebruikt vooraf opgenomen antwoorden en heeft geen modelserver nodig.
+With Rust and the [build prerequisites](#build-from-source), you can also open the demo. It uses prerecorded replies and runs without a model server.
 
 ```sh
 cargo run --locked -p baudet-ui -- --demo
 ```
 
-### Een modelserver verbinden
+### Connect a model server
 
-1. Start je modelserver of zorg dat de externe server bereikbaar is.
-2. Open **Instellingen** en vul de API-basis-URL in. De standaard is
-   `http://127.0.0.1:8000/v1`.
-3. Haal de modellen op, kies een model en klik op **Scan endpoint** om het protocol vast
-   te stellen. Voor een beveiligd endpoint kun je een sleutel invullen of een
-   omgevingsvariabele gebruiken.
-4. Klik op **Opslaan** en open **Chat**. De opgeslagen verbinding geldt vanaf de
-   volgende beurt.
+1. Start your model server or check that your self-hosted server is reachable.
+2. Open **Settings** and enter the API base URL. The default is `http://127.0.0.1:8000/v1`.
+3. Enter an API key or its environment variable name if the server requires credentials. Use **Scan endpoint** to detect the API protocol, then fetch the model list and pick a model.
+4. Click **Save** and open **Chat**. The saved connection applies to the next turn.
 
-**Ophalen**, **Scan endpoint** en **Chat** gebruiken een ingevulde sleutel eerst.
-Bij een leeg sleutelveld leest Baudet de ingestelde omgevingsvariabele, standaard
-`OMLX_API_KEY`. De omgevingswaarde wordt niet opgeslagen.
+**Fetch**, **Scan endpoint**, and **Chat** use the entered key first. If the field is empty, Baudet reads the configured environment variable, which defaults to `OMLX_API_KEY`. Baudet does not save the value it reads from the environment.
 
-Heb je de variabele in je Terminal geëxporteerd, start Baudet dan vanuit diezelfde
-Terminal. Voor een macOS-app in Programma’s kan dat met
-`/Applications/Baudet.app/Contents/MacOS/baudet-ui`. Een start vanuit Finder erft
-de variabelen van je Terminal niet.
+If you export the variable in your terminal, launch Baudet from that same terminal. On macOS you can run `/Applications/Baudet.app/Contents/MacOS/baudet-ui`. Launching from Finder does not inherit your terminal's environment.
 
-Bij **reasoning-effort** laat **Default** de server kiezen. Met **Uit** vraag je de
-server om redenering uit te schakelen. Bij een gekozen niveau vraagt Baudet redenering
-aan. Vink voor een compatibele server zoals oMLX **Gebruik de thinking-schakelaar van
-de server** aan om redenering expliciet aan of uit te zetten bij een gemaakte keuze.
+Under **reasoning-effort**, **Default** uses the server setting, **Off** asks the server to disable reasoning, and an effort level requests that level. For compatible servers such as oMLX, **Use the server's thinking switch** also sends an explicit on or off setting when you choose one.
 
-### Datamap
+### Data directory
 
-Baudet bewaart instellingen, projecten en gesprekken lokaal. Met `--home <map>` kies je
-een andere datamap voor die start. Die optie heeft voorrang op `BAUDET_HOME`.
+Baudet stores settings, projects, and conversations locally. Use `--home <folder>` to select a different directory for that launch. It takes precedence over `BAUDET_HOME`.
 
-| Platform | Standaardmap |
+| Platform | Default directory |
 |---|---|
 | macOS | `~/Library/Application Support/Baudet` |
 | Windows | `%APPDATA%\Baudet` |
-| Linux | `$XDG_DATA_HOME/baudet`, of `~/.local/share/baudet` |
+| Linux | `$XDG_DATA_HOME/baudet` or `~/.local/share/baudet` |
 
-## Zelf bouwen
+## Build from source
 
-Installeer rustup. [rust-toolchain.toml](rust-toolchain.toml) legt de Rust-versie vast.
-Draai het script op het bijbehorende platform. De uitvoer staat standaard in `target/dist`.
+Install rustup. [rust-toolchain.toml](rust-toolchain.toml) pins the Rust version. Run the script on the target platform. Build artifacts go to `target/dist` by default.
 
-| Platform | Vereisten | Commando |
+| Platform | Prerequisites | Command |
 |---|---|---|
 | macOS | Xcode Command Line Tools | `bash packaging/build-macos.sh` |
-| Windows x64 | PowerShell 7 en Visual Studio Build Tools met **Desktop development with C++** | `pwsh -NoProfile -File packaging/build-windows.ps1` |
-| Ubuntu 24.04 x64 | De bouwpakketten hieronder | `bash packaging/build-linux.sh` |
+| Windows x64 | PowerShell 7 and Visual Studio Build Tools with **Desktop development with C++** | `pwsh -NoProfile -File packaging/build-windows.ps1` |
+| Ubuntu 24.04 x64 | The build packages listed below | `bash packaging/build-linux.sh` |
 
 ```sh
 sudo apt update
@@ -84,26 +83,19 @@ sudo apt install build-essential dpkg-dev pkg-config libwayland-dev libxkbcommon
 bash packaging/build-linux.sh
 ```
 
-De macOS-app gebruikt systeemframeworks. Windows levert de systeem-DLL’s en de executable
-linkt de Visual C++-runtime statisch. Voor het Ubuntu-pakket installeert `apt` de benodigde
-gedeelde bibliotheken. Het Windows-archief bevat een lijst van de gebruikte DLL’s.
+The macOS app uses system frameworks. The Windows executable links the Visual C++ runtime statically, and the archive lists its system DLL dependencies. On Ubuntu, `apt` installs the package's shared library dependencies.
 
-GitHub Actions draait dezelfde scripts bij pull requests, pushes naar `main`, tags die
-met `v` beginnen en handmatige runs.
+GitHub Actions runs these scripts on pull requests, pushes to `main`, tags starting with `v`, and manual runs.
 
-### macOS ondertekenen
+### Signing on macOS
 
-De CI-build gebruikt een ad-hoc-handtekening. Voor verspreiding via Gatekeeper heb je een
-**Developer ID Application**-certificaat en Apple-notarizatie nodig. Bouw eerst lokaal met
-`bash packaging/build-macos.sh`. Gebruik daarna `Baudet.app` uit `target/dist`.
+CI builds are signed ad hoc. To distribute through Gatekeeper, use a **Developer ID Application** certificate and Apple notarization. Build locally with `bash packaging/build-macos.sh`, then use `Baudet.app` from `target/dist`.
 
-Zoek je certificaat met `security find-identity -v -p codesigning` en vervang de
-voorbeeldwaarden hieronder. `notarytool store-credentials` vraagt om een app-specifiek
-wachtwoord.
+Find your certificate with `security find-identity -v -p codesigning` and replace the placeholders below. `notarytool store-credentials` prompts for an app-specific password.
 
 ```sh
-identity='Developer ID Application: Jouw naam (JOUWTEAMID)'
-xcrun notarytool store-credentials Baudet-notary --apple-id 'jij@example.com' --team-id JOUWTEAMID
+identity='Developer ID Application: Your Name (YOURTEAMID)'
+xcrun notarytool store-credentials Baudet-notary --apple-id 'you@example.com' --team-id YOURTEAMID
 
 codesign --force --options runtime --timestamp --sign "$identity" target/dist/Baudet.app
 codesign --verify --strict --verbose=2 target/dist/Baudet.app
@@ -123,10 +115,9 @@ xcrun stapler staple target/dist/Baudet-macOS-universal-signed.dmg
 xcrun stapler validate target/dist/Baudet-macOS-universal-signed.dmg
 ```
 
-Zie [Apple’s handleiding voor macOS-distributie](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution)
-en [notarizatie met notarytool](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow).
+See [Apple's macOS distribution guide](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution) and [the notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow).
 
-## Ontwikkelen
+## Development
 
 ```sh
 cargo run --locked -p baudet-ui
@@ -134,11 +125,8 @@ cargo test --workspace --locked
 cargo clippy --locked -p baudet-ui
 ```
 
-`baudet-ui` bevat de egui-interface en `baudet-app` beheert gesprekken en beurten.
-`baudet-backend` verzorgt het HTTP-transport. Opslag, instellingen, projectrechten en
-tools hebben eigen crates. De huidige prioriteiten staan in [TODO.md](TODO.md).
+`baudet-ui` contains the egui desktop interface. `baudet-app` manages chats and turns, and `baudet-backend` handles HTTP and streaming. Storage, settings, project permissions, and tools live in separate crates.
 
-## Licentie
+## License
 
-Baudet is open source onder de [MIT-licentie](LICENSE). De distributiepakketten bevatten
-ook de [licenties van de ingebouwde lettertypen](packaging/FONT-LICENSES.txt).
+Baudet is open source under the [MIT License](LICENSE). The packages include the [licenses for the bundled fonts](packaging/FONT-LICENSES.txt).
