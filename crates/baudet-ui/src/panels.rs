@@ -139,22 +139,20 @@ fn file_tree_controls(
 ) -> bool {
     let refresh_clicked = {
         let root = crate::app::root_ui_id(ui.ctx());
-        let refresh_clicked = ui
-            .scope_builder(
-                egui::UiBuilder::new().id(root.with((TREE_REFRESH, "refresh"))).sense(egui::Sense::click()),
-                |ui| {
-                    ui.add(egui::Button::new(Texts::get(Key::FileTreeRefreshButton)).sense(egui::Sense::hover()))
-                        .on_hover_text(Texts::get(Key::TipFileTreeRefresh));
-                },
-            )
-            .response
-            .clicked();
-        let mut hidden = workspace.show_hidden();
-        ui.horizontal(|ui| {
+        let refresh_clicked = ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let refresh = ui.scope_builder(
+                egui::UiBuilder::new().id(root.with((TREE_REFRESH, "refresh"))),
+                |ui| ui.button(Texts::get(Key::FileTreeRefreshButton))
+                    .on_hover_text(Texts::get(Key::TipFileTreeRefresh))
+                    .clicked(),
+            ).inner;
+            let mut hidden = workspace.show_hidden();
             if ui.checkbox(&mut hidden, Texts::get(Key::FileTreeHidden)).changed() {
                 workspace.set_show_hidden(hidden);
             }
-        });
+            refresh
+        }).inner;
         ui.separator();
         let chosen = workspace.cwd().map(|s| s.to_string());
         let status = FileStatus::build(chosen.as_deref(), changes);
@@ -877,14 +875,22 @@ pub(crate) fn file_tree(
 
 fn change_row(ui: &mut Ui, file: &ChangedFile, root: &Path, actions: &mut FileRowActions) {
     let ink = ink_for(file.change);
+    let letter = match file.change {
+        ChangeKind::Modified => "M",
+        ChangeKind::Untracked => "?",
+        ChangeKind::Added | ChangeKind::Copied => "A",
+        ChangeKind::Deleted | ChangeKind::Removed => "D",
+        ChangeKind::Renamed => "R",
+        ChangeKind::Unmerged | ChangeKind::Other => "~",
+    };
     let body_ink = if file.change.exists_on_disk() { palette::TEXT } else { palette::DIM };
     ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::hover()), |ui| {
         ui.horizontal(|ui| {
-            ui.add(
-                egui::Label::new(egui::RichText::new(format!("{:4}", file.change.word())).color(ink).size(11.0))
-                    .selectable(false),
+            ui.add_sized(
+                [16.0, 0.0],
+                egui::Label::new(egui::RichText::new(letter).monospace().color(ink)).selectable(false),
             )
-            .on_hover_text(&file.path);
+            .on_hover_text(file.change.word());
             ui.add(
                 egui::Label::new(egui::RichText::new(truncate_head(&file.name(), KEEP_TAIL)).color(body_ink).strong())
                     .selectable(false),

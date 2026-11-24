@@ -193,4 +193,17 @@ fn external_edits_refresh_both_lists_and_keep_directories_above_files() {
     std::fs::write(&new_file, "created outside Baudet\n").unwrap();
     wait_for_row(&ctx, &mut app, &mut time, egui::Id::new(("change-row", "zzz-folder/external.txt")));
     assert!(ctx.read_response(egui::Id::new(("file-row", new_file.as_path()))).is_some());
+
+    let output = paint(&ctx, &mut app, time + 0.02, Vec::new());
+    let status = |path, glyph| {
+        let row = ctx.read_response(egui::Id::new(("change-row", path))).unwrap().rect;
+        output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == glyph && row.contains(text.visual_bounding_rect().center()) => {
+                Some(text.pos.x)
+            }
+            _ => None,
+        }).expect("the Changes row shows a compact status")
+    };
+    assert_eq!(status("aaa.txt", "M"), status("zzz-folder/external.txt", "?"));
+    output.drop_without_applying_deltas();
 }

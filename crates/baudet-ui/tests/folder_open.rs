@@ -11,10 +11,6 @@ fn input() -> egui::RawInput {
     }
 }
 
-fn paint_once(ctx: &egui::Context, app: &mut TranscriptApp) {
-    ctx.run_ui(input(), |ui| app.paint(ui)).drop_without_applying_deltas();
-}
-
 fn addressable_context() -> egui::Context {
     let ctx = egui::Context::default();
     baudet_ui::palette::install(&ctx);
@@ -34,8 +30,20 @@ fn een_bestaande_map_verzet_de_workspace() {
 fn de_kop_van_de_boom_heeft_zijn_refresh_en_verborgen_vinkje() {
     let ctx = addressable_context();
     let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
-    paint_once(&ctx, &mut app);
     let id = root_ui_id(&ctx).with((TREE_REFRESH, "refresh"));
-    assert!(ctx.read_response(id).is_some(), "Refresh-knop tekent geen response op zijn adres");
+    let output = ctx.run_ui(input(), |ui| app.paint(ui));
+    let refresh = ctx.read_response(id).expect("Refresh has an addressable control").rect;
+    assert!(output.shapes.iter().any(|shape| matches!(
+        &shape.shape,
+        egui::Shape::Rect(frame) if frame.fill == baudet_ui::palette::BUTTON && frame.rect.contains(refresh.center())
+    )));
+    let hidden = baudet_i18n::Texts::get(baudet_i18n::Key::FileTreeHidden);
+    assert!(output.shapes.iter().any(|shape| matches!(
+        &shape.shape,
+        egui::Shape::Text(text) if text.galley.text() == hidden
+            && text.pos.x > refresh.right()
+            && refresh.y_range().contains(text.visual_bounding_rect().center().y)
+    )));
+    output.drop_without_applying_deltas();
     assert!(!app.show_hidden_tree(), "het vinkje start uit, als bij `FileTreePanel`");
 }
