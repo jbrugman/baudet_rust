@@ -1,5 +1,5 @@
 
-use crate::tool::ToolCall;
+use crate::tool::{ToolCall, ToolRegistry};
 use baudet_core::msg::Msg;
 use baudet_core::protocol::Turn;
 use serde_json::Value;
@@ -20,7 +20,7 @@ pub trait TurnSource {
 }
 
 pub trait CallExtractor {
-    fn extract(&self, turn: &Turn) -> Vec<ToolCall>;
+    fn extract(&self, turn: &Turn, registry: &ToolRegistry) -> Vec<ToolCall>;
 }
 
 pub const FENCE_TAG: &str = "baudet-tool";
@@ -46,7 +46,7 @@ mod tests {
     struct AlwaysEmpty;
 
     impl CallExtractor for AlwaysEmpty {
-        fn extract(&self, _turn: &Turn) -> Vec<ToolCall> {
+        fn extract(&self, _turn: &Turn, _registry: &ToolRegistry) -> Vec<ToolCall> {
             Vec::new()
         }
     }
@@ -69,7 +69,7 @@ mod tests {
         let turn = source.next_turn(TurnRequest { history: &history, ..leased() }).await;
         assert_eq!(turn.text, "antwoord op vraag");
         let extractor: &dyn CallExtractor = &AlwaysEmpty;
-        assert!(extractor.extract(&turn).is_empty());
+        assert!(extractor.extract(&turn, &ToolRegistry::default()).is_empty());
     }
 
     #[test]

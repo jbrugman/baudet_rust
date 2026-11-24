@@ -330,14 +330,16 @@ fn compaction_commits_summary_with_retained_context_and_keeps_the_display_trail(
 }
 
 #[test]
-fn a_tool_turn_feeds_the_observation_back_and_persists_the_final_answer() {
+fn plain_read_edit_and_command_calls_use_the_existing_tool_checks() {
     use baudet_app::session::tool_turn::ToolTurn;
     use baudet_projects::{FolderPermission, Permissions, Project};
     use baudet_tool::mcp::McpServers;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let root = scratch("tool-turn");
-    let first = ["```baudet-tool", r#"{"tool":"read_file","arguments":{"file":"example.txt"}}"#, "```"].join("\n");
+    let read = r#"{"tool":"read_file","arguments":{"file":"example.txt"}}"#;
+    let edit = r#"{"tool":"edit_file","arguments":{"file":"example.txt","edits":[{"old_text":"known observation","new_text":"updated"}]}}"#;
+    let invalid_command = r#"{"tool":"run_command","arguments":{"timeout_seconds":1}}"#;
     let completed = |turn: &str, text: &str| {
         let mut events = answer(turn, text);
         events.push(ThreadEvent::TurnCompleted {
@@ -346,17 +348,27 @@ fn a_tool_turn_feeds_the_observation_back_and_persists_the_final_answer() {
         });
         events
     };
-    let (backend, state) = persistent(&root, vec![completed("tu_1", &first), completed("tu_2", "Read it.")]);
+    let (backend, state) = persistent(&root, vec![
+        completed("tu_1", read), completed("tu_2", edit), completed("tu_3", invalid_command), completed("tu_4", "Read it."),
+    ]);
     std::fs::write(root.join("example.txt"), "known observation").unwrap();
     let mut project = Project::new("p-1".into(), "Fixture", 0);
     project.folder_path = Some(root.to_string_lossy().into_owned());
-    project.permissions = Permissions::encode([FolderPermission::Read, FolderPermission::Write]);
+    project.permissions = Permissions::encode([FolderPermission::Read, FolderPermission::Write, FolderPermission::Execute]);
     let settings = baudet_settings::Settings::default();
-    state.run_tools("Read the file", None, ToolTurn {
+    let approved = Arc::new(AtomicBool::new(false));
+    let seen = Arc::clone(&approved);
+    state.run_tools("Read and update the file", None, ToolTurn {
         project: Some(&project),
         settings: &settings,
         servers: &mut McpServers::default(),
-        approval: Arc::new(|_| ApprovalDecision::Decline),
+        approval: Arc::new(move |request| match request {
+            ApprovalRequest::ApplyPatch { .. } => {
+                seen.store(true, Ordering::Relaxed);
+                ApprovalDecision::Accept
+            }
+            _ => ApprovalDecision::Decline,
+        }),
         cancelled: Arc::new(AtomicBool::new(false)),
     }).unwrap();
     let (request, _) = backend.last_request().unwrap();
@@ -364,6 +376,10 @@ fn a_tool_turn_feeds_the_observation_back_and_persists_the_final_answer() {
     let git = tools.as_array().unwrap().iter().find(|tool| tool["name"] == "git").unwrap();
     let verbs = git["parameters"]["properties"]["command"]["enum"].as_array().unwrap();
     assert!(verbs.contains(&serde_json::json!("commit")));
+    assert!(approved.load(Ordering::Relaxed));
+    assert_eq!(std::fs::read_to_string(root.join("example.txt")).unwrap(), "updated");
+    assert!(state.rows().iter().any(|item| matches!(item, Item::CommandExecution(command)
+        if command.status == ItemStatus::Failed && command.output.contains("needs a command argument"))));
     assert_eq!(state.live_turns(), 0);
     assert!(state.rows().iter().any(|item| matches!(item, Item::ToolCall(call) if call.output.contains("known observation"))));
     assert_eq!(mentions_exact(&state, "Read it."), 1);
@@ -371,6 +387,78 @@ fn a_tool_turn_feeds_the_observation_back_and_persists_the_final_answer() {
     let reopened = state.build_session().unwrap();
     assert_eq!(reopened.messages.last().unwrap().content, "Read it.");
     assert!(reopened.messages.iter().any(|msg| msg.content.contains("known observation")));
+}
+
+#[test]
+fn plain_git_calls_reach_approval_before_staging_and_committing() {
+    use baudet_app::session::tool_turn::ToolTurn;
+    use baudet_projects::{FolderPermission, Permissions, Project};
+    use baudet_tool::mcp::McpServers;
+    use std::process::Command;
+    use std::sync::{atomic::AtomicBool, Mutex};
+
+    let root = scratch("plain-git");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let result = Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        assert!(result.status.success(), "{args:?}: {}", String::from_utf8_lossy(&result.stderr));
+        String::from_utf8(result.stdout).unwrap()
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "Baudet Test"]);
+    git(&["config", "user.email", "baudet@example.invalid"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("README.md"), "Baseline\n").unwrap();
+    git(&["add", "README.md"]);
+    git(&["commit", "-qm", "Baseline"]);
+    std::fs::write(repo.join("README.md"), "Updated README\n").unwrap();
+
+    let add = concat!("Ik ga de README.md toevoegen aan de staging area met de interne git tool.\n\n",
+        r#"{"tool": "git", "arguments": {"command": "add", "args": ["README.md"]}}"#);
+    let commit = concat!("Ik ga de wijzigingen committen met de interne git tool.\n\n",
+        r#"{"tool": "git", "arguments": {"command": "commit", "message": "docs: update README.md"}}"#);
+    let scripts = [add, "Git result", add, "Git result", commit, "Git result", commit, "Git result"]
+        .into_iter().enumerate().map(|(index, text)| {
+            let id = format!("tu_{index}");
+            let mut events = answer(&id, text);
+            events.push(ThreadEvent::TurnCompleted {
+                thread_id: "th_1".into(), turn_id: id, response_id: None, usage: None,
+                final_event: Some("response.completed".into()), incomplete_reason: None,
+            });
+            events
+        }).collect();
+    let (_, state) = persistent(&root, scripts);
+    let mut project = Project::new("p-1".into(), "Fixture", 0);
+    project.folder_path = Some(repo.to_string_lossy().into_owned());
+    project.permissions = Permissions::encode([FolderPermission::Read, FolderPermission::Write]);
+    let settings = baudet_settings::Settings::default();
+
+    for (prompt, verb, decision, staged, head) in [
+        ("Stage README", "add", ApprovalDecision::Decline, "", "Baseline"),
+        ("Stage README", "add", ApprovalDecision::Accept, "README.md\n", "Baseline"),
+        ("Commit README", "commit", ApprovalDecision::Decline, "README.md\n", "Baseline"),
+        ("Commit README", "commit", ApprovalDecision::Accept, "", "docs: update README.md"),
+    ] {
+        let approvals = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&approvals);
+        state.run_tools(prompt, None, ToolTurn {
+            project: Some(&project),
+            settings: &settings,
+            servers: &mut McpServers::default(),
+            approval: Arc::new(move |request| {
+                seen.lock().unwrap().push(request);
+                decision.clone()
+            }),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }).unwrap();
+        assert!(matches!(&approvals.lock().unwrap()[..], [ApprovalRequest::RunCommand {
+            command, cwd: Some(cwd), always_key: Some(_), ..
+        }] if command.starts_with(&format!("git {verb} ")) && cwd == &repo.to_string_lossy()));
+        assert_eq!(git(&["diff", "--cached", "--name-only"]), staged);
+        assert_eq!(git(&["log", "-1", "--format=%s"]).trim(), head);
+    }
+    assert_eq!(git(&["show", "HEAD:README.md"]), "Updated README\n");
 }
 
 #[test]
@@ -417,7 +505,7 @@ fn mcp_is_advertised_and_approved_without_project_write_access() {
         enabled: true,
         timeout_seconds: Some(5),
     });
-    let call = "```baudet-tool\n{\"tool\":\"mcp__fixture__echo\",\"arguments\":{}}\n```";
+    let call = r#"{"tool":"mcp__fixture__echo","arguments":{}}"#;
     let completed = |turn_id: &str, text: &str| {
         let mut events = answer(turn_id, text);
         events.push(ThreadEvent::TurnCompleted {

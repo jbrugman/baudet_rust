@@ -1,5 +1,5 @@
 
-use crate::tool::ToolCall;
+use crate::tool::{ToolCall, ToolRegistry};
 use crate::turn_source::{CallExtractor, FENCE_TAG};
 use baudet_core::protocol::Turn;
 use serde_json::Value;
@@ -63,6 +63,28 @@ fn native_arguments(raw: &str) -> Value {
     serde_json::from_str(raw.trim()).ok().filter(Value::is_object).unwrap_or_else(|| Value::Object(Default::default()))
 }
 
+fn trailing_tool_call(text: &str) -> Option<ToolCall> {
+    let mut lines = text.trim_end().lines().rev();
+    let mut paragraph: Vec<_> = lines.by_ref().take_while(|line| !line.trim().is_empty()).collect();
+    if !paragraph.last()?.starts_with('{') {
+        return None;
+    }
+    // Keep untagged calls outside Markdown examples, even if a fence is left open.
+    if lines.any(|line| {
+        let line = line.trim_start();
+        line.starts_with("```") || line.starts_with("~~~") || line.starts_with('{')
+    }) {
+        return None;
+    }
+    paragraph.reverse();
+    let value: Value = serde_json::from_str(&paragraph.join("\n")).ok()?;
+    let object = value.as_object()?;
+    if object.len() != 2 || !object.get("arguments").or_else(|| object.get("args"))?.is_object() {
+        return None;
+    }
+    call_from(&value)
+}
+
 #[derive(Debug, Clone)]
 pub struct ExtraTool {
     pub name: String,
@@ -92,24 +114,24 @@ pub fn protocol_for(enabled: &[&str], extra: &[ExtraTool], git_writes: bool) -> 
 
     if can_read {
         out.push_str("Read a file before you change it or reason about it, so you work from the current text:\n");
-        out.push_str("  {\"tool\": \"read_file\", \"arguments\": {\"file\": \"relative/path\"}}\n\n");
+        out.push_str("```baudet-tool\n{\"tool\": \"read_file\", \"arguments\": {\"file\": \"relative/path\"}}\n```\n\n");
     }
 
     if can_edit {
         out.push_str("Change a file by replacing text you saw in that read:\n");
-        out.push_str("  {\"tool\": \"edit_file\", \"arguments\": {\"file\": \"relative/path\", \"edits\": [{\"old_text\": \"...\", \"new_text\": \"...\"}]}}\n\n");
+        out.push_str("```baudet-tool\n{\"tool\": \"edit_file\", \"arguments\": {\"file\": \"relative/path\", \"edits\": [{\"old_text\": \"...\", \"new_text\": \"...\"}]}}\n```\n\n");
     }
     if can_run {
         out.push_str("Run a shell command in the project folder. The project settings determine whether approval is required.\n");
-        out.push_str("  {\"tool\": \"run_command\", \"arguments\": {\"command\": \"mvn -B test\"}}\n\n");
+        out.push_str("```baudet-tool\n{\"tool\": \"run_command\", \"arguments\": {\"command\": \"mvn -B test\"}}\n```\n\n");
     }
     if can_git {
         out.push_str("Use the git tool for repository operations. Inspect with status, diff or log:\n");
-        out.push_str("  {\"tool\": \"git\", \"arguments\": {\"command\": \"status\"}}\n");
+        out.push_str("```baudet-tool\n{\"tool\": \"git\", \"arguments\": {\"command\": \"status\"}}\n```\n");
         if git_writes {
             out.push_str("Git writes require approval. Stage and commit with separate calls, waiting for each result:\n");
-            out.push_str("  {\"tool\": \"git\", \"arguments\": {\"command\": \"add\", \"args\": [\"relative/path\"]}}\n");
-            out.push_str("  {\"tool\": \"git\", \"arguments\": {\"command\": \"commit\", \"message\": \"Commit message\"}}\n");
+            out.push_str("```baudet-tool\n{\"tool\": \"git\", \"arguments\": {\"command\": \"add\", \"args\": [\"relative/path\"]}}\n```\n");
+            out.push_str("```baudet-tool\n{\"tool\": \"git\", \"arguments\": {\"command\": \"commit\", \"message\": \"Commit message\"}}\n```\n");
         } else {
             out.push_str("Git writes are disabled without Read and Write permissions for this project folder.\n");
         }
@@ -118,7 +140,7 @@ pub fn protocol_for(enabled: &[&str], extra: &[ExtraTool], git_writes: bool) -> 
 
     for tool in extra {
         out.push_str("You may also call an external MCP tool, named and shaped exactly as below; use its advertised name and an arguments object that matches its schema:\n");
-        out.push_str(&format!("  {{\"tool\": \"{}\", \"arguments\": <object matching {}>}}\n", tool.name, tool.parameters));
+        out.push_str(&format!("   Tool name: \"{}\". Argument schema: {}\n", tool.name, tool.parameters));
         out.push_str(&format!("   Purpose: {}\n\n", tool.description));
     }
     out.push_str("Prose may come before or after a block. Each call returns an observation that says ok true or ok false; read it before acting again. On ok false, do not send the same call again unchanged; fix the arguments or answer without a block.");
@@ -137,7 +159,7 @@ pub fn protocol_for(enabled: &[&str], extra: &[ExtraTool], git_writes: bool) -> 
 pub struct PromptedCallExtractor;
 
 impl CallExtractor for PromptedCallExtractor {
-    fn extract(&self, turn: &Turn) -> Vec<ToolCall> {
+    fn extract(&self, turn: &Turn, registry: &ToolRegistry) -> Vec<ToolCall> {
         let mut calls: Vec<ToolCall> = turn
             .function_calls
             .iter()
@@ -150,6 +172,9 @@ impl CallExtractor for PromptedCallExtractor {
             .collect();
 
         calls.extend(tagged_blocks(&turn.text, FENCE_TAG).iter().flat_map(|body| calls_from_body(body)));
+        if calls.is_empty() {
+            calls.extend(trailing_tool_call(&turn.text).filter(|call| registry.get(&call.tool).is_some()));
+        }
         calls
     }
 }
@@ -159,6 +184,11 @@ mod tests {
     use super::*;
     use baudet_core::protocol::FunctionCall;
     use serde_json::json;
+
+    fn extract(turn: &Turn) -> Vec<ToolCall> {
+        let registry = ToolRegistry::new(vec![Box::new(crate::git_tool::GitTool::with_writes())]);
+        PromptedCallExtractor.extract(turn, &registry)
+    }
 
     fn prose(text: impl Into<String>) -> Turn {
         Turn::text(text)
@@ -177,7 +207,7 @@ mod tests {
             "```\n",
             "Daarna zie ik verder.",
         ));
-        let calls = PromptedCallExtractor.extract(&turn);
+        let calls = extract(&turn);
         assert_eq!(calls.len(), 1);
         assert_eq!(call_of(&calls, 0), ("read_file", &json!({"file": "a.txt"}), None));
     }
@@ -189,7 +219,7 @@ mod tests {
             "en dan\n",
             "```baudet-tool\n{\"name\": \"read_file\", \"args\": {\"file\": \"b.txt\"}}\n```\n",
         ));
-        let calls = PromptedCallExtractor.extract(&turn);
+        let calls = extract(&turn);
         assert_eq!(calls.len(), 2, "naam-als-`name` en argumenten-als-`args`Tellers doen mee, zoals in de origineler");
         assert_eq!(calls[0].tool, "git");
         assert_eq!(call_of(&calls, 1), ("read_file", &json!({"file": "b.txt"}), None));
@@ -202,7 +232,7 @@ mod tests {
             "[{\"tool\": \"read_file\", \"arguments\": {\"file\": \"a\"}}, {\"tool\": \"read_file\", \"arguments\": {\"file\": \"b\"}}]\n",
             "```\n",
         ));
-        let calls = PromptedCallExtractor.extract(&turn);
+        let calls = extract(&turn);
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[1].arg_str("file"), Some("b"));
     }
@@ -210,13 +240,13 @@ mod tests {
     #[test]
     fn a_block_that_will_not_parse_is_skipped_not_thrown() {
         let broken = prose("```baudet-tool\n{\"tool\": \"read_file\", \n```\n");
-        assert!(PromptedCallExtractor.extract(&broken).is_empty());
+        assert!(extract(&broken).is_empty());
 
         let mixed = prose(concat!(
             "```baudet-tool\n{kapot\n```\n",
             "```baudet-tool\n{\"tool\": \"git\", \"arguments\": {\"command\": \"log\"}}\n```\n",
         ));
-        let calls = PromptedCallExtractor.extract(&mixed);
+        let calls = extract(&mixed);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].arg_str("command"), Some("log"));
     }
@@ -224,8 +254,37 @@ mod tests {
     #[test]
     fn ordinary_code_is_not_a_call() {
         let turn = prose("```rust\nlet x = \"{\\\"tool\\\": \\\"read_file\\\"}\";\n```\n");
-        assert!(PromptedCallExtractor.extract(&turn).is_empty());
-        assert!(PromptedCallExtractor.extract(&prose("```baudet-tool\n{\"tool\": \"git\"}\n")).is_empty());
+        assert!(extract(&turn).is_empty());
+        assert!(extract(&prose("```baudet-tool\n{\"tool\": \"git\"}\n")).is_empty());
+    }
+
+    #[test]
+    fn an_untagged_call_must_name_a_registered_tool_in_the_final_standalone_object() {
+        let git = r#"{"tool":"git","arguments":{"command":"add","args":["README.md"]}}"#;
+        let committed = r#"{"tool":"git","arguments":{"command":"commit","message":"docs: update README.md"}}"#;
+        let calls = extract(&prose(format!("I will stage it.\n\n{git}")));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].arguments["args"][0], "README.md");
+        assert_eq!(extract(&prose(committed))[0].arg_str("message"), Some("docs: update README.md"));
+        for text in [
+            format!("> {git}"),
+            format!("> example\n{git}"),
+            format!("    {git}"),
+            format!("```json\n\n{git}"),
+            format!("~~~json\n\n{git}\n~~~"),
+            format!("{git}\n\n{committed}"),
+            format!("{git}\n\nHere is an example."),
+            r#"{"tool":"run_command","arguments":{"command":"git add README.md"}}"#.to_owned(),
+        ] {
+            assert!(extract(&prose(&text)).is_empty(), "{text}");
+        }
+        let indented_json = "{\n  \"name\": \"git\",\n  \"args\": {\"command\": \"status\"}\n}";
+        assert_eq!(extract(&prose(indented_json))[0].arg_str("command"), Some("status"));
+        let tagged = format!("```baudet-tool\n{git}\n```\n\n{committed}");
+        assert_eq!(extract(&prose(tagged)).len(), 1);
+        let mut native = prose(committed);
+        native.function_calls.push(FunctionCall { call_id: None, name: "git".into(), arguments: "{}".into() });
+        assert_eq!(extract(&native).len(), 1);
     }
 
     #[test]
@@ -240,7 +299,7 @@ mod tests {
     #[test]
     fn a_near_miss_tag_cannot_hide_the_next_block() {
         let text = "```baudet ```baudet-tool\n{\"tool\": \"git\", \"arguments\": {\"command\": \"show\"}}\n```\n";
-        let calls = PromptedCallExtractor.extract(&prose(text));
+        let calls = extract(&prose(text));
         assert_eq!(calls.len(), 1, "het echte blok mag niet verloren gaan");
         assert_eq!(calls[0].arg_str("command"), Some("show"));
     }
@@ -254,7 +313,7 @@ mod tests {
             name: "git".into(),
             arguments: "{\"command\": \"status\"}".into(),
         }];
-        let calls = PromptedCallExtractor.extract(&turn);
+        let calls = extract(&turn);
         assert_eq!(calls.len(), 2, "beide kanalen worden geboden, native eerst");
         assert_eq!(call_of(&calls, 0), ("git", &json!({"command": "status"}), Some("call_1")));
         assert_eq!(calls[1].arg_str("file"), Some("uit de tekst"));
@@ -264,7 +323,7 @@ mod tests {
     fn a_native_call_without_an_id_gets_a_stable_one() {
         let mut turn = prose("");
         turn.function_calls = vec![FunctionCall { call_id: None, name: "read_file".into(), arguments: "{}".into() }];
-        let calls = PromptedCallExtractor.extract(&turn);
+        let calls = extract(&turn);
         assert_eq!(calls[0].call_id.as_deref(), Some("native-0"));
     }
 
@@ -273,18 +332,18 @@ mod tests {
         let mut turn = prose("");
         turn.function_calls =
             vec![FunctionCall { call_id: None, name: "read_file".into(), arguments: "geen json".into() }];
-        let calls = PromptedCallExtractor.extract(&turn);
+        let calls = extract(&turn);
         assert_eq!(calls[0].arguments, json!({}));
         turn.function_calls[0].arguments = "[1,2]".into();
-        assert_eq!(PromptedCallExtractor.extract(&turn)[0].arguments, json!({}));
+        assert_eq!(extract(&turn)[0].arguments, json!({}));
     }
 
     #[test]
     fn prose_before_a_block_survives_the_scan() {
         let accented = "\u{00e9}```baudet-tool\n{\"tool\": \"git\"}\n```\n";
-        assert_eq!(PromptedCallExtractor.extract(&prose(accented)).len(), 1);
+        assert_eq!(extract(&prose(accented)).len(), 1);
         let many = "\u{00e9}".repeat(4) + "```baudet-tool\n{\"tool\": \"git\"}\n```\n";
-        assert_eq!(PromptedCallExtractor.extract(&prose(many)).len(), 1);
+        assert_eq!(extract(&prose(many)).len(), 1);
         assert!(tagged_blocks("`", FENCE_TAG).is_empty());
         assert!(tagged_blocks("\t\t", FENCE_TAG).is_empty());
     }
@@ -300,7 +359,7 @@ mod tests {
     fn a_block_without_a_name_is_not_a_call() {
         for body in ["{}", "{\"arguments\": {\"file\": \"a\"}}", "\"{\"tool\": \"read_file\"}\""] {
             let turn = prose(format!("```baudet-tool\n{body}\n```\n"));
-            assert!(PromptedCallExtractor.extract(&turn).is_empty(), "{body}");
+            assert!(extract(&turn).is_empty(), "{body}");
         }
     }
 

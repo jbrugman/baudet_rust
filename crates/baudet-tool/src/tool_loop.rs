@@ -360,7 +360,7 @@ impl<'a> ToolLoop<'a> {
             if self.chain_response_id && turn.response_id.is_some() {
                 prev = turn.response_id.clone();
             }
-            let calls = if turn.incomplete_reason.is_none() { self.extractor.extract(&turn) } else { Vec::new() };
+            let calls = if turn.incomplete_reason.is_none() { self.extractor.extract(&turn, self.registry) } else { Vec::new() };
 
             if calls.is_empty() {
                 if turn.incomplete_reason.is_none() && is_blankish(&turn.text) && blanks < MAX_BLANK_TURNS {
@@ -394,7 +394,7 @@ impl<'a> ToolLoop<'a> {
             prev = settle.response_id.clone();
         }
         self.add_assistant(run, &mut msgs, &mut added, &settle);
-        if self.extractor.extract(&settle).is_empty() {
+        if self.extractor.extract(&settle, self.registry).is_empty() {
             steps.push(ToolStep { assistant_text: settle.text.clone(), calls: Vec::new(), results: Vec::new() });
             return LoopOutcome::Completed {
                 final_text: settle.text.clone(),
