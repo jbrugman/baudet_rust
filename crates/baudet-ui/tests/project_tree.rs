@@ -144,6 +144,49 @@ fn de_hele_add_project_stroom_eindigt_op_een_project() {
     let names: Vec<String> = app.sidebar().catalog().list_projects().into_iter().map(|p| p.name).collect();
     assert_eq!(names, vec!["Werp".to_string()], "de stroom eindigde niet op het project");
     assert!(app.sidebar().ask_name.is_none(), "de vraag bleef na OK staan");
+    let catalog = app.sidebar().catalog();
+    assert!(catalog.sessions_in(None).is_empty());
+    assert!(catalog.sessions_in(Some(&catalog.list_projects()[0].id)).is_empty());
+}
+
+#[test]
+fn project_rename_preserves_the_conversation_created_by_the_new_session_menu() {
+    let (_guard, _data, mut model) = model_in_tempdir();
+    let project = model.add_project("Before rename").unwrap();
+    let catalog = model.catalog().clone();
+    let ctx = addressable_context();
+    let mut app = TranscriptApp::new(TranscriptApp::demo_backend()).with_sidebar_model(model);
+    paint_once(&ctx, &mut app);
+
+    let row = label_at(&ctx, &mut app, "Before rename");
+    click_at(&ctx, &mut app, row, egui::PointerButton::Secondary);
+    let add = label_at(&ctx, &mut app, Texts::get(Key::NewSessionButton));
+    click_at(&ctx, &mut app, add, egui::PointerButton::Primary);
+    let sessions = catalog.sessions_in(Some(&project.id));
+    assert_eq!(sessions.len(), 1);
+    let id = &sessions[0].id;
+    assert_eq!(app.selected_session(), Some(id.as_str()));
+
+    let row = label_at(&ctx, &mut app, "Before rename");
+    click_at(&ctx, &mut app, row, egui::PointerButton::Secondary);
+    let rename = label_at(&ctx, &mut app, Texts::get(Key::RenameButton));
+    click_at(&ctx, &mut app, rename, egui::PointerButton::Primary);
+    paint_once(&ctx, &mut app);
+    let mut frame = input();
+    frame.events.push(egui::Event::Key {
+        key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND,
+    });
+    frame.events.push(egui::Event::Text("After rename".into()));
+    ctx.run_ui(frame, |ui| app.paint(ui)).drop_without_applying_deltas();
+    let ok = ctx.read_response(root_ui_id(&ctx).with((ASK_OK, "ok"))).unwrap().rect.center();
+    click_at(&ctx, &mut app, ok, egui::PointerButton::Primary);
+    paint_once(&ctx, &mut app);
+
+    assert_eq!(catalog.project(&project.id).unwrap().name, "After rename");
+    assert_eq!(app.selected_session(), Some(id.as_str()));
+    assert_eq!(app.sidebar().selected_session_id(), Some(id.as_str()));
+    assert_eq!(catalog.sessions_in(Some(&project.id)).iter().map(|session| &session.id).collect::<Vec<_>>(), [id]);
+    assert!(catalog.sessions_in(None).is_empty());
 }
 
 

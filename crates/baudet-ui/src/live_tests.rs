@@ -201,7 +201,15 @@ fn deleting_the_active_conversation_waits_for_the_turn_and_keeps_the_next_draft(
         worker_loop(other, Some(root), requests, snapshots, Arc::default(), worker_catalog, settings);
     });
 
-    intents.send(Intent::NewSession(None)).unwrap();
+    intents.send(Intent::Submit("draft before opening a conversation".into(), None)).unwrap();
+    wait_for_snapshot(&mut frames, |frame| frame.rejected_draft.as_ref().is_some_and(|(text, _)| {
+        text == "draft before opening a conversation"
+    }));
+    assert!(catalog.sessions_in(None).is_empty());
+
+    let mut sidebar = SidebarModel::new(catalog.clone());
+    let session = sidebar.add_session(None).unwrap();
+    intents.send(Intent::LoadSession(session.id)).unwrap();
     intents.send(Intent::Submit("turn in progress".into(), None)).unwrap();
     wait_for_snapshot(&mut frames, |frame| frame.busy);
     let id = state.session_id();
@@ -219,11 +227,12 @@ fn deleting_the_active_conversation_waits_for_the_turn_and_keeps_the_next_draft(
 
     intents.send(Intent::Submit("the next conversation".into(), None)).unwrap();
     wait_for_snapshot(&mut frames, |frame| {
-        !frame.busy && state.disk_items().is_some_and(|count| count > 0)
-            && frame.rows.iter().any(|row| row.body == "the next conversation")
+        !frame.busy && frame.reason.as_deref() == Some(Texts::get(Key::ChooseSession))
+            && frame.rejected_draft.as_ref().is_some_and(|(text, _)| text == "the next conversation")
     });
-    assert_ne!(state.session_id(), id);
-    assert_eq!(catalog.sessions_in(None).len(), 1);
+    assert!(state.session_id().is_empty());
+    assert!(catalog.sessions_in(None).is_empty());
+    assert!(baudet_store::Rollout::sessions(directory.path()).unwrap().is_empty());
     intents.send(Intent::Quit).unwrap();
     worker.join().unwrap();
 }
@@ -276,6 +285,7 @@ fn stop_releases_a_silent_stream_and_the_next_turn_uses_the_saved_connection() {
     let backend = configured_backend(&initial, endpoint_from_settings(&initial).unwrap()).unwrap();
     let state = Arc::new(AppState::new(backend, "test"));
     let catalog = baudet_projects::Catalog::open(directory.path()).unwrap();
+    let session = SidebarModel::new(catalog.clone()).add_session(None).unwrap();
     let (intents, commands) = mpsc::channel();
     let (snapshots, mut frames) = ampcc::unbounded_channel();
     let (settings, edits) = mpsc::channel();
@@ -289,7 +299,7 @@ fn stop_releases_a_silent_stream_and_the_next_turn_uses_the_saved_connection() {
         worker_loop(worker_state, Some(worker_root), commands, snapshots, Arc::default(), catalog, worker_settings);
     });
 
-    intents.send(Intent::NewSession(None)).unwrap();
+    intents.send(Intent::LoadSession(session.id)).unwrap();
     intents.send(Intent::Submit("first question".into(), None)).unwrap();
     wait_for_snapshot(&mut frames, |frame| frame.busy && frame.rows.iter().any(|row| row.body == "partial answer"));
     let mut next = Settings {

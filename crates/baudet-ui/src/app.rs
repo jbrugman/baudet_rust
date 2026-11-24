@@ -41,7 +41,7 @@ enum Intent {
     Quit,
     Configure(Option<Result<Arc<dyn Backend>, String>>, Box<baudet_settings::Settings>),
     LoadSession(String),
-    NewSession(Option<String>),
+    CloseDeletedSession(String),
     DeleteSession { id: String, reply: mpsc::Sender<Result<DeletedConversation, String>> },
     LoadOlder,
 }
@@ -128,15 +128,15 @@ pub struct TranscriptApp {
 
 impl TranscriptApp {
     pub fn new(backend: Arc<dyn baudet_backend::Backend>) -> TranscriptApp {
-        Self::new_inner(backend, false)
+        Self::new_inner(backend, false, false)
     }
 
-    fn new_inner(backend: Arc<dyn Backend>, live_settings: bool) -> TranscriptApp {
+    fn new_inner(backend: Arc<dyn Backend>, live_settings: bool, preview: bool) -> TranscriptApp {
         let (intent_tx, intent_rx) = mpsc::channel::<Intent>();
         let (snap_tx, snap_rx) = ampcc::unbounded_channel();
         let state = Arc::new(AppState::new(backend, baudet_settings::DEFAULT_SYSTEM_PROMPT));
         let root = Some(baudet_store::data_dir());
-        let worker_root = root.clone();
+        let worker_root = if preview { None } else { root.clone() };
         let approvals = Arc::new(crate::approval::Approvals::default());
         let worker_approvals = Arc::clone(&approvals);
         let sidebar = SidebarModel::open_default();
@@ -620,11 +620,13 @@ impl TranscriptApp {
                         }
                     }
                 }
-                SidebarIntent::Deleted => {
-                    self.compaction = None;
-                    self.current_session = None;
-                    let _ = self.intents.send(Intent::NewSession(self.current_project.clone()));
-                    self.status = "removed from the catalogue".to_string();
+                SidebarIntent::ProjectDeleted => {
+                    let Some(id) = self.current_session.as_deref() else { continue };
+                    if self.sidebar.catalog().session_assignment(id).is_none() {
+                        let _ = self.intents.send(Intent::CloseDeletedSession(id.to_owned()));
+                        self.current_session = None;
+                        self.compaction = None;
+                    }
                 }
             }
         }
@@ -740,10 +742,10 @@ pub fn root_ui_id(ctx: &egui::Context) -> Id {
 
 impl TranscriptApp {
     fn transcript(&self, ui: &mut egui::Ui) {
-        if self.rows.is_empty() {
+        if self.rows.is_empty() && self.current_session.is_none() && self.shot.is_none() {
             ui.vertical_centered(|ui| {
                 ui.add_space(40.0);
-                ui.label("No transcript yet. Type below and press Enter.");
+                ui.label(Texts::get(Key::ChooseSession));
             });
         }
         for row in self.rows.iter().filter(|row| row.kind != baudet_core::ItemKind::Reasoning) {
@@ -1714,7 +1716,6 @@ fn worker_loop(
     let settings_file = root.as_ref().map(|path| baudet_settings::SettingsFile::at(path.join("settings.json")))
         .unwrap_or_else(baudet_settings::SettingsFile::default_location);
     let mut connection_problem: Option<String> = None;
-    let mut draft_after_delete = false;
     let mut catalog = Some(catalog);
     let publish = |state: &AppState, busy: bool, catalog: &Option<baudet_projects::Catalog>, reason, rejected_draft| {
         let rows = state.rows().iter().map(Row::from).collect::<Vec<_>>();
@@ -1782,20 +1783,10 @@ fn worker_loop(
                     publish(&state, false, &catalog, Some(reason.clone()), Some((text, image)));
                     continue;
                 }
-                if draft_after_delete && state.session_id().is_empty() {
-                    let id = baudet_projects::new_session_id();
-                    let project = state.project();
-                    let opened = root.as_deref().ok_or_else(|| "conversation storage unavailable".to_owned())
-                        .and_then(|root| state.open_store(root, &id, &state.model(), project.as_deref()));
-                    match opened {
-                        Ok((transcript, session)) => { state.switch_to(transcript, session); }
-                        Err(reason) => {
-                            publish(&state, false, &catalog, Some(reason), Some((text, image)));
-                            continue;
-                        }
-                    }
+                if root.is_some() && catalog.as_ref().and_then(|catalog| catalog.session_assignment(&state.session_id())).is_none() {
+                    publish(&state, false, &catalog, Some(Texts::get(Key::ChooseSession).to_owned()), Some((text, image)));
+                    continue;
                 }
-                draft_after_delete = false;
                 let current = settings_file.read();
                 let mut settings = current.settings().clone();
                 let context_key = state.context_key();
@@ -1880,8 +1871,8 @@ fn worker_loop(
                             let backend = backend.or_else(|| pending_configuration.take().and_then(|(backend, _)| backend));
                             pending_configuration = Some((backend, settings));
                         }
-                        Ok(intent @ Intent::DeleteSession { .. }) => deferred.push_back(intent),
-                        Ok(Intent::LoadSession(_) | Intent::NewSession(_) | Intent::LoadOlder) => {
+                        Ok(intent @ (Intent::DeleteSession { .. } | Intent::CloseDeletedSession(_))) => deferred.push_back(intent),
+                        Ok(Intent::LoadSession(_) | Intent::LoadOlder) => {
                         }
                         Err(_) => {}
                     }
@@ -1920,37 +1911,10 @@ fn worker_loop(
                 }
                 publish(&state, state.live_turns() > 0, &catalog, None, None);
             }
-            Intent::NewSession(project) => {
-                match root.as_deref() {
-                    Some(root) => {
-                        let id = baudet_projects::new_session_id();
-                        let model = state.model();
-                        let opened = state.open_store(root, &id, &model, project.as_deref());
-                        let _ = state.session_id();
-                        if let Err(reason) = opened.map(|(transcript, session)| {
-                            state.switch_project(project.clone());
-                            state.switch_to(transcript, session);
-                        }) {
-                            let _ = snapshots.send(Snapshot {
-                                rows: Vec::new(),
-                                busy: false,
-                                loading: false,
-                                context: None,
-                                has_more_older: state.paging().0,
-                                reason: Some(reason),
-                                rejected_draft: None,
-                                compaction: None,
-                            });
-                            continue;
-                        }
-                        if let Some(catalog) = catalog.as_ref() {
-                            catalog.upsert_session(&id, Some(&model), project.as_deref(), 0).ok();
-                        }
-                    }
-                    None => {
-                        state.switch_project(project);
-                        state.adopt(baudet_store::session::Session::new("", state.model()));
-                    }
+            Intent::CloseDeletedSession(id) => {
+                if state.session_id() == id {
+                    state.switch_project(None);
+                    state.clear_session();
                 }
             }
             Intent::DeleteSession { id, reply } => {
@@ -1967,7 +1931,6 @@ fn worker_loop(
                     if was_active {
                         state.switch_project(project.clone());
                         state.clear_session();
-                        draft_after_delete = true;
                     }
                     Ok(DeletedConversation { id, project, was_active, cleanup_warning })
                 })();
@@ -2008,7 +1971,7 @@ fn after_turn(
     }
     if let (Some(catalog), false) = (catalog.as_ref(), id.is_empty()) {
         let (_, turns) = state.transcript_len();
-        catalog.upsert_session(&id, Some(&state.model()), state.project().as_deref(), turns as i32).ok();
+        catalog.update_session_progress(&id, &state.model(), turns as i32).ok();
     }
 }
 
@@ -2610,7 +2573,7 @@ pub fn run_from(startup: Startup) -> eframe::Result {
         options,
         Box::new(move |cc| {
             palette::install(&cc.egui_ctx);
-            let mut app = TranscriptApp::new_inner(backend, !demo);
+            let mut app = TranscriptApp::new_inner(backend, !demo, screenshot.is_some());
             let balk = status_balk(
                 startup.demo,
                 fell_back.as_deref(),

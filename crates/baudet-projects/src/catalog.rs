@@ -167,6 +167,14 @@ impl Catalog {
         self.write(&mut state)
     }
 
+    pub fn update_session_progress(&self, id: &str, model: &str, last_seq: i32) -> Result<(), CatalogError> {
+        let mut state = self.lock();
+        let session = Self::session_mut(&mut state.data, id)?;
+        session.model = Some(model.to_owned());
+        session.last_seq = last_seq;
+        self.write(&mut state)
+    }
+
     pub fn rename_session(&self, id: &str, title: &str) -> Result<(), CatalogError> {
         let mut state = self.lock();
         let session = Self::session_mut(&mut state.data, id)?;

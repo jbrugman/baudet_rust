@@ -201,7 +201,7 @@ pub const FOLDER_NONE: &str = "no folder linked";
 pub enum SidebarIntent {
     OpenSession(String),
     DeleteSession(String),
-    Deleted,
+    ProjectDeleted,
 }
 
 fn split_grip(ui: &mut Ui, rect: egui::Rect, id: egui::Id, vertical: bool) -> egui::Response {
@@ -501,8 +501,8 @@ fn ask_and_confirm(ui: &mut Ui, model: &mut SidebarModel, intents: &mut Vec<Side
                 )
                 .response
                 .clicked();
-            if (ok || submitted) && model.answer_name().is_some() {
-                intents.push(SidebarIntent::Deleted);
+            if ok || submitted {
+                model.answer_name();
             }
             if ui.button(Texts::get(Key::No)).clicked() {
                 model.cancel_name();
@@ -527,7 +527,7 @@ fn ask_and_confirm(ui: &mut Ui, model: &mut SidebarModel, intents: &mut Vec<Side
             if yes {
                 match model.answer_confirm(true) {
                     Some(crate::sidebar::SidebarOutcome::DeleteSession(id)) => intents.push(SidebarIntent::DeleteSession(id)),
-                    Some(crate::sidebar::SidebarOutcome::DeletedProject) => intents.push(SidebarIntent::Deleted),
+                    Some(crate::sidebar::SidebarOutcome::DeletedProject) => intents.push(SidebarIntent::ProjectDeleted),
                     None => {}
                 }
             }
