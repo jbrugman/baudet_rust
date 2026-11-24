@@ -77,10 +77,11 @@ impl AppState {
         let write = project.is_some_and(|project| project.is_granted(FolderPermission::Write));
         let exec = project.is_some_and(|project| project.is_granted(FolderPermission::Execute));
         let s = run.settings;
+        let git_writes = read && write && s.git_allow_writes;
         let mut tools: Vec<Box<dyn Tool + Send + Sync>> = Vec::new();
         if read {
             tools.push(Box::new(ReadFileTool));
-            tools.push(Box::new(if write && s.git_allow_writes {
+            tools.push(Box::new(if git_writes {
                 GitTool::with_writes()
             } else {
                 GitTool::read_only()
@@ -103,7 +104,7 @@ impl AppState {
                 parameters: tool.parameters().to_string(),
             })
             .collect();
-        let system = format!("{}\n\n{}", s.resolved_system_prompt(), protocol_for(&names, &extra));
+        let system = format!("{}\n\n{}", s.resolved_system_prompt(), protocol_for(&names, &extra, git_writes));
         let registry = ToolRegistry::new(tools);
         let ctx = tool_context(run, root, read, write, exec);
         let choices = self.choices.lock().unwrap().clone();
@@ -169,19 +170,25 @@ fn tool_context(run: ToolTurn<'_>, root: Option<&str>, read: bool, write: bool, 
     });
     let approval = Arc::clone(&run.approval);
     let stopped = Arc::clone(&run.cancelled);
-    ctx.approve_command = Box::new(move |command, cwd, timeout| {
+    let pinned = Arc::new(Mutex::new(s.auto_allow_commands.clone()));
+    let approval_pins = Arc::clone(&pinned);
+    ctx.approve_command = Box::new(move |command, cwd, timeout, pin| {
         if stopped.load(Ordering::Relaxed) {
             return false;
         }
-        let allowed = matches!(
-            approval(ApprovalRequest::RunCommand {
-                command: command.into(),
-                cwd: Some(cwd.into()),
-                timeout_seconds: i32::try_from(timeout).ok()
-            }),
-            ApprovalDecision::Accept
-        );
-        allowed && !stopped.load(Ordering::Relaxed)
+        match approval(ApprovalRequest::RunCommand {
+            command: command.into(),
+            cwd: Some(cwd.into()),
+            timeout_seconds: i32::try_from(timeout).ok(),
+            always_key: Some(pin.into()),
+        }) {
+            ApprovalDecision::AcceptForSession if !stopped.load(Ordering::Relaxed) => {
+                approval_pins.lock().unwrap().push(pin.to_owned());
+                true
+            }
+            ApprovalDecision::Accept => !stopped.load(Ordering::Relaxed),
+            _ => false,
+        }
     });
     let approval = run.approval;
     let stopped = Arc::clone(&run.cancelled);
@@ -207,8 +214,7 @@ fn tool_context(run: ToolTurn<'_>, root: Option<&str>, read: bool, write: bool, 
         }
     });
     ctx.auto_approve_safe = s.auto_approve_safe_commands;
-    let pinned = s.auto_allow_commands.clone();
-    ctx.auto_allow_provider = Box::new(move || pinned.clone());
+    ctx.auto_allow_provider = Box::new(move || pinned.lock().unwrap().clone());
     let trusted = s.trusted_commands.clone();
     ctx.trusted_commands_provider = Box::new(move || trusted.clone());
     (ctx, run.cancelled)

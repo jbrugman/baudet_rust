@@ -71,7 +71,7 @@ pub struct ExtraTool {
 }
 
 // Advertise only tools registered for this turn.
-pub fn protocol_for(enabled: &[&str], extra: &[ExtraTool]) -> String {
+pub fn protocol_for(enabled: &[&str], extra: &[ExtraTool], git_writes: bool) -> String {
     let can_read = enabled.contains(&"read_file");
     let can_edit = enabled.contains(&"edit_file");
     let can_run = enabled.contains(&"run_command");
@@ -104,8 +104,16 @@ pub fn protocol_for(enabled: &[&str], extra: &[ExtraTool]) -> String {
         out.push_str("  {\"tool\": \"run_command\", \"arguments\": {\"command\": \"mvn -B test\"}}\n\n");
     }
     if can_git {
-        out.push_str("Inspect the repository with a read-only git command such as status, diff or log:\n");
-        out.push_str("  {\"tool\": \"git\", \"arguments\": {\"command\": \"status\"}}\n\n");
+        out.push_str("Use the git tool for repository operations. Inspect with status, diff or log:\n");
+        out.push_str("  {\"tool\": \"git\", \"arguments\": {\"command\": \"status\"}}\n");
+        if git_writes {
+            out.push_str("Git writes require approval. Stage and commit with separate calls, waiting for each result:\n");
+            out.push_str("  {\"tool\": \"git\", \"arguments\": {\"command\": \"add\", \"args\": [\"relative/path\"]}}\n");
+            out.push_str("  {\"tool\": \"git\", \"arguments\": {\"command\": \"commit\", \"message\": \"Commit message\"}}\n");
+        } else {
+            out.push_str("Git writes are disabled for this project.\n");
+        }
+        out.push_str("Use the git tool for its supported operations, and do not perform Git writes through the shell.\n\n");
     }
 
     for tool in extra {
@@ -298,32 +306,32 @@ mod tests {
 
     #[test]
     fn the_protocol_names_exactly_the_enabled_tools() {
-        let only_read = protocol_for(&["read_file"], &[]);
+        let only_read = protocol_for(&["read_file"], &[], false);
         assert!(only_read.contains("\"read_file\""), "{only_read}");
         for absent in ["edit_file", "run_command", "git"] {
             assert!(!only_read.contains(absent), "een tool die er niet is, mag niet aangeboden worden: {absent}");
         }
         assert!(only_read.ends_with("On ok true from read_file, choose old_text from the text it returned."));
 
-        let editing = protocol_for(&["read_file", "edit_file"], &[]);
+        let editing = protocol_for(&["read_file", "edit_file"], &[], false);
         assert!(editing.contains("\"edit_file\""));
         assert!(editing.contains("\"old_text\""));
         assert!(editing.ends_with("On ok true from edit_file, either answer or make the next call you still need."));
         assert!(!editing.contains("run_command"), "uitgeschreven rechten blijven weg uit de prompt");
 
-        let edit_without_read = protocol_for(&["edit_file"], &[]);
+        let edit_without_read = protocol_for(&["edit_file"], &[], false);
         assert!(edit_without_read.contains("\"edit_file\""), "aanwezig blijft aangeboden: {edit_without_read}");
         assert!(!edit_without_read.contains("\"read_file\""), "afwezig blijft verzwegen: {edit_without_read}");
         assert!(!edit_without_read.contains("old_text from the text it returned"), "geen advies over een afwezige tool");
         assert!(edit_without_read.ends_with("On ok true from edit_file, either answer or make the next call you still need."));
 
-        let empty = protocol_for(&[], &[]);
+        let empty = protocol_for(&[], &[], false);
         for tool in ["read_file", "edit_file", "run_command", "git"] {
             assert!(!empty.contains(&format!("\"{tool}\"")), "ledige registry adverteert niets: {tool}");
         }
         assert!(empty.contains(FENCE_TAG), "de vorm blijft, ook zonder tools");
 
-        let full = protocol_for(&["read_file", "edit_file", "run_command", "git"], &[]);
+        let full = protocol_for(&["read_file", "edit_file", "run_command", "git"], &[], false);
         for tool in ["read_file", "edit_file", "run_command", "git"] {
             assert!(full.contains(&format!("\"{tool}\"")), "{tool} mist in {full}");
         }
@@ -340,13 +348,26 @@ mod tests {
     }
 
     #[test]
+    fn git_prompt_matches_the_write_permission() {
+        let read_only = protocol_for(&["git", "run_command"], &[], false);
+        assert!(read_only.contains("Git writes are disabled"));
+        assert!(!read_only.contains("\"command\": \"commit\""));
+
+        let writable = protocol_for(&["git", "run_command"], &[], true);
+        assert!(writable.contains("Git writes require approval"));
+        assert!(writable.contains("\"command\": \"add\""));
+        assert!(writable.contains("\"command\": \"commit\""));
+        assert!(writable.contains("do not perform Git writes through the shell"));
+    }
+
+    #[test]
     fn an_extra_tool_is_advertised_with_its_schema() {
         let extra = ExtraTool {
             name: "mcp__time__now".to_string(),
             description: "Current time".to_string(),
             parameters: "{\"type\":\"object\"}".to_string(),
         };
-        let text = protocol_for(&["read_file"], &[extra]);
+        let text = protocol_for(&["read_file"], &[extra], false);
         assert!(text.contains("\"mcp__time__now\""), "ook een extra tool moet geadverteerd worden: {text}");
         assert!(text.contains("Purpose: Current time"));
         assert!(text.contains("{\"type\":\"object\"}"), "een prompted backend leest de schema uit de prompt");

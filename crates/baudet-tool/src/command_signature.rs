@@ -1,6 +1,10 @@
 
 use crate::safe_commands;
 
+pub fn workspace_pin(scope: &str, cwd: &str, command: impl serde::Serialize) -> String {
+    format!("workspace:{}", serde_json::json!([scope, cwd, command]))
+}
+
 pub fn pinned(command: &str) -> String {
     let canonical = safe_commands::fold_spaces(command);
     if safe_commands::is_safe(&canonical) {

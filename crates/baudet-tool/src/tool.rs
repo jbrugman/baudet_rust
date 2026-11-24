@@ -71,7 +71,7 @@ impl ToolResult {
 
 pub type Approval = Box<dyn Fn(&str, &str) -> bool + Send>;
 pub type McpApproval = Box<dyn Fn(&str, &str, &Value) -> bool + Send>;
-pub type CommandApproval = Box<dyn Fn(&str, &str, u32) -> bool + Send>;
+pub type CommandApproval = Box<dyn Fn(&str, &str, u32, &str) -> bool + Send>;
 
 pub struct ToolContext {
     pub root: Option<PathBuf>,
@@ -107,7 +107,7 @@ impl Default for ToolContext {
             exec_granted: false,
             approve: Box::new(|_, _| false),
             approve_mcp: Box::new(|_, _, _| false),
-            approve_command: Box::new(|_, _, _| false),
+            approve_command: Box::new(|_, _, _, _| false),
             auto_allow_provider: Box::new(Vec::new),
             auto_approve_safe: false,
             trusted_commands_provider: Box::new(Vec::new),
@@ -309,7 +309,7 @@ mod tests {
         assert!(!ctx.read_granted && !ctx.write_granted && !ctx.exec_granted);
         assert!(!ctx.auto_approve_safe);
         assert!(!(ctx.approve)("a.txt", "diff"));
-        assert!(!(ctx.approve_command)("rm -rf build", "/tmp", 30));
+        assert!(!(ctx.approve_command)("rm -rf build", "/tmp", 30, ""));
         assert!(ctx.auto_allow().is_empty());
         assert!(ctx.trusted_commands().is_empty());
 

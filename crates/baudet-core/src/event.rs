@@ -110,6 +110,8 @@ pub enum ApprovalRequest {
         cwd: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_seconds: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        always_key: Option<String>,
     },
     ApplyPatch {
         path: String,

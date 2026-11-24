@@ -45,15 +45,13 @@ impl Tool for GitTool {
              commit, checkout, stash, push -- each runs only after the user approves it. For \
              add, pass the paths in args; for commit, pass the message in the message field; for \
              checkout, one branch (optionally with -b to create it); for stash, one of push, pop, \
-             apply, save or list; for push, an optional remote and branch. Global flags and \
-             anything these commands cannot do stay a job for run_command. Returns stdout, \
-             stderr and the exit code."
+             apply, save or list; for push, an optional remote and branch. Returns stdout, stderr and the exit code."
         } else {
             "Run a read-only git command in the project repository. Available commands: \
              status, diff, diff_staged, log, show, branch, ls_files, rev_parse, blame. \
              Optional args are extra read-only arguments or paths (for example a file path \
-             for diff, or a commit for show). Anything that changes the repository must go \
-             through run_command instead. Returns stdout, stderr and the exit code."
+             for diff, or a commit for show). Git writes are disabled for this project. \
+             Returns stdout, stderr and the exit code."
         }
     }
 
@@ -108,18 +106,21 @@ impl Tool for GitTool {
             return fail("no project folder is linked to inspect");
         };
 
+        let argv = git_command::argv(root, command, &extra, message);
         if git_command::is_write(command) {
             if !ctx.write_granted {
                 return fail("the project does not grant the Write right");
             }
             let summary = git_command::summary(command, &extra, message);
-            let pinned = ctx.auto_allow().contains(&command_signature::pinned(&summary));
-            if !pinned && !(ctx.approve_command)(&summary, &root.to_string_lossy(), TIMEOUT_SECONDS as u32) {
+            let cwd = root.to_string_lossy();
+            let pin = command_signature::workspace_pin("git", &cwd, &argv);
+            let allowed = ctx.auto_allow();
+            let pinned = allowed.contains(&pin) || allowed.contains(&command_signature::pinned(&summary));
+            if !pinned && !(ctx.approve_command)(&summary, &cwd, TIMEOUT_SECONDS as u32, &pin) {
                 return fail("the user declined this git write");
             }
         }
 
-        let argv = git_command::argv(root, command, &extra, message);
         let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         let outcome = match ProcessRunner::run(&refs, root, Duration::from_secs(TIMEOUT_SECONDS)) {
             Ok(outcome) => outcome,
@@ -176,7 +177,7 @@ mod tests {
             root: Some(root.to_path_buf()),
             read_granted: read,
             write_granted: write,
-            approve_command: Box::new(move |summary: &str, _cwd: &str, _timeout: u32| {
+            approve_command: Box::new(move |summary: &str, _cwd: &str, _timeout: u32, _| {
                 shared.asked.lock().unwrap().push(summary.to_owned());
                 shared.answer
             }),
@@ -301,6 +302,46 @@ mod tests {
     }
 
     #[test]
+    fn a_workspace_pin_only_allows_the_approved_git_arguments_and_folder() {
+        let folder = repo();
+        let other = repo();
+        let tool = GitTool::with_writes();
+        let record = recorder(false);
+        let argv = git_command::argv(folder.path(), "add", &["a.txt".to_owned()], None);
+        let pin = command_signature::workspace_pin("git", &folder.path().to_string_lossy(), &argv);
+        let mut approved = ctx(folder.path(), true, true, &record);
+        let shared = pin.clone();
+        approved.auto_allow_provider = Box::new(move || vec![shared.clone()]);
+        let mut another_folder = ctx(other.path(), true, true, &record);
+        another_folder.auto_allow_provider = Box::new(move || vec![pin.clone()]);
+
+        let add = json!({"command": "add", "args": ["a.txt"]});
+        assert!(tool.execute(&add, &approved).ok);
+        assert_eq!(tool.execute(&add, &another_folder).output, "git: the user declined this git write");
+        let commit = json!({"command": "commit", "message": "Update README"});
+        assert_eq!(tool.execute(&commit, &approved).output, "git: the user declined this git write");
+        assert_eq!(record.asked.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_approved_commit_records_the_staged_change() {
+        let folder = repo();
+        for (key, value) in [("user.name", "Test"), ("user.email", "test@example.invalid")] {
+            assert!(Command::new("git").args(["config", key, value])
+                .current_dir(folder.path()).status().unwrap().success());
+        }
+        let record = recorder(true);
+        let context = ctx(folder.path(), true, true, &record);
+        let tool = GitTool::with_writes();
+        assert!(tool.execute(&json!({"command": "add", "args": ["a.txt"]}), &context).ok);
+        let committed = tool.execute(&json!({"command": "commit", "message": "Update fixture"}), &context);
+        assert!(committed.ok, "{}", committed.output);
+        let log = Command::new("git").args(["log", "-1", "--format=%s"]).current_dir(folder.path()).output().unwrap();
+        assert_eq!(String::from_utf8(log.stdout).unwrap().trim(), "Update fixture");
+        assert_eq!(record.asked.lock().unwrap().len(), 2);
+    }
+
+    #[test]
     fn a_pin_from_an_earlier_always_skips_the_prompt() {
         let dir = repo();
         let shared = Arc::new(Mutex::new(Vec::new()));
@@ -344,7 +385,7 @@ mod tests {
         let result = GitTool::read_only()
             .execute(&json!({"command": "commit", "message": "x"}), &ctx(dir.path(), true, true, &rec));
         assert!(result.output.contains("changes the repository"), "{}", result.output);
-        assert!(result.output.contains("run_command"), "{}", result.output);
+        assert!(!result.output.contains("run_command"), "{}", result.output);
         assert!(rec.asked.lock().unwrap().is_empty());
     }
 

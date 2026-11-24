@@ -81,13 +81,16 @@ impl Tool for ExecuteTool {
         let timeout = timeout_arg(args).unwrap_or(DEFAULT_TIMEOUT_SECONDS).clamp(1, MAX_TIMEOUT_SECONDS);
 
         if !self.workspace {
+            let cwd = cwd.to_string_lossy();
+            let pin = command_signature::workspace_pin("shell", &cwd, command);
+            let allowed = ctx.auto_allow();
             let trusted = command_signature::pinned(command);
             let family = command_signature::trusted_entry(command);
-            let pre_approved = ctx.auto_allow().contains(&trusted)
+            let pre_approved = allowed.contains(&pin) || allowed.contains(&trusted)
                 || (ctx.auto_approve_safe && safe_commands::is_safe(command))
                 || family.as_deref().is_some_and(|key| ctx.trusted_commands().iter().any(|t| t == key));
 
-            if !pre_approved && !(ctx.approve_command)(command, &cwd.to_string_lossy(), timeout as u32) {
+            if !pre_approved && !(ctx.approve_command)(command, &cwd, timeout as u32, &pin) {
                 return fail("the user declined to run this command");
             }
         }
@@ -299,7 +302,7 @@ mod tests {
             root: Some(root.to_path_buf()),
             exec_granted: true,
             auto_approve_safe: auto_safe,
-            approve_command: Box::new(move |command: &str, cwd: &str, timeout: u32| {
+            approve_command: Box::new(move |command: &str, cwd: &str, timeout: u32, _| {
                 shared.asked.lock().unwrap().push((command.to_owned(), cwd.to_owned(), u64::from(timeout)));
                 shared.answer
             }),
@@ -530,7 +533,7 @@ mod workspace_tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let mut ctx = ToolContext::for_folder(project.path(), true, true, true);
-        ctx.approve_command = Box::new(|_, _, _| panic!("workspace command requested approval"));
+        ctx.approve_command = Box::new(|_, _, _, _| panic!("workspace command requested approval"));
         let command = format!(
             r#"test "$(cat input.txt)" = input &&
                echo written > output.txt &&

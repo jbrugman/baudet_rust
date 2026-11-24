@@ -43,6 +43,7 @@ fn asked(item_id: &str) -> ThreadEvent {
             command: "cargo test".to_string(),
             cwd: None,
             timeout_seconds: None,
+            always_key: None,
         },
     }
 }

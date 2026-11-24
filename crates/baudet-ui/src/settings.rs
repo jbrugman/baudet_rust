@@ -10,6 +10,7 @@ pub enum SettingsCommand {
     ApplyMcp { servers: String, allowed: String },
     ClearMcpAllow,
     AllowMcp(String),
+    AllowCommand(String),
     Fetch {
         endpoint: String,
         api_key: Option<String>,

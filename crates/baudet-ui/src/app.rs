@@ -453,10 +453,12 @@ impl TranscriptApp {
         ui.set_clip_rect(clip);
 
         let tab = self.tab();
+        let needs_approval = self.approvals.is_pending();
         if tab == Tab::Chat {
             self.honesty_footer(ui);
             self.chat_status(ui);
-            let max = (ui.available_height() - 36.0).max(0.0);
+            let reserve = if needs_approval { crate::approval::CARD_HEIGHT } else { 0.0 };
+            let max = (ui.available_height() - 36.0 - reserve).max(0.0);
             let height = self.composer_height(max);
             Panel::bottom("composer").exact_size(height).show_separator_line(false)
                 .show(ui, |ui| self.composer(ui, max));
@@ -494,6 +496,17 @@ impl TranscriptApp {
             });
             match tab {
                 Tab::Chat => {
+                    if needs_approval {
+                        let granted = Panel::bottom("tool-approval").exact_size(crate::approval::CARD_HEIGHT)
+                            .frame(egui::Frame::NONE).show(ui, |ui| self.approvals.show(ui)).inner;
+                        if let Some(grant) = granted {
+                            let command = match grant {
+                                crate::approval::SavedGrant::Command(key) => SettingsCommand::AllowCommand(key),
+                                crate::approval::SavedGrant::Mcp(server) => SettingsCommand::AllowMcp(server),
+                            };
+                            let _ = self.settings_tx.send(command);
+                        }
+                    }
                     ScrollArea::new([!self.settings.transcript_wrap(), true])
                         .id_salt("center-scroll")
                         .auto_shrink([false, false])
@@ -511,9 +524,6 @@ impl TranscriptApp {
                 });
             }
         });
-        if let Some(server) = self.approvals.show(ui.ctx()) {
-            let _ = self.settings_tx.send(SettingsCommand::AllowMcp(server));
-        }
         if let Some(view) = &mut self.diff_view {
             let (open, size) = view.show(ui.ctx(), self.settings.diff_window_size());
             if let Some(size) = size {
@@ -876,14 +886,17 @@ impl TranscriptApp {
 
     fn chat_status(&self, ui: &mut egui::Ui) {
         let busy = self.compacting || self.busy || self.loading || self.deletion.is_some();
-        let message = if self.compacting || !busy {
+        let waiting = self.approvals.is_pending();
+        let message = if waiting {
+            Texts::get(Key::ApprovalWaiting)
+        } else if self.compacting || !busy {
             self.compaction.as_deref().unwrap_or(&self.status)
         } else {
             &self.status
         };
         Panel::bottom("chat-status").exact_size(28.0).show(ui, |ui| {
             ui.horizontal(|ui| {
-                if busy {
+                if busy && !waiting {
                     ui.add(egui::Spinner::new().size(16.0).color(palette::ACCENT));
                 }
                 ui.add(egui::Label::new(message).truncate()).on_hover_text(message);
@@ -979,7 +992,6 @@ impl TranscriptApp {
             self.compaction = None;
             let text = std::mem::take(&mut self.input);
             let _ = self.intents.send(Intent::Submit(text, self.attachment.take()));
-            self.thinking_hidden = false;
             self.busy = true;
             self.status = "starting".to_string();
         }
@@ -1075,6 +1087,7 @@ mod geometry_tests {
     #[test]
     fn enter_inserts_a_newline_and_ctrl_enter_submits_the_draft_once() {
         let mut app = TranscriptApp::new(TranscriptApp::demo_backend()).with_server(String::new());
+        app.thinking_hidden = true;
         let (tx, intents) = mpsc::channel();
         app.intents = tx;
         app.input = "first line".into();
@@ -1105,6 +1118,7 @@ mod geometry_tests {
         assert!(matches!(intents.try_recv(), Ok(Intent::Submit(text, None)) if text == "first line\n"));
         assert!(matches!(intents.try_recv(), Err(mpsc::TryRecvError::Empty)));
         assert!(app.input.is_empty());
+        assert!(app.thinking_hidden);
     }
 
     #[test]
@@ -1289,6 +1303,67 @@ mod geometry_tests {
         assert!(status.contains_rect(text(&out, error)));
         assert!(!spinner(&out));
         assert_eq!(panel("composer"), composer);
+    }
+
+    #[test]
+    fn command_approval_buttons_stay_visible_in_chat_and_save_the_exact_grant() {
+        use baudet_core::{ApprovalDecision, ApprovalRequest};
+
+        let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+        let (_updates, snapshots) = ampcc::unbounded_channel();
+        app.snapshots = snapshots;
+        let (settings_tx, saved) = mpsc::channel();
+        app.settings_tx = settings_tx;
+        let approvals = Arc::clone(&app.approvals);
+        let pin = "fixture-exact-command";
+        let (result, decision) = mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = approvals.request(ApprovalRequest::RunCommand {
+                command: "git add -- README.md".into(),
+                cwd: Some("/fixture/project".into()),
+                timeout_seconds: Some(30),
+                always_key: Some(pin.into()),
+            }, &AtomicBool::new(false));
+            let _ = result.send(outcome);
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !app.approvals.is_pending() {
+            assert!(std::time::Instant::now() < deadline, "no pending approval reached the chat");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let ctx = egui::Context::default();
+        palette::install(&ctx);
+        let mut paint = |events| {
+            let mut out = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(650.0, 360.0))),
+                events,
+                ..Default::default()
+            }, |ui| app.paint(ui));
+            out.textures_delta.clear();
+            out
+        };
+        paint(Vec::new());
+        let out = paint(Vec::new());
+        let card = egui::containers::PanelState::load(&ctx, egui::Id::new("tool-approval")).unwrap().outer_rect;
+        let locate_button = |key| out.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == Texts::get(key) => {
+                let rect = text.visual_bounding_rect();
+                (card.contains_rect(rect) && shape.clip_rect.contains_rect(rect)).then_some(rect.center())
+            }
+            _ => None,
+        });
+        for key in [Key::AllowOnce, Key::AlwaysAllow, Key::DenyButton] {
+            assert!(locate_button(key).is_some(), "the chat card must show {}", Texts::get(key));
+        }
+        assert!(matches!(decision.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        let pos = locate_button(Key::AlwaysAllow).unwrap();
+        for pressed in [true, false] {
+            paint(vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        assert_eq!(decision.recv_timeout(std::time::Duration::from_secs(1)).unwrap(), ApprovalDecision::AcceptForSession);
+        assert!(matches!(saved.try_recv(), Ok(SettingsCommand::AllowCommand(key)) if key == pin));
     }
 
     #[test]
@@ -1959,6 +2034,7 @@ fn settings_worker_loop(
                 // MCP settings have dedicated commands on this worker. Preserve their latest values.
                 settings.mcp_servers = current.settings().mcp_servers.clone();
                 settings.mcp_allow_servers = current.settings().mcp_allow_servers.clone();
+                settings.auto_allow_commands = current.settings().auto_allow_commands.clone();
                 settings.learned_context_windows = current.settings().learned_context_windows.clone();
                 let outcome = file.write(&settings);
                 if outcome.is_ok() {
@@ -2007,6 +2083,11 @@ fn settings_worker_loop(
                 mutate_and_save(&|settings| settings.trusted_commands = kept.clone(), afgevallen, &report);
             }
             SettingsCommand::ClearTrusted => mutate_and_save(&|settings| settings.trusted_commands.clear(), 0, &report),
+            SettingsCommand::AllowCommand(key) => mutate_and_save(&|settings| {
+                if !settings.auto_allow_commands.contains(&key) {
+                    settings.auto_allow_commands.push(key.clone());
+                }
+            }, 0, &report),
             SettingsCommand::ClearAlways => {
                 mutate_and_save(&|settings| settings.auto_allow_commands.clear(), 0, &report)
             }

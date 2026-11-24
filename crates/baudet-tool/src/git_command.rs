@@ -36,7 +36,7 @@ pub fn check_allowed(command: &str, args: &[String], writes: GitWrites, message:
     if WRITE.contains(&command) {
         if writes == GitWrites::Disabled {
             return Some(format!(
-                "git: '{command}' changes the repository. Git writes are disabled; enable them in Settings, or                  use the run_command tool instead."
+                "git: '{command}' changes the repository. Git writes are disabled; enable them in Settings to use this tool."
             ));
         }
         return check_write(command, args, message);
@@ -264,7 +264,7 @@ mod tests {
             let why = waarom(verb, &[], GitWrites::Disabled, Some("bericht"));
             assert!(why.contains("changes the repository"), "{verb}: {why}");
             assert!(why.contains("enable them in Settings"), "{verb}: {why}");
-            assert!(why.contains("run_command"), "{verb}: {why}");
+            assert!(!why.contains("run_command"), "{verb}: {why}");
         }
     }
 

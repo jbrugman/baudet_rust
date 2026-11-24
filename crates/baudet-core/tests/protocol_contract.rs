@@ -38,6 +38,7 @@ fn approval_methods_are_per_request_kind() {
         command: "cargo test".into(),
         cwd: Some("/tmp".into()),
         timeout_seconds: Some(30),
+        always_key: None,
     };
     assert_eq!(command.wire_method(), "item/commandExecution/requestApproval");
     let patch = ApprovalRequest::ApplyPatch { path: "src/main.rs".into(), diff: None };
