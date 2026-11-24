@@ -35,6 +35,12 @@ impl Protocol {
         }
     }
 
+    pub fn preferred(confirmed: &[Self], use_responses: bool) -> Option<Self> {
+        let preferred = if use_responses { Self::Responses } else { Self::ChatCompletions };
+        confirmed.iter().copied().find(|protocol| *protocol == preferred)
+            .or_else(|| confirmed.first().copied())
+    }
+
     pub fn label(&self) -> &'static str {
         match self {
             Protocol::Responses => "responses",
@@ -164,14 +170,14 @@ pub fn is_error_body(value: &Value) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanOutcome {
     pub endpoint: String,
-    pub protocol: Option<Protocol>,
+    pub protocols: Vec<Protocol>,
     pub models: Vec<String>,
     pub notes: Vec<String>,
 }
 
 impl ScanOutcome {
     pub fn usable(&self) -> bool {
-        self.protocol.is_some()
+        !self.protocols.is_empty()
     }
 }
 
@@ -180,7 +186,7 @@ pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 pub fn scan(
     endpoint: &str,
     list: impl FnOnce() -> Result<Vec<String>, String>,
-    probe: impl Fn(&str, &str, &Map<String, Value>) -> (Option<Protocol>, String),
+    probe: impl Fn(Protocol, &str, &Map<String, Value>) -> (Option<Protocol>, String),
 ) -> ScanOutcome {
     let endpoint = endpoint.to_string();
     let mut notes = Vec::new();
@@ -188,7 +194,7 @@ pub fn scan(
         Ok(models) => models,
         Err(detail) => {
             notes.push(format!("no model listing: {detail}"));
-            return ScanOutcome { endpoint, protocol: None, models: Vec::new(), notes };
+            return ScanOutcome { endpoint, protocols: Vec::new(), models: Vec::new(), notes };
         }
     };
     let Some(model) = probeable_model(&models).map(str::to_string) else {
@@ -197,18 +203,20 @@ pub fn scan(
         } else {
             "the server lists no model that can answer a turn".into()
         });
-        return ScanOutcome { endpoint, protocol: None, models, notes };
+        return ScanOutcome { endpoint, protocols: Vec::new(), models, notes };
     };
-    let (found, note) = probe(CHAT_COMPLETIONS_PATH, &model, &chat_probe_body(&model));
-    notes.push(format!("chat/completions: {note}"));
-    let protocol = match found {
-        Some(Protocol::ChatCompletions) => Some(Protocol::ChatCompletions),
-        _ => {
-            notes.push("the responses dialect is not probed; set it in settings if this server uses it".into());
-            None
+    let mut protocols = Vec::new();
+    for (dialect, body) in [
+        (Protocol::Responses, responses_probe_body(&model)),
+        (Protocol::ChatCompletions, chat_probe_body(&model)),
+    ] {
+        let (found, note) = probe(dialect, &model, &body);
+        notes.push(format!("{}: {note}", dialect.label()));
+        if found == Some(dialect) {
+            protocols.push(dialect);
         }
-    };
-    ScanOutcome { endpoint, protocol, models, notes }
+    }
+    ScanOutcome { endpoint, protocols, models, notes }
 }
 
 pub fn likely_chat_model(id: &str) -> bool {
@@ -244,7 +252,7 @@ pub fn discover(
         if !reachable(candidate) {
             tried.push(ScanOutcome {
                 endpoint: candidate.clone(),
-                protocol: None,
+                protocols: Vec::new(),
                 models: Vec::new(),
                 notes: vec!["nothing is listening on it".into()],
             });
@@ -258,6 +266,15 @@ pub fn discover(
         tried.push(outcome);
     }
     Discovery { found: None, tried }
+}
+
+fn responses_probe_body(model: &str) -> Map<String, Value> {
+    Map::from_iter([
+        ("model".into(), model.into()),
+        ("input".into(), "ping".into()),
+        ("max_output_tokens".into(), 16.into()),
+        ("store".into(), false.into()),
+    ])
 }
 
 fn chat_probe_body(model: &str) -> Map<String, Value> {
@@ -277,9 +294,11 @@ pub fn judge_probe(dialect: Protocol, status: u16, body: &Value) -> (Option<Prot
             .and_then(Value::as_object)
             .and_then(|choice| choice.get("message"))
             .is_some(),
-        Protocol::Responses => body.get("output").and_then(Value::as_array).is_some() || body.get("id").is_some(),
+        Protocol::Responses => body.get("output").and_then(Value::as_array).is_some()
+            || (body.get("object").and_then(Value::as_str) == Some("response")
+                && body.get("id").and_then(Value::as_str).is_some()),
     };
-    if identified {
+    if (200..300).contains(&status) && identified {
         return (Some(dialect), format!("answered {status} with a {} body", dialect.label()));
     }
     let said = match body {

@@ -34,7 +34,7 @@ pub enum SettingsEvent {
         outcome: Result<(), WriteError>,
     },
     Listing(Result<Vec<Model>, ListingError>, String),
-    Probed(Result<Option<Protocol>, String>, String),
+    Probed(Result<Vec<Protocol>, String>, String),
     ConnectionChanged(Option<String>),
     Saved(Result<(), WriteError>),
     ContextLearned { key: String, tokens: u32 },
@@ -86,7 +86,7 @@ pub struct SettingsView {
     model_window: Option<u32>,
     fetched_for: Option<String>,
     listing_answered: bool,
-    probed: Option<(String, Protocol)>,
+    probed: Option<(String, Vec<Protocol>)>,
     probing: bool,
     reveal_key: bool,
     language: Language,
@@ -248,7 +248,7 @@ impl SettingsView {
             max_output_tokens,
             api_key: Some(self.api_key.clone()).filter(|k| !k.trim().is_empty()),
             api_key_env_var: self.api_key_env_var.trim().to_string(),
-            protocol: self.protocol.clone().map(|word| word.trim().to_string()).filter(|w| !w.is_empty()),
+            protocol: self.protocol_word().map(str::to_string),
             tool_mode: self.tool_mode,
             context_budget_tokens: parse_context_budget(&self.context_budget)?,
             context_strategy: self.context_strategy,
@@ -355,13 +355,16 @@ impl SettingsView {
             }
             SettingsEvent::Probed(result, endpoint) => {
                 self.probing = false;
+                if endpoint != self.base_url.trim() {
+                    return;
+                }
+                self.probed = None;
                 match result {
-                    Ok(Some(dialect)) => {
-                        self.protocol = Some(dialect.word().to_string());
-                        self.probed = Some((endpoint, dialect));
-                        self.status = format!("{}: {}", self.base_url.trim(), dialect.word());
+                    Ok(protocols) if !protocols.is_empty() => {
+                        self.probed = Some((endpoint, protocols));
+                        self.status.clear();
                     }
-                    Ok(None) => self.status = format!("no dialect identified: {endpoint}"),
+                    Ok(_) => self.status = format!("no dialect identified: {endpoint}"),
                     Err(problem) => self.status = problem,
                 }
             }
@@ -427,11 +430,16 @@ impl SettingsView {
     }
 
     pub fn protocol_word(&self) -> Option<&str> {
+        Protocol::preferred(self.confirmed_protocols(), self.use_responses_api)
+            .map(|dialect| dialect.word())
+            .or_else(|| self.protocol.as_deref().map(str::trim).filter(|w| !w.is_empty()))
+    }
+
+    fn confirmed_protocols(&self) -> &[Protocol] {
         self.probed
             .as_ref()
-            .filter(|(probed, _)| *probed == self.base_url.trim())
-            .map(|(_, dialect)| dialect.word())
-            .or_else(|| self.protocol.as_deref().map(str::trim).filter(|w| !w.is_empty()))
+            .filter(|(endpoint, _)| endpoint == self.base_url.trim())
+            .map_or(&[], |(_, protocols)| protocols.as_slice())
     }
 
     pub fn request_fetch(&mut self, tx: &std::sync::mpsc::Sender<SettingsCommand>) {
@@ -700,7 +708,12 @@ fn endpoint_actions(
                 });
             }
             if let Some(word) = view.protocol_word() {
-                ui.label(dim(format!("protocol: {word}")));
+                ui.label(dim(Texts::fmt(Key::EndpointProtocol, &[&word])));
+            }
+            let confirmed = view.confirmed_protocols();
+            if !confirmed.is_empty() {
+                let names = confirmed.iter().map(Protocol::word).collect::<Vec<_>>().join(", ");
+                ui.label(dim(Texts::fmt(Key::EndpointConfirmedProtocols, &[&names])));
             }
         });
     });

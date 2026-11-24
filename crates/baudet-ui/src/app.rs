@@ -2020,7 +2020,7 @@ fn settings_worker_loop(
             SettingsCommand::Probe { endpoint, api_key } => {
                 let outcome = scan_endpoint(&endpoint, api_key);
                 let _ = report.send(SettingsEvent::Probed(
-                    outcome.map(|o| o.protocol).map_err(|problem| problem.to_string()),
+                    outcome.map(|o| o.protocols).map_err(|problem| problem.to_string()),
                     endpoint,
                 ));
             }
@@ -2199,11 +2199,11 @@ pub fn discover_local(api_key: Option<String>) -> baudet_backend::protocol::Disc
                     .map(|models| models.into_iter().map(|model| model.id).collect())
                     .map_err(|error| error.to_string())
             },
-            |path, model, body| probe_dialect(&provider, provider.base_url(), path, model, body),
+            |dialect, _, body| probe_dialect(&provider, dialect, body),
         ),
         Err(error) => baudet_backend::protocol::ScanOutcome {
             endpoint: endpoint.to_string(),
-            protocol: None,
+            protocols: Vec::new(),
             models: Vec::new(),
             notes: vec![format!("not a usable address: {error}")],
         },
@@ -2212,11 +2212,13 @@ pub fn discover_local(api_key: Option<String>) -> baudet_backend::protocol::Disc
 }
 
 pub fn describe_discovery(discovery: &baudet_backend::protocol::Discovery) -> String {
+    let names = |protocols: &[Protocol]| protocols.iter().map(Protocol::word).collect::<Vec<_>>().join(", ");
     let mut lines = Vec::new();
     for outcome in &discovery.tried {
-        let verdict = match outcome.protocol {
-            Some(protocol) => format!("answers {}", protocol.word()),
-            None => "no".to_string(),
+        let verdict = if outcome.usable() {
+            format!("answers {}", names(&outcome.protocols))
+        } else {
+            "no".to_string()
         };
         lines.push(format!("  {} — {verdict}", outcome.endpoint));
         for note in &outcome.notes {
@@ -2227,7 +2229,7 @@ pub fn describe_discovery(discovery: &baudet_backend::protocol::Discovery) -> St
         Some(found) => format!(
             "found a server at {} speaking {}\n{}\nmodels: {}",
             found.endpoint,
-            found.protocol.expect("a found server names its dialect").word(),
+            names(&found.protocols),
             lines.join("\n"),
             found.models.join(", ")
         ),
@@ -2249,18 +2251,16 @@ fn scan_endpoint(
                 .map(|models| models.into_iter().map(|model| model.id).collect())
                 .map_err(|error| error.to_string())
         },
-        |path, model, body| probe_dialect(&provider, &address, path, model, body),
+        |dialect, _, body| probe_dialect(&provider, dialect, body),
     ))
 }
 
 fn probe_dialect(
     provider: &baudet_settings::Provider,
-    address: &str,
-    path: &str,
-    _model: &str,
+    dialect: Protocol,
     body: &serde_json::Map<String, serde_json::Value>,
 ) -> (Option<baudet_backend::protocol::Protocol>, String) {
-    let url = format!("{address}{path}");
+    let url = format!("{}{}", provider.base_url(), dialect.path());
     let client = match reqwest::blocking::Client::builder().timeout(baudet_backend::protocol::PROBE_TIMEOUT).build() {
         Ok(client) => client,
         Err(error) => return (None, format!("no request could be built: {error}")),
@@ -2277,7 +2277,7 @@ fn probe_dialect(
     let status = answer.status().as_u16();
     let text = answer.text().unwrap_or_default();
     let value = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
-    baudet_backend::protocol::judge_probe(baudet_backend::protocol::Protocol::ChatCompletions, status, &value)
+    baudet_backend::protocol::judge_probe(dialect, status, &value)
 }
 
 fn progress_indicator(ui: &mut egui::Ui) {
@@ -2609,7 +2609,7 @@ pub fn chosen_backend(startup: &Startup) -> (Arc<dyn Backend>, Option<String>) {
     }
     let address = settings.base_url.trim().to_string();
     let dialect = match scan_endpoint(&address, settings.resolved_key()) {
-        Ok(outcome) => outcome.protocol.map(|word| word.word().to_string()),
+        Ok(outcome) => Protocol::preferred(&outcome.protocols, settings.use_responses_api).map(|protocol| protocol.word().to_string()),
         Err(_) => None,
     };
     let Some(word) = dialect else {

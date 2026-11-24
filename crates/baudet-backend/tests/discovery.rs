@@ -4,7 +4,7 @@ use baudet_backend::protocol::{discover, judge_probe, likely_chat_model, scan, D
 fn outcome(endpoint: &str, protocol: Option<Protocol>) -> ScanOutcome {
     ScanOutcome {
         endpoint: endpoint.to_string(),
-        protocol,
+        protocols: protocol.into_iter().collect(),
         models: vec!["m".into()],
         notes: vec![format!("looked at {endpoint}")],
     }
@@ -43,13 +43,13 @@ fn a_probe_names_a_chat_model_even_when_an_embedder_is_listed_first() {
     let outcome = scan(
         "http://127.0.0.1:9/v1",
         || Ok(vec!["text-embedding-nomic-embed-text-v1.5".into(), "google/gemma-4-26b-a4b-qat".into()]),
-        |_, model, _| {
+        |dialect, model, _| {
             *named.borrow_mut() = model.to_string();
-            (Some(Protocol::ChatCompletions), "answered 200 with a chat body".into())
+            (Some(dialect), "answered".into())
         },
     );
     assert_eq!(*named.borrow(), "google/gemma-4-26b-a4b-qat");
-    assert_eq!(outcome.protocol, Some(Protocol::ChatCompletions));
+    assert_eq!(outcome.protocols, [Protocol::Responses, Protocol::ChatCompletions]);
 }
 
 #[test]
@@ -104,13 +104,15 @@ fn a_sweep_that_finds_nothing_still_says_what_it_saw() {
 }
 
 #[test]
-fn a_refusal_and_an_answer_are_told_apart_by_the_body_not_the_status() {
+fn a_responses_probe_requires_a_successful_response_body() {
     let refusal = serde_json::json!({"error": "Model 'x' not found"});
     let (found, _) = judge_probe(Protocol::Responses, 404, &refusal);
     assert_eq!(found, None, "a 404 error body is not a responses answer");
     let answer = serde_json::json!({"id": "resp_1", "object": "response", "status": "completed"});
     let (found, _) = judge_probe(Protocol::Responses, 200, &answer);
     assert_eq!(found, Some(Protocol::Responses));
+    assert_eq!(judge_probe(Protocol::Responses, 500, &answer).0, None);
+    assert_eq!(judge_probe(Protocol::Responses, 200, &serde_json::json!({"id":"chatcmpl_1"})).0, None);
 }
 
 #[test]

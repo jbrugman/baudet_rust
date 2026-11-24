@@ -80,30 +80,53 @@ fn click_settings_button(
 }
 
 #[test]
-fn settings_buttons_send_the_environment_key_to_the_endpoint() {
+fn settings_scan_verifies_both_routes_and_chooses_from_the_results() {
+    use Protocol::{ChatCompletions, Responses};
+    for (confirmed, prefer_responses, expected) in [
+        (&[ChatCompletions][..], true, ChatCompletions),
+        (&[Responses][..], false, Responses),
+        (&[Responses, ChatCompletions][..], true, Responses),
+        (&[Responses, ChatCompletions][..], false, ChatCompletions),
+    ] {
+        scan_settings_fixture(confirmed, prefer_responses, expected);
+    }
+}
+
+fn scan_settings_fixture(confirmed: &'static [Protocol], prefer_responses: bool, expected: Protocol) {
     const ENV_NAME: &str = "BAUDET_SETTINGS_LIVE_AUTH_TEST";
     const TEST_KEY: &str = "settings-fixture-key";
     let (listener, base_url) = listen();
     let server = std::thread::spawn(move || {
-        for (expected, data) in [
-            ("GET /v1/models ", r#"{"data":[{"id":"fixture-model"}]}"#),
-            ("GET /v1/models ", r#"{"data":[{"id":"fixture-model"}]}"#),
-            ("POST /v1/chat/completions ", r#"{"choices":[{"message":{"content":"ok"}}]}"#),
+        for (expected, supported, data) in [
+            ("GET /v1/models ", true, r#"{"data":[{"id":"fixture-model"}]}"#),
+            ("GET /v1/models ", true, r#"{"data":[{"id":"fixture-model"}]}"#),
+            ("POST /v1/responses ", confirmed.contains(&Protocol::Responses), r#"{"object":"response","id":"resp_1","output":[]}"#),
+            ("POST /v1/chat/completions ", confirmed.contains(&Protocol::ChatCompletions), r#"{"choices":[{"message":{"content":"ok"}}]}"#),
         ] {
             let (mut socket, _) = listener.accept().unwrap();
-            let (path, auth, _) = read_request(&socket);
+            let (path, auth, body) = read_request(&socket);
             assert!(path.starts_with(expected));
             assert_eq!(auth, format!("Bearer {TEST_KEY}"));
+            if expected.starts_with("POST") {
+                assert_eq!(body["model"], "fixture-model");
+            }
+            if expected.contains("/responses") {
+                assert_eq!(body["input"], "ping");
+                assert_eq!(body["store"], false);
+            }
+            let (status, data) = if supported { ("200 OK", data) } else { ("404 Not Found", r#"{"error":"unsupported"}"#) };
             write!(
                 socket,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{data}",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{data}",
                 data.len()
             ).unwrap();
         }
     });
     let dir = tempfile::tempdir().unwrap();
     let file = SettingsFile::at(dir.path().join("settings.json"));
-    file.write(&Settings { base_url, api_key_env_var: ENV_NAME.into(), ..Default::default() }).unwrap();
+    file.write(&Settings {
+        base_url, api_key_env_var: ENV_NAME.into(), use_responses_api: prefer_responses, ..Default::default()
+    }).unwrap();
     let mut view = SettingsView::new();
     view.load(&file);
     let (commands, edits) = mpsc::channel();
@@ -118,10 +141,24 @@ fn settings_buttons_send_the_environment_key_to_the_endpoint() {
     assert!(matches!(&listing, SettingsEvent::Listing(Ok(models), _) if models.len() == 1));
     view.apply_event(listing);
     click_settings_button(&ctx, &mut view, &commands, "Scan endpoint");
-    let probe = events.recv_timeout(WAIT);
+    let probe = events.recv_timeout(WAIT).unwrap();
     unsafe { std::env::remove_var(ENV_NAME) };
-    assert!(matches!(probe, Ok(SettingsEvent::Probed(Ok(Some(Protocol::ChatCompletions)), _))));
-    assert_eq!(file.read().settings().api_key, None);
+    assert!(matches!(&probe, SettingsEvent::Probed(Ok(protocols), _) if protocols == confirmed));
+    view.apply_event(probe);
+    assert_eq!(view.draft().unwrap().protocol_word(), Some(expected.word()));
+    let protocols = confirmed.iter().map(Protocol::word).collect::<Vec<_>>().join(", ");
+    let label = Texts::fmt(Key::EndpointConfirmedProtocols, &[&protocols]);
+    let output = ctx.run_ui(egui::RawInput::default(), |ui| settings::body(ui, &mut view, &commands));
+    let shown = output.shapes.iter().any(|shape| {
+        matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == label)
+    });
+    output.drop_without_applying_deltas();
+    assert!(shown);
+    click_settings_button(&ctx, &mut view, &commands, Texts::get(Key::SaveButton));
+    assert!(matches!(events.recv_timeout(WAIT), Ok(SettingsEvent::Saved(Ok(())))));
+    let saved = file.read();
+    assert_eq!(saved.settings().protocol_word(), Some(expected.word()));
+    assert_eq!(saved.settings().api_key, None);
 
     drop(commands);
     worker.join().unwrap();
