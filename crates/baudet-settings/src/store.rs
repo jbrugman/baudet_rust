@@ -190,6 +190,8 @@ mod tests {
             right_panel_width: 320,
             diff_window_size: Some([720.0, 460.0]),
             files_divider: 214,
+            composer_height: 166,
+            thinking_height: 82,
             language: Language::Nl,
         };
         file.write(&settings).unwrap();

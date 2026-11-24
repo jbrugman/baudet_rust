@@ -9,7 +9,7 @@ use egui::{Color32, Panel, ScrollArea, Ui};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const IGNORED_DIRS: &[&str] = &["target", "node_modules", "build", "dist", "out"];
+pub(crate) const IGNORED_DIRS: &[&str] = &["target", "node_modules", "build", "dist", "out"];
 
 pub const NO_FOLDER: &str = "Select a project with a linked folder to see its files.";
 
@@ -27,7 +27,6 @@ pub struct Workspace {
     message: Option<&'static str>,
     show_hidden: bool,
 
-    probed: bool,
 }
 
 pub struct DirListing {
@@ -45,13 +44,11 @@ impl DirListing {
 impl Workspace {
     pub fn open(&mut self, path: &str) {
         self.cwd = path.trim().to_string();
-        self.probed = false;
         self.message = None;
     }
 
     pub fn show_message(&mut self, text: &'static str) {
         self.cwd.clear();
-        self.probed = false;
         self.message = Some(text);
     }
 
@@ -140,8 +137,7 @@ fn file_tree_controls(
     changes: &[ChangedFile],
     actions: &mut FileRowActions,
 ) -> bool {
-    let mut requested: Option<String> = None;
-    {
+    let refresh_clicked = {
         let root = crate::app::root_ui_id(ui.ctx());
         let refresh_clicked = ui
             .scope_builder(
@@ -159,9 +155,6 @@ fn file_tree_controls(
                 workspace.set_show_hidden(hidden);
             }
         });
-        if refresh_clicked && workspace.cwd().is_some() {
-            requested = workspace.cwd().map(str::to_string);
-        }
         ui.separator();
         let chosen = workspace.cwd().map(|s| s.to_string());
         let status = FileStatus::build(chosen.as_deref(), changes);
@@ -182,22 +175,18 @@ fn file_tree_controls(
                         ui.label(dim(NO_READ));
                         return;
                     }
+                    compact_tree(ui);
                     egui::CollapsingHeader::new(folder_name(cwd))
+                        .icon(compact_chevron)
                         .id_salt(cwd.clone())
                         .default_open(true)
                         .show(ui, |ui| tree(ui, workspace, &root, 1, &status, &root, actions));
                 });
             }
         }
-    }
-    if requested.is_some() {
-        workspace.open(requested.as_deref().unwrap().trim());
-    }
-    if workspace.cwd().is_some() && !workspace.probed {
-        workspace.probed = true;
-        return true;
-    }
-    false
+        refresh_clicked && workspace.cwd().is_some()
+    };
+    refresh_clicked
 }
 
 
@@ -213,50 +202,103 @@ pub const FOLDER_NONE: &str = "no folder linked";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarIntent {
     OpenSession(String),
-    StartChat(Option<String>),
     DeleteSession(String),
     Deleted,
 }
 
-// Isolate content measurement from the width owned by the resize handle.
+fn split_grip(ui: &mut Ui, rect: egui::Rect, id: egui::Id, vertical: bool) -> egui::Response {
+    let cursor = if vertical { egui::CursorIcon::ResizeHorizontal } else { egui::CursorIcon::ResizeVertical };
+    let grip = ui.interact(rect, id, egui::Sense::drag()).on_hover_and_drag_cursor(cursor);
+    let color = if grip.hovered() || grip.dragged() { palette::ACCENT } else { palette::DIM };
+    let center = rect.center();
+    let painter = ui.painter();
+    if vertical {
+        painter.vline(center.x, rect.y_range(), egui::Stroke::new(1.0, palette::CHECK_BORDER));
+    } else {
+        painter.hline(rect.x_range(), center.y, egui::Stroke::new(1.0, palette::CHECK_BORDER));
+    }
+    for offset in [-5.0, 0.0, 5.0] {
+        let offset = if vertical { egui::vec2(0.0, offset) } else { egui::vec2(offset, 0.0) };
+        painter.circle_filled(center + offset, 1.5, color);
+    }
+    grip
+}
+
+pub(crate) fn horizontal_grip(ui: &mut Ui, id: &str) -> egui::Response {
+    let strip = ui.allocate_space(egui::vec2(ui.available_width(), 8.0)).1;
+    split_grip(ui, strip, ui.make_persistent_id(id), false)
+}
+
+pub(crate) fn released_split(ui: &mut Ui, id: &str, range: std::ops::RangeInclusive<f32>) -> Option<f32> {
+    let grip = horizontal_grip(ui, id);
+    let origin_id = grip.id.with("press-y");
+    if grip.drag_started() {
+        if let Some(origin) = ui.input(|input| input.pointer.press_origin()) {
+            ui.data_mut(|data| data.insert_temp(origin_id, origin.y));
+        }
+    }
+    let origin = ui.data(|data| data.get_temp::<f32>(origin_id));
+    let delta = origin.zip(grip.interact_pointer_pos())
+        .map(|(origin, position)| (position.y - origin).clamp(*range.start(), *range.end()));
+    if grip.dragged() {
+        if let Some(delta) = delta {
+            let y = grip.rect.center().y + delta;
+            let layer = egui::LayerId::new(egui::Order::Foreground, grip.id.with("preview"));
+            ui.ctx().layer_painter(layer).hline(grip.rect.x_range(), y, egui::Stroke::new(2.0, palette::ACCENT));
+        }
+    }
+    if grip.drag_stopped() {
+        ui.data_mut(|data| data.remove::<f32>(origin_id));
+        return delta.filter(|delta| *delta != 0.0);
+    }
+    None
+}
+
+// Measure contents in a clipped child so only the resize handle changes the width.
 fn side_panel(
     ui: &mut Ui,
     panel: Panel,
     id: &str,
     width: &mut f32,
-    min: f32,
+    visible: f32,
     max: f32,
     body: impl FnOnce(&mut Ui),
 ) {
     let max = max.min(ui.available_width()).floor().max(0.0);
-    let visible = width.min(max);
-    let id = egui::Id::new(id);
-    if let Some(mut state) = egui::containers::PanelState::load(ui.ctx(), id) {
-        if (state.size().x - visible).abs() > 0.01 {
-            state.outer_rect.max.x = state.outer_rect.min.x + visible;
-            ui.ctx().data_mut(|data| data.insert_persisted(id, state));
-        }
-    }
+    let visible = visible.min(max);
+    let left = id == "projects";
     let response = panel
-        .resizable(true)
-        .default_size(visible)
-        .size_range(min.min(max)..=max)
+        .resizable(false)
+        .show_separator_line(false)
+        .exact_size(visible)
         .frame(egui::Frame::side_top_panel(ui.style()))
         .show(ui, |ui| {
-            ui.set_min_size(ui.available_size());
-            let mut content = ui.new_child(egui::UiBuilder::new().id_salt("content"));
-            content.set_clip_rect(ui.clip_rect().intersect(content.max_rect()));
-            body(&mut content);
+            if visible > 0.0 {
+                let mut content = ui.new_child(egui::UiBuilder::new().id_salt("content"));
+                content.set_clip_rect(ui.clip_rect().intersect(content.max_rect()));
+                body(&mut content);
+            }
         });
-    // A temporary viewport cap must not change the chosen width.
-    if *width <= max {
-        *width = response.response.rect.width().round();
+    let rect = response.response.rect;
+    let inset = (visible * 0.5).min(2.0);
+    let edge = if left { rect.right() - inset } else { rect.left() + inset };
+    let strip = egui::Rect::from_center_size(
+        egui::pos2(edge, rect.center().y),
+        egui::vec2(8.0, rect.height()),
+    );
+    let delta = split_grip(ui, strip, ui.make_persistent_id((id, "split")), true).drag_delta().x;
+    if delta != 0.0 {
+        let delta = if left { delta } else { -delta };
+        *width = (visible + delta).clamp(0.0, max).round();
+        ui.request_repaint();
     }
 }
 
-pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: &mut f32, max: f32) -> Vec<SidebarIntent> {
+pub fn project_sidebar(
+    ui: &mut Ui, model: &mut SidebarModel, width: &mut f32, visible: f32, max: f32,
+) -> Vec<SidebarIntent> {
     let mut intents = Vec::new();
-    side_panel(ui, Panel::left("projects"), "projects", width, layout::LEFT_PANEL_MIN, max, |ui| {
+    side_panel(ui, Panel::left("projects"), "projects", width, visible, max, |ui| {
         let root = crate::app::root_ui_id(ui.ctx());
         if ui
             .scope_builder(
@@ -308,10 +350,12 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: &mut f32, m
         ui.add(egui::Separator::default().spacing(0.0));
 
         ScrollArea::both().id_salt("project-tree").min_scrolled_height(0.0).auto_shrink([false, false]).show(ui, |ui| {
+            compact_tree(ui);
             let projects = model.catalog().list_projects();
             for project in &projects {
                 let sessions = model.catalog().sessions_in(Some(&project.id));
                 let response = egui::CollapsingHeader::new(project_label(&project.name, project.archived))
+                    .icon(compact_chevron)
                     .id_salt(project.id.clone())
                     .default_open(true)
                     .show(ui, |ui| {
@@ -319,10 +363,6 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: &mut f32, m
                             session_row(ui, model, Some(project.id.clone()), session, &mut intents);
                         }
                     });
-                if response.header_response.clicked() {
-                    model.select_project(Some(&project.id));
-                    intents.push(SidebarIntent::StartChat(Some(project.id.clone())));
-                }
                 row_menu(ui, &response.header_response, model, Some(project.id.clone()), None, &mut intents);
             }
 
@@ -333,15 +373,11 @@ pub fn project_sidebar(ui: &mut Ui, model: &mut SidebarModel, width: &mut f32, m
                 egui::RichText::new(Texts::get(Key::InboxNode))
             };
             let response =
-                egui::CollapsingHeader::new(inbox_label).id_salt(UNASSIGNED).default_open(true).show(ui, |ui| {
+                egui::CollapsingHeader::new(inbox_label).icon(compact_chevron).id_salt(UNASSIGNED).default_open(true).show(ui, |ui| {
                     for session in &inbox {
                         session_row(ui, model, None, session, &mut intents);
                     }
                 });
-            if response.header_response.clicked() && !inbox.is_empty() {
-                model.select_project(None);
-                intents.push(SidebarIntent::StartChat(None));
-            }
             row_menu(ui, &response.header_response, model, None, None, &mut intents);
         });
     });
@@ -358,9 +394,14 @@ fn session_row(
     let selected = model.selected_session_id() == Some(session.id.as_str());
     let row = ui
         .push_id(session.id.clone(), |ui| {
-            let row =
-                ui.add(egui::Button::new(truncate_head(&session.title, KEEP_TAIL)).frame(false).selected(selected));
-            row.on_hover_text(session.title.clone())
+            let button = egui::Button::new(&session.title).truncate().frame(false)
+                .min_size(egui::vec2(ui.available_width(), 0.0));
+            let button = if selected {
+                button.fill(palette::ACTIVE_SESSION).stroke(egui::Stroke::NONE)
+            } else {
+                button
+            };
+            ui.add(button).on_hover_text(session.title.clone())
         })
         .inner;
     if row.clicked() {
@@ -435,7 +476,7 @@ pub fn vraag_vensterhoek(ctx: &egui::Context) -> (egui::Pos2, egui::Vec2) {
     let afmeting = egui::vec2(280.0, 76.0);
     let vlak = ctx.viewport_rect();
     let links = vlak.min.x;
-    let rechts = (vlak.max.x - layout::PANEL_MIN).max(links);
+    let rechts = (vlak.max.x - afmeting.x).max(links);
     let x = (links + (rechts - links) / 2.0 - afmeting.x / 2.0).clamp(links, rechts);
     (egui::pos2(x, vlak.center().y - afmeting.y / 2.0), afmeting)
 }
@@ -686,6 +727,22 @@ impl FileRowActions {
     }
 }
 
+fn compact_tree(ui: &mut Ui) {
+    ui.visuals_mut().collapsing_header_frame = false;
+    ui.spacing_mut().icon_width = 11.0;
+    ui.spacing_mut().indent = 14.0;
+    ui.spacing_mut().button_padding.y = 1.0;
+    ui.spacing_mut().item_spacing.y = 2.0;
+}
+
+pub(crate) fn compact_chevron(ui: &mut Ui, openness: f32, response: &egui::Response) {
+    let rotation = egui::emath::Rot2::from_angle(openness * std::f32::consts::FRAC_PI_2);
+    let center = response.rect.center();
+    let points = [egui::vec2(-2.0, -3.0), egui::vec2(1.0, 0.0), egui::vec2(-2.0, 3.0)]
+        .map(|point| center + rotation * point);
+    ui.painter().line(points.to_vec(), egui::Stroke::new(1.2, palette::TEXT));
+}
+
 fn tree(
     ui: &mut Ui,
     workspace: &mut Workspace,
@@ -696,15 +753,9 @@ fn tree(
     actions: &mut FileRowActions,
 ) {
     let listing = workspace.tree_at(dir);
-    for path in &listing.files {
-        file_row(ui, path, status.get(path), root, actions);
-    }
-    if listing.truncated {
-        ui.label(dim(format!("… cut at {MAX_ENTRIES_PER_DIR} entries")));
-    }
     for path in &listing.dirs {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        egui::CollapsingHeader::new(truncate_head(&name, KEEP_TAIL)).id_salt(path.display().to_string()).show(
+        egui::CollapsingHeader::new(truncate_head(&name, KEEP_TAIL)).icon(compact_chevron).id_salt(path.display().to_string()).show(
             ui,
             |ui| {
                 if depth >= MAX_DEPTH {
@@ -714,6 +765,12 @@ fn tree(
                 }
             },
         );
+    }
+    for path in &listing.files {
+        file_row(ui, path, status.get(path), root, actions);
+    }
+    if listing.truncated {
+        ui.label(dim(format!("… cut at {MAX_ENTRIES_PER_DIR} entries")));
     }
     if listing.files.is_empty() && listing.dirs.is_empty() {
         ui.label(dim("empty folder"));
@@ -753,18 +810,11 @@ fn changes_band(
         .frame(egui::Frame::NONE)
         .show_separator_line(false)
         .show(ui, |ui| {
-            let strip = ui.allocate_space(egui::vec2(ui.available_width(), 6.0)).1;
-            let grip = ui.interact(strip, egui::Id::new("files-split-handle"), egui::Sense::drag());
-            if grip.dragged() {
-                dividers.files = (band - grip.drag_delta().y).clamp(floor, max).round() as i32;
-                ui.ctx().request_repaint();
+            let delta = horizontal_grip(ui, "files-split-handle").drag_delta().y;
+            if delta != 0.0 {
+                dividers.files = (band - delta).clamp(floor, max).round() as i32;
+                ui.request_repaint();
             }
-            let hot = grip.hovered() || grip.dragged();
-            ui.painter().hline(
-                strip.x_range(),
-                strip.center().y,
-                egui::Stroke::new(if hot { 2.0 } else { 1.0 }, palette::BORDER),
-            );
             changes_body(ui, changes, chosen, actions);
         });
 }
@@ -798,12 +848,13 @@ pub(crate) fn file_tree(
     changes: &Changes,
     dividers: &mut layout::Dividers,
     width: &mut f32,
+    visible: f32,
     max: f32,
 ) -> (bool, Option<crate::diff_view::Request>) {
     let chosen = workspace.cwd().map(str::to_owned);
     let mut refresh = false;
     let mut actions = FileRowActions::default();
-    side_panel(ui, Panel::right("filetree"), "filetree", width, layout::PANEL_MIN, max, |ui| {
+    side_panel(ui, Panel::right("filetree"), "filetree", width, visible, max, |ui| {
         changes_band(ui, changes, chosen.as_deref(), dividers, &mut actions);
         refresh = file_tree_controls(ui, workspace, changes.meta(), changes.paths(), &mut actions);
     });

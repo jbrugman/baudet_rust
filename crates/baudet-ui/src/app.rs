@@ -5,8 +5,9 @@
 //!        +---- Rows (snapshot) <----- AppState + pump() over a ScriptedBackend
 //! ```
 
-use crate::layout::{self, resolve_divider, worth_remembering, Dividers};
+use crate::layout::{self, worth_remembering, Dividers};
 use crate::diff_view::DiffView;
+use crate::folder_watch::FolderWatch;
 use crate::palette;
 use crate::panels::{self, Changes, SidebarIntent, Workspace, NO_FOLDER, NO_READ};
 use crate::rows::Row;
@@ -102,6 +103,7 @@ pub struct TranscriptApp {
     shot_send: Option<String>,
     workspace: Workspace,
     changes: Changes,
+    folder_watch: Option<FolderWatch>,
     diff_view: Option<DiffView>,
     active_tab: Option<Tab>,
     fell_back: Option<String>,
@@ -122,7 +124,6 @@ pub struct TranscriptApp {
     show_filetree: bool,
     dividers: Dividers,
     side_widths: Option<[f32; 2]>,
-    min_window_width: f32,
     geometry_saved: bool,
 }
 
@@ -177,6 +178,7 @@ impl TranscriptApp {
             shot_send: None,
             workspace: Workspace::default(),
             changes: Changes::default(),
+            folder_watch: None,
             diff_view: None,
             active_tab: None,
             fell_back: None,
@@ -197,7 +199,6 @@ impl TranscriptApp {
             show_filetree: true,
             dividers,
             side_widths: None,
-            min_window_width: 520.0,
             geometry_saved: false,
         }
     }
@@ -302,8 +303,8 @@ impl TranscriptApp {
         let stored = self.settings.dividers();
         let mut remembered = self.dividers;
         if let Some([left, right]) = self.side_widths {
-            remembered.left = left.round() as i32;
-            remembered.right_width = right.round() as i32;
+            remembered.left = layout::encode_width(left);
+            remembered.right_width = layout::encode_width(right);
         }
         remembered.files =
             worth_remembering(remembered.files as f32, ctx.viewport_rect().height(), stored.files);
@@ -316,59 +317,77 @@ impl TranscriptApp {
         }
     }
 
-    // Keep enough room for both visible side panels and the composer.
-    fn update_min_window_width(&mut self, ctx: &egui::Context) {
-        let Some([left, right]) = self.side_widths else { return };
-        let minimum = layout::CENTER_MIN
-            + if self.show_sidebar { left } else { 0.0 }
-            + if self.show_filetree { right } else { 0.0 };
-        let minimum = minimum.ceil().max(520.0);
-        if minimum != self.min_window_width {
-            self.min_window_width = minimum;
-            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(minimum, 360.0)));
-            let viewport = ctx.viewport_rect();
-            if viewport.width() < minimum {
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(minimum, viewport.height())));
-            }
-        }
+    fn remember_chat_layout(&mut self) {
+        self.settings.set_dividers(&self.dividers);
+        let _ = self.settings_tx.send(SettingsCommand::SaveChatLayout {
+            composer: self.dividers.composer,
+            thinking: self.dividers.thinking,
+        });
     }
 
-    // Reserve the side panels before laying out the middle column.
     fn paint_layout(&mut self, ui: &mut egui::Ui) {
+        let menu_frame = egui::Frame::side_top_panel(ui.style()).fill(palette::FIELD_ALT);
+        Panel::top("menu-bar").frame(menu_frame).show(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button(Texts::get(Key::MenuHelp), |ui| {
+                    if ui.button(Texts::get(Key::HelpGuide)).clicked() {
+                        self.help = Some(false);
+                        ui.close();
+                    }
+                    if ui.button(Texts::get(Key::AboutTitle)).clicked() {
+                        self.help = Some(true);
+                        ui.close();
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let messages = self.rows.iter().filter(|row| {
+                        matches!(row.kind, baudet_core::ItemKind::UserMessage | baudet_core::ItemKind::AgentMessage)
+                    }).count();
+                    ui.label(egui::RichText::new(Texts::fmt(Key::MessagesCount, &[&messages])).size(16.0).strong());
+                });
+            });
+        });
         let window_width = ui.available_width();
         let [mut left, mut right] = *self.side_widths.get_or_insert_with(|| {
-            let left = resolve_divider(None, self.dividers.left, layout::LEFT_WIDTH);
-            let right = if self.dividers.right_width > 0 {
-                self.dividers.right_width as f32
+            let left = layout::decode_width(self.dividers.left, layout::LEFT_WIDTH);
+            let default_right = if self.dividers.right > 0 {
+                (window_width - self.dividers.right as f32).max(0.0)
             } else {
-                window_width - resolve_divider(None, self.dividers.right, layout::CENTER_WIDTH)
+                layout::RIGHT_WIDTH
             };
-            [left.max(layout::LEFT_PANEL_MIN), right.round().max(layout::PANEL_MIN)]
+            let right = layout::decode_width(self.dividers.right_width, default_right);
+            [left, right]
         });
 
-        // Lack of viewport space caps the drawn width without replacing the saved preference.
+        let budget = (window_width - layout::CENTER_MIN).max(0.0);
+        let requested = if self.show_sidebar { left } else { 0.0 }
+            + if self.show_filetree { right } else { 0.0 };
+        let scale = if requested > budget { budget / requested } else { 1.0 };
+        let visible_left = (left * scale).floor();
+        let visible_right = (right * scale).floor();
         let mut intents = if self.show_sidebar {
-            let reserve_right = if self.show_filetree { right } else { 0.0 };
-            let max = (window_width - reserve_right - layout::CENTER_MIN).max(layout::LEFT_PANEL_MIN);
-            panels::project_sidebar(ui, &mut self.sidebar, &mut left, max)
+            let max = budget - if self.show_filetree { visible_right } else { 0.0 };
+            panels::project_sidebar(ui, &mut self.sidebar, &mut left, visible_left, max)
         } else {
             Vec::new()
         };
         intents.extend(panels::ask_dialog(ui, &mut self.sidebar));
         self.apply_sidebar_intents(intents);
+        self.sync_folder_watch(ui.ctx());
         if self.show_filetree {
             let max = (ui.available_width() - layout::CENTER_MIN).max(0.0);
             let (refresh, preview) =
-                panels::file_tree(ui, &mut self.workspace, &self.changes, &mut self.dividers, &mut right, max);
+                panels::file_tree(ui, &mut self.workspace, &self.changes, &mut self.dividers, &mut right, visible_right, max);
             if refresh {
-                self.changes.refresh(self.workspace.cwd());
+                if let Some(watch) = &self.folder_watch {
+                    watch.refresh();
+                }
             }
             if let Some(request) = preview {
                 self.diff_view = Some(DiffView::open(ui.ctx(), request));
             }
         }
         self.side_widths = Some([left, right]);
-        self.update_min_window_width(ui.ctx());
 
         while let Ok(event) = self.settings_events.try_recv() {
             if let SettingsEvent::ConnectionChanged(problem) = &event {
@@ -424,32 +443,26 @@ impl TranscriptApp {
                 if ui.put(panels::toggle_rect(band, false), panels::Toggle::new(west, false)).clicked() {
                     self.show_sidebar = !self.show_sidebar;
                 }
-                ui.menu_button(Texts::get(Key::MenuHelp), |ui| {
-                    if ui.button(Texts::get(Key::HelpGuide)).clicked() {
-                        self.help = Some(false);
-                        ui.close();
-                    }
-                    if ui.button(Texts::get(Key::AboutTitle)).clicked() {
-                        self.help = Some(true);
-                        ui.close();
-                    }
-                });
                 let east = root.with((panels::PANEL_TOGGLES, "filetree"));
                 if ui.put(panels::toggle_rect(band, true), panels::Toggle::new(east, true)).clicked() {
                     self.show_filetree = !self.show_filetree;
                 }
-                ui.heading("Baudet");
-                ui.separator();
-                ui.label(self.status.clone());
-                ui.separator();
-                ui.label(format!("{} rows", self.rows.len()));
+                let status = band.shrink2(egui::vec2(panels::TOGGLE_WIDTH + 6.0, 0.0));
+                if !self.status.is_empty() && status.width() > 0.0 {
+                    let status_rect = egui::Rect::from_min_size(status.min, egui::vec2(status.width(), panels::TOGGLE_SIZE));
+                    ui.put(status_rect, egui::Label::new(&self.status).truncate());
+                }
             });
         });
         ui.set_clip_rect(clip);
 
         let tab = self.tab();
         if tab == Tab::Chat {
-            Panel::bottom("composer").show(ui, |ui| self.composer(ui));
+            self.honesty_footer(ui);
+            let max = (ui.available_height() - 36.0).max(0.0);
+            let height = self.composer_height(max);
+            Panel::bottom("composer").exact_size(height).show_separator_line(false)
+                .show(ui, |ui| self.composer(ui, max));
         }
 
         CentralPanel::default().show(ui, |ui| {
@@ -482,21 +495,24 @@ impl TranscriptApp {
                     }
                 });
             });
-            let transcript = tab == Tab::Chat;
-            ScrollArea::new([transcript && !self.settings.transcript_wrap(), true])
-                .id_salt("center-scroll")
-                .auto_shrink([false, false])
-                .stick_to_bottom(transcript && self.stick)
-                .show(ui, |ui| match tab {
-                    Tab::Chat => self.transcript(ui),
-                    Tab::Settings => settings::body(ui, &mut self.settings, &self.settings_tx),
-                });
-            if transcript {
-                self.ask_for_older(ui);
+            match tab {
+                Tab::Chat => {
+                    ScrollArea::new([!self.settings.transcript_wrap(), true])
+                        .id_salt("center-scroll")
+                        .auto_shrink([false, false])
+                        .stick_to_bottom(self.stick)
+                        .show(ui, |ui| self.transcript(ui));
+                    self.ask_for_older(ui);
+                }
+                Tab::Settings => settings::body(ui, &mut self.settings, &self.settings_tx),
             }
-            ui.output_mut(|o| {
-                o.cursor_icon = if self.busy { egui::CursorIcon::Progress } else { egui::CursorIcon::Default }
-            });
+            if self.busy {
+                ui.output_mut(|o| {
+                    if o.cursor_icon == egui::CursorIcon::Default {
+                        o.cursor_icon = egui::CursorIcon::Progress;
+                    }
+                });
+            }
         });
         if let Some(server) = self.approvals.show(ui.ctx()) {
             let _ = self.settings_tx.send(SettingsCommand::AllowMcp(server));
@@ -538,6 +554,17 @@ impl TranscriptApp {
         self.data_root.as_deref()
     }
 
+    fn sync_folder_watch(&mut self, ctx: &egui::Context) {
+        let root = self.workspace.cwd().filter(|_| self.show_filetree);
+        if self.folder_watch.as_ref().map(FolderWatch::root) != root {
+            self.folder_watch = root.map(|root| FolderWatch::start(root, ctx));
+            self.changes = Changes::default();
+        }
+        if let Some(changes) = self.folder_watch.as_ref().and_then(FolderWatch::latest) {
+            self.changes = changes;
+        }
+    }
+
     pub fn workspace_folder(&self) -> Option<&str> {
         self.workspace.cwd()
     }
@@ -555,17 +582,6 @@ impl TranscriptApp {
                     let _ = self.intents.send(Intent::LoadSession(id));
                     self.loading = true;
                     self.status = "loading session".to_string();
-                }
-                SidebarIntent::StartChat(project) => {
-                    if self.busy || self.loading || self.deletion.is_some() {
-                        self.status = "busy — finish the turn first".to_string();
-                        continue;
-                    }
-                    self.compaction = None;
-                    self.current_session = None;
-                    self.current_project = project.clone();
-                    let _ = self.intents.send(Intent::NewSession(project));
-                    self.status = "new conversation".to_string();
                 }
                 SidebarIntent::DeleteSession(id) => {
                     if self.deletion.is_none() {
@@ -750,8 +766,17 @@ impl TranscriptApp {
             }
         });
         if !self.thinking_hidden {
-            ScrollArea::vertical().id_salt("reasoning-dock").max_height(135.0).stick_to_bottom(true)
+            let max = (ui.available_height() - 40.0).max(0.0);
+            let min = 20.0_f32.min(max);
+            let height = layout::resolve_divider(None, self.dividers.thinking, 64.0).clamp(min, max);
+            ScrollArea::vertical().id_salt("reasoning-dock").max_height(height).stick_to_bottom(true)
+                .auto_shrink([false, false])
                 .show(ui, |ui| { for text in thought.into_iter().rev() { crate::markdown::show(ui, text, true); } });
+            if let Some(delta) = panels::released_split(ui, "thinking-split", min - height..=max - height) {
+                self.dividers.thinking = (height + delta).round() as i32;
+                self.remember_chat_layout();
+                ui.request_repaint();
+            }
         }
     }
 
@@ -799,8 +824,33 @@ impl TranscriptApp {
         });
     }
 
-    fn composer(&mut self, ui: &mut egui::Ui) {
-        self.thinking_dock(ui);
+    fn composer_height(&self, max: f32) -> f32 {
+        layout::resolve_divider(None, self.dividers.composer, 150.0).clamp(88.0_f32.min(max), max)
+    }
+
+    fn honesty_footer(&self, ui: &mut egui::Ui) {
+        if self.settings.honesty_footer() {
+            let text = Texts::get(Key::LocalHonestyNote);
+            let font = egui::FontId::proportional(15.0);
+            let frame = egui::Frame::side_top_panel(ui.style());
+            let width = (ui.available_width() - frame.total_margin().sum().x).max(1.0);
+            let galley = ui.painter().layout(text.to_owned(), font, palette::TEXT, width);
+            Panel::bottom("honesty-footer").frame(frame).show_separator_line(false)
+                .exact_size(galley.size().y + frame.total_margin().sum().y)
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(text).size(15.0).color(palette::TEXT));
+                });
+        }
+    }
+
+    fn composer(&mut self, ui: &mut egui::Ui, max: f32) {
+        let height = self.composer_height(max);
+        let min = 88.0_f32.min(max);
+        if let Some(delta) = panels::released_split(ui, "composer-split", height - max..=height - min) {
+            self.dividers.composer = (height - delta).round() as i32;
+            self.remember_chat_layout();
+            ui.request_repaint();
+        }
         if self.attachment.is_some() {
             ui.horizontal_wrapped(|ui| {
                 ui.label(Texts::get(Key::ImageAttached));
@@ -825,23 +875,26 @@ impl TranscriptApp {
             ui.add(egui::Label::new(message).wrap());
         }
 
+        self.thinking_dock(ui);
+        let input_height = ui.available_height().max(1.0);
         let composer_id = ui.make_persistent_id(COMPOSER_FIELD);
         let send_requested = can_start
             && !self.loading
             && ui.memory(|memory| memory.has_focus(composer_id))
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Enter));
-        let response = ui.add_enabled(
-            self.server_beurt,
-            egui::TextEdit::multiline(&mut self.input)
-                .id(composer_id)
-                .hint_text("Ask something…  (Ctrl+Enter sends)")
-                .desired_rows(2)
-                .lock_focus(false)
-                .desired_width(f32::INFINITY),
-        );
-        if self.settings.honesty_footer() {
-            ui.add(egui::Label::new(egui::RichText::new(Texts::get(Key::LocalHonestyNote)).small().weak()).wrap());
-        }
+        let response = ScrollArea::vertical().id_salt("composer-scroll")
+            .max_height(input_height).auto_shrink([false, false]).show(ui, |ui| {
+                ui.add_enabled(
+                    self.server_beurt,
+                    egui::TextEdit::multiline(&mut self.input)
+                        .id(composer_id)
+                        .hint_text("Ask something…  (Ctrl+Enter sends)")
+                        .desired_rows(1)
+                        .min_size(egui::vec2(0.0, (input_height - 8.0).max(0.0)))
+                        .lock_focus(false)
+                        .desired_width(f32::INFINITY),
+                )
+            }).inner;
         if self.server_beurt
             && response.has_focus()
             && ui.input(|i| {
@@ -965,7 +1018,7 @@ mod geometry_tests {
         ctx.run_ui(egui::RawInput::default(), |ui| {
             let id = ui.make_persistent_id(COMPOSER_FIELD);
             ui.memory_mut(|memory| memory.request_focus(id));
-            app.composer(ui);
+            app.composer(ui, 700.0);
         }).drop_without_applying_deltas();
 
         for modifiers in [egui::Modifiers::NONE, egui::Modifiers::CTRL] {
@@ -979,7 +1032,7 @@ mod geometry_tests {
                 }],
                 ..Default::default()
             };
-            ctx.run_ui(raw, |ui| app.composer(ui)).drop_without_applying_deltas();
+            ctx.run_ui(raw, |ui| app.composer(ui, 700.0)).drop_without_applying_deltas();
             if modifiers == egui::Modifiers::NONE {
                 assert_eq!(app.input, "first line\n");
                 assert!(matches!(intents.try_recv(), Err(mpsc::TryRecvError::Empty)));
@@ -1069,12 +1122,83 @@ mod geometry_tests {
             let settings = baudet_settings::Settings { honesty_footer: enabled, ..Default::default() };
             file.write(&settings).unwrap();
             app.settings.load(&file);
-            let output = ctx.run_ui(egui::RawInput::default(), |ui| app.composer(ui));
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| app.honesty_footer(ui));
             let visible = output.shapes.iter().any(|shape| {
                 matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == Texts::get(Key::LocalHonestyNote))
             });
             output.drop_without_applying_deltas();
             assert_eq!(visible, enabled);
+        }
+    }
+
+    #[test]
+    fn composer_and_thinking_grips_resize_independently() {
+        let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+        app.rows.push(Row::from(&Item::Reasoning(baudet_core::ReasoningItem {
+            item_id: "test/reasoning".into(),
+            text: "Thinking summary".into(),
+            status: ItemStatus::Completed,
+        })));
+        let ctx = egui::Context::default();
+        let (settings_tx, saved) = mpsc::channel();
+        app.settings_tx = settings_tx;
+        for (grip, delta, expected) in [
+            ("composer-split", -30.0, [180, 0]),
+            ("thinking-split", 30.0, [180, 94]),
+        ] {
+            let before = [app.dividers.composer, app.dividers.thinking];
+            let mut id = egui::Id::NULL;
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                id = ui.make_persistent_id(grip);
+                app.composer(ui, 700.0);
+            }).drop_without_applying_deltas();
+            let start = ctx.read_response(id).unwrap().rect.center();
+            let end = start + egui::vec2(0.0, delta);
+            for (pos, pressed) in [(start, None), (start, Some(true)), (end, None), (end, Some(false))] {
+                let mut events = vec![egui::Event::PointerMoved(pos)];
+                if let Some(pressed) = pressed {
+                    events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                let raw = egui::RawInput { events, ..Default::default() };
+                ctx.run_ui(raw, |ui| app.composer(ui, 700.0)).drop_without_applying_deltas();
+                if pressed != Some(false) {
+                    assert_eq!([app.dividers.composer, app.dividers.thinking], before);
+                    assert!(matches!(saved.try_recv(), Err(mpsc::TryRecvError::Empty)));
+                }
+            }
+            assert_eq!([app.dividers.composer, app.dividers.thinking], expected);
+            assert!(matches!(
+                saved.try_recv(),
+                Ok(SettingsCommand::SaveChatLayout { composer, thinking }) if [composer, thinking] == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn narrow_viewport_does_not_replace_the_chosen_panel_widths() {
+        let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+        app.side_widths = Some([93.0, 107.0]);
+        let ctx = egui::Context::default();
+        for (width, expected) in [(300.0, [37.0, 42.0]), (1200.0, [93.0, 107.0])] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 360.0))),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| app.paint(ui));
+            let widths = ["projects", "filetree"].map(|id| {
+                egui::containers::PanelState::load(&ctx, egui::Id::new(id)).unwrap().size().x
+            });
+            assert_eq!(widths, expected);
+            assert_eq!(app.side_widths, Some([93.0, 107.0]));
+            assert!(!output.viewport_output.values().flat_map(|viewport| &viewport.commands).any(
+                |command| matches!(command, egui::ViewportCommand::InnerSize(_) | egui::ViewportCommand::MinInnerSize(_))
+            ));
+            output.drop_without_applying_deltas();
         }
     }
 
@@ -1550,6 +1674,15 @@ fn settings_worker_loop(
                     endpoint,
                 ));
             }
+            SettingsCommand::SaveChatLayout { composer, thinking } => {
+                let current = file.read();
+                let mut settings = current.settings().clone();
+                settings.composer_height = composer;
+                settings.thinking_height = thinking;
+                if let Err(error) = file.write(&settings) {
+                    let _ = report.send(SettingsEvent::Saved(Err(error)));
+                }
+            }
             SettingsCommand::Save(mut settings) => {
                 let current = file.read();
                 // MCP settings have dedicated commands on this worker. Preserve their latest values.
@@ -1831,7 +1964,7 @@ fn paint_row(ui: &mut egui::Ui, row: &Row, wrap: bool) {
             progress_indicator(ui);
         }
         if row.collapsed {
-            ui.collapsing("details", |ui| {
+            egui::CollapsingHeader::new("details").icon(panels::compact_chevron).show(ui, |ui| {
                 let label = egui::Label::new(egui::RichText::new(&row.body).monospace().size(12.0)).selectable(true);
                 ui.add(if wrap { label.wrap() } else { label.extend() });
             });
@@ -1996,7 +2129,7 @@ pub fn run_from(startup: Startup) -> eframe::Result {
         return Ok(());
     }
     let mut builder =
-        egui::ViewportBuilder::default().with_inner_size([1040.0, 720.0]).with_min_inner_size([520.0, 360.0]);
+        egui::ViewportBuilder::default().with_inner_size([1040.0, 720.0]).with_min_inner_size([0.0, 360.0]);
     if startup.screenshot.is_some() {
         builder = builder.with_active(false);
     }

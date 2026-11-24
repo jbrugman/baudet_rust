@@ -252,6 +252,28 @@ fn een_wissel_van_map_houdt_de_rechten_die_er_stonden() {
 }
 
 #[test]
+fn toggling_project_and_inbox_keeps_the_current_conversation() {
+    let (_guard, _data, mut model) = model_in_tempdir();
+    let project = model.add_project("Toggle project").unwrap();
+    let session = model.add_session(Some(&project.id)).unwrap();
+    model.add_session(None).unwrap();
+    model.select_session(&session.id);
+    let catalog = model.catalog().clone();
+    let ctx = addressable_context();
+    let mut app = TranscriptApp::new(TranscriptApp::demo_backend()).with_sidebar_model(model);
+    for title in ["Toggle project", Texts::get(Key::InboxNode)] {
+        for _ in 0..2 {
+            let row = label_at(&ctx, &mut app, title);
+            click_at(&ctx, &mut app, row, egui::PointerButton::Primary);
+        }
+    }
+    paint_once(&ctx, &mut app);
+    assert_eq!(catalog.sessions_in(Some(&project.id)).len(), 1);
+    assert_eq!(catalog.sessions_in(None).len(), 1);
+    assert_eq!(app.sidebar().selected_session_id(), Some(session.id.as_str()));
+}
+
+#[test]
 fn a_project_right_click_opens_its_menu_in_release_too() {
     let (_guard, _data, mut model) = model_in_tempdir();
     model.add_project("Menu project").unwrap();

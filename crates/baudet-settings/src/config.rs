@@ -129,6 +129,8 @@ pub struct Settings {
     pub right_panel_width: i32,
     pub diff_window_size: Option<[f32; 2]>,
     pub files_divider: i32,
+    pub composer_height: i32,
+    pub thinking_height: i32,
     #[serde(deserialize_with = "parse_language")]
     pub language: Language,
 }
@@ -180,6 +182,8 @@ impl Default for Settings {
             right_panel_width: 0,
             diff_window_size: None,
             files_divider: 0,
+            composer_height: 0,
+            thinking_height: 0,
             language: Language::default(),
         }
     }

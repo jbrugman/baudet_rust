@@ -16,6 +16,7 @@ pub enum SettingsCommand {
     },
     Probe { endpoint: String, api_key: Option<String> },
     Save(Settings),
+    SaveChatLayout { composer: i32, thinking: i32 },
     LearnContext { key: String, tokens: u32 },
     ApplyTrusted(Vec<String>),
     ClearTrusted,
@@ -210,6 +211,8 @@ impl SettingsView {
         self.stored_context.right_panel_width = settings.right_panel_width;
         self.stored_context.diff_window_size = settings.diff_window_size;
         self.stored_context.files_divider = settings.files_divider;
+        self.stored_context.composer_height = settings.composer_height;
+        self.stored_context.thinking_height = settings.thinking_height;
         self.language = settings.language;
         self.fetched_for = None;
         self.listing_answered = false;
@@ -272,6 +275,8 @@ impl SettingsView {
             right_panel_width: self.stored_context.right_panel_width,
             diff_window_size: self.stored_context.diff_window_size,
             files_divider: self.stored_context.files_divider,
+            composer_height: self.stored_context.composer_height,
+            thinking_height: self.stored_context.thinking_height,
             language: self.language,
         })
     }
@@ -282,6 +287,8 @@ impl SettingsView {
             right: self.stored_context.right_divider,
             right_width: self.stored_context.right_panel_width,
             files: self.stored_context.files_divider,
+            composer: self.stored_context.composer_height,
+            thinking: self.stored_context.thinking_height,
         }
     }
 
@@ -290,6 +297,8 @@ impl SettingsView {
         self.stored_context.right_divider = dividers.right;
         self.stored_context.right_panel_width = dividers.right_width;
         self.stored_context.files_divider = dividers.files;
+        self.stored_context.composer_height = dividers.composer;
+        self.stored_context.thinking_height = dividers.thinking;
     }
 
     pub(crate) fn diff_window_size(&self) -> Option<[f32; 2]> {
@@ -314,6 +323,8 @@ impl SettingsView {
         settings.right_divider = dividers.right;
         settings.right_panel_width = dividers.right_width;
         settings.files_divider = dividers.files;
+        settings.composer_height = dividers.composer;
+        settings.thinking_height = dividers.thinking;
         Ok(settings)
     }
 
@@ -509,69 +520,82 @@ fn form_row(ui: &mut Ui, label: impl Into<String>, build: impl FnOnce(&mut Ui)) 
 }
 
 fn form_row_with_gap(ui: &mut Ui, boven: f32, label: impl Into<String>, build: impl FnOnce(&mut Ui)) {
-    let text = dim(label);
-    let taken = ui.available_size_before_wrap();
     if boven > 0.0 {
         ui.add_space(lucht_voor_kader(boven));
     }
-    let inkling = text.clone().into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body);
-    if inkling.size().x + ROW_GAP <= LABEL_COLUMN {
-        ui.horizontal(|ui| {
-            ui.add_sized([LABEL_COLUMN, 20.0], egui::Label::new(text).selectable(false));
-            build(ui);
-        });
-        ui.set_min_width(taken.x);
+    let text = dim(label);
+    if ui.available_width() < LABEL_COLUMN + ROW_GAP + 180.0 {
+        ui.add(egui::Label::new(text).wrap().selectable(false));
+        build(ui);
     } else {
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
-                ui.set_width(LABEL_COLUMN - ROW_GAP);
-                ui.label(text);
-            });
-            ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
-                ui.set_width((taken.x - LABEL_COLUMN).max(0.0));
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = ROW_GAP;
+            ui.allocate_ui_with_layout(
+                egui::vec2(LABEL_COLUMN, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(LABEL_COLUMN);
+                    ui.add(egui::Label::new(text).wrap().selectable(false));
+                },
+            );
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
                 build(ui);
             });
         });
-        ui.set_min_width(taken.x);
     }
 }
 
 pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<SettingsCommand>) {
-    let mut commands: Vec<SettingsCommand> = Vec::new();
-    ui.set_width(ui.available_width().min(360.0));
-    language_row(ui, view, 0.0);
-    group_break(ui);
-    endpoint_row(ui, view, &mut commands, 0.0);
-    group_break(ui);
-    model_row(ui, view, 0.0);
-    group_break(ui);
-    sampling_rows(ui, view);
-    reasoning_row(ui, view, ROW_GAP);
-    tokens_row(ui, view);
-    iterations_row(ui, view);
-    parallel_row(ui, view);
-    group_break(ui);
-    toggle_rows(ui, view);
-    system_prompt_row(ui, view);
-    group_break(ui);
-    command_rows(ui, view, &mut commands);
-    group_break(ui);
-    mcp_rows(ui, view, &mut commands);
-    group_break(ui);
-    context_rows(ui, view);
-    group_break(ui);
-    key_row(ui, view, 0.0);
-    if view.blocked {
+    let mut commands = Vec::new();
+    egui::Panel::bottom("settings-actions").show(ui, |ui| {
+        ui.horizontal(|ui| {
+            save_row(ui, view, &mut commands);
+            if !view.status.is_empty() {
+                ui.add(egui::Label::new(dim(&view.status)).truncate()).on_hover_text(&view.status);
+            }
+        });
+    });
+    egui::ScrollArea::vertical().id_salt("settings-form").auto_shrink([false, false]).show(ui, |ui| {
+        if view.blocked {
+            ui.colored_label(palette::DIFF_REMOVED, "Your settings file is unreadable.");
+            ui.label(dim("Saving is disabled until it is fixed, so a save can never replace what is still in that file."));
+            group_break(ui);
+        }
+        language_row(ui, view, 0.0);
         group_break(ui);
-        ui.colored_label(palette::DIFF_REMOVED, "Your settings file is unreadable.");
-        ui.label(dim("Saving is disabled until it is fixed, so a save can never replace what is still in that file."));
-    }
-    group_break(ui);
-    save_row(ui, view, &mut commands);
-    if !view.status.is_empty() {
+        let endpoint_enter = endpoint_row(ui, view);
+        key_row(ui, view, ROW_GAP);
+        endpoint_actions(ui, view, &mut commands, endpoint_enter);
+        toggle_rows(ui, [
+            (&mut view.use_responses_api, Key::UseResponsesApi),
+            (&mut view.store_responses, Key::StoreResponses),
+            (&mut view.use_server_session, Key::SendPreviousResponseId),
+        ]);
+        model_row(ui, view, ROW_GAP);
         group_break(ui);
-        ui.label(dim(&view.status));
-    }
+        reasoning_row(ui, view, 0.0);
+        sampling_rows(ui, view);
+        tokens_row(ui, view);
+        context_rows(ui, view);
+        system_prompt_row(ui, view);
+        group_break(ui);
+        iterations_row(ui, view);
+        parallel_row(ui, view);
+        toggle_rows(ui, [
+            (&mut view.auto_approve_safe_commands, Key::AutoApproveSafe),
+            (&mut view.git_allow_writes, Key::GitAllowWrites),
+        ]);
+        group_break(ui);
+        command_rows(ui, view, &mut commands);
+        group_break(ui);
+        mcp_rows(ui, view, &mut commands);
+        group_break(ui);
+        toggle_rows(ui, [
+            (&mut view.transcript_wrap, Key::TranscriptWrap),
+            (&mut view.honesty_footer, Key::HonestyFooter),
+        ]);
+    });
     for command in commands {
         let _ = tx.send(command);
     }
@@ -604,6 +628,8 @@ fn language_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
     form_row_with_gap(ui, boven, Texts::get(Key::LanguageLabel), |ui| {
         let mut current = view.language;
         let picker = egui::ComboBox::from_id_salt("settings-language")
+            .width(ui.available_width())
+            .truncate()
             .selected_text(view.language.native_name())
             .show_ui(ui, |ui| {
                 for option in Language::ALL {
@@ -616,10 +642,9 @@ fn language_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
     });
 }
 
-fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<SettingsCommand>, boven: f32) {
-    let mut focused = false;
-    let rij_breed = ui.available_size_before_wrap().x;
-    form_row_with_gap(ui, boven, Texts::get(Key::BaseUrlLabel), |ui| {
+fn endpoint_row(ui: &mut Ui, view: &mut SettingsView) -> bool {
+    let mut enter = false;
+    form_row_with_gap(ui, 0.0, Texts::get(Key::BaseUrlLabel), |ui| {
         let response = ui
             .add_sized(
                 [ui.available_width(), 20.0],
@@ -632,42 +657,39 @@ fn endpoint_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
         if response.changed() {
             view.fetched_for = None;
         }
-        focused = response.has_focus();
+        enter = response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
     });
-    ui.add_space(lucht_voor_kader(boven.max(ROW_GAP)));
-    let fetch_now = ui
-        .horizontal(|ui| {
-            ui.add_sized([LABEL_COLUMN, 20.0], egui::Label::new("").selectable(false));
-            ui.add_enabled(
+    enter
+}
+
+fn endpoint_actions(
+    ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<SettingsCommand>, enter: bool,
+) {
+    form_row(ui, "", |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let fetch = ui.add_enabled(
                 !view.fetching,
                 egui::Button::new(if view.fetching { Texts::get(Key::Fetching) } else { Texts::get(Key::FetchModels) }),
-            )
-            .clicked()
-        })
-        .inner;
-    ui.add_space(lucht_voor_kader(ROW_GAP));
-    ui.horizontal(|ui| {
-        ui.add_sized([LABEL_COLUMN, 20.0], egui::Label::new("").selectable(false));
-        let scan = ui
-            .add_enabled(!view.probing, egui::Button::new(if view.probing { "scanning…" } else { "Scan endpoint" }))
-            .clicked();
-        if scan {
-            view.probing = true;
-            view.status = format!("scanning {}…", view.base_url.trim());
-            commands.push(SettingsCommand::Probe {
-                endpoint: view.base_url.trim().to_string(),
-                api_key: Settings::resolve_key(Some(&view.api_key), &view.api_key_env_var),
-            });
-        }
-        if let Some(word) = view.protocol_word() {
-            ui.label(dim(format!("protocol: {word}")));
-        }
+            ).clicked();
+            if (fetch || enter) && !view.fetching {
+                commands.push(view.fetch_command());
+            }
+            let scan = ui
+                .add_enabled(!view.probing, egui::Button::new(if view.probing { "scanning…" } else { "Scan endpoint" }))
+                .clicked();
+            if scan {
+                view.probing = true;
+                view.status = format!("scanning {}…", view.base_url.trim());
+                commands.push(SettingsCommand::Probe {
+                    endpoint: view.base_url.trim().to_string(),
+                    api_key: Settings::resolve_key(Some(&view.api_key), &view.api_key_env_var),
+                });
+            }
+            if let Some(word) = view.protocol_word() {
+                ui.label(dim(format!("protocol: {word}")));
+            }
+        });
     });
-    ui.set_min_width(rij_breed);
-    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter)) && focused;
-    if (fetch_now || enter) && !view.fetching {
-        commands.push(view.fetch_command());
-    }
 }
 
 fn model_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
@@ -676,7 +698,8 @@ fn model_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
         if let Some(saved) = saved {
             let listed = view.fetched_for.is_some();
             form_row_with_gap(ui, boven, Texts::get(Key::ModelLabel), |ui| {
-                ui.monospace(saved_model_label(&saved, view.model_window, listed));
+                let label = saved_model_label(&saved, view.model_window, listed);
+                ui.add(egui::Label::new(egui::RichText::new(&label).monospace()).truncate()).on_hover_text(label);
             });
             return;
         }
@@ -703,6 +726,8 @@ fn model_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
             .or_else(|| saved.as_ref().map(|s| saved_model_label(s, view.model_window, view.fetched_for.is_some())))
             .unwrap_or_else(|| "choose…".to_string());
         egui::ComboBox::from_id_salt("settings-model")
+            .width(ui.available_width())
+            .truncate()
             .selected_text(selected)
             .show_ui(ui, |ui| {
                 for (model, label) in view.models.iter().zip(row_labels.iter()) {
@@ -755,6 +780,8 @@ fn reasoning_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
     form_row_with_gap(ui, boven, Texts::get(Key::ReasoningEffortLabel), |ui| {
         let mut current = view.reasoning;
         let reasoning = egui::ComboBox::from_id_salt("settings-reasoning")
+            .width(ui.available_width())
+            .truncate()
             .selected_text(view.reasoning.label())
             .show_ui(ui, |ui| {
                 for option in Reasoning::ALL {
@@ -768,22 +795,10 @@ fn reasoning_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
     ui.checkbox(&mut view.thinking_template, Texts::get(Key::ThinkingTemplate));
 }
 
-fn toggle_rows(ui: &mut Ui, view: &mut SettingsView) {
-    let toggles: [(bool, Key); 7] = [
-        (view.use_responses_api, Key::UseResponsesApi),
-        (view.store_responses, Key::StoreResponses),
-        (view.use_server_session, Key::SendPreviousResponseId),
-        (view.auto_approve_safe_commands, Key::AutoApproveSafe),
-        (view.git_allow_writes, Key::GitAllowWrites),
-        (view.transcript_wrap, Key::TranscriptWrap),
-        (view.honesty_footer, Key::HonestyFooter),
-    ];
-    for (index, (current, key)) in toggles.into_iter().enumerate() {
-        if index > 0 {
-            ui.add_space(ROW_GAP);
-        }
-        let mut value = current;
-        let response = ui.checkbox(&mut value, Texts::get(key));
+fn toggle_rows<const N: usize>(ui: &mut Ui, toggles: [(&mut bool, Key); N]) {
+    for (value, key) in toggles {
+        ui.add_space(ROW_GAP);
+        let response = ui.checkbox(value, Texts::get(key));
         let tip = match key {
             Key::StoreResponses => Key::TipStoreResponses,
             Key::AutoApproveSafe => Key::TipAutoApproveSafe,
@@ -793,15 +808,6 @@ fn toggle_rows(ui: &mut Ui, view: &mut SettingsView) {
             _ => key,
         };
         response.on_hover_text(Texts::get(tip));
-        match index {
-            0 => view.use_responses_api = value,
-            1 => view.store_responses = value,
-            2 => view.use_server_session = value,
-            3 => view.auto_approve_safe_commands = value,
-            4 => view.git_allow_writes = value,
-            5 => view.transcript_wrap = value,
-            _ => view.honesty_footer = value,
-        }
     }
 }
 
@@ -828,7 +834,7 @@ fn command_rows(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<Setting
         .on_hover_text(Texts::get(Key::AlwaysAllowHint));
     });
     ui.add_space(lucht_voor_kader(ROW_GAP));
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let apply =
             ui.button(Texts::get(Key::ApplyTrustedButton)).on_hover_text(Texts::get(Key::TipApplyTrusted)).clicked();
         let clear_trusted = ui
@@ -913,6 +919,8 @@ fn iterations_row(ui: &mut Ui, view: &mut SettingsView) {
     });
     form_row(ui, Texts::get(Key::ToolModeLabel), |ui| {
         egui::ComboBox::from_id_salt("settings-tool-mode")
+            .width(ui.available_width())
+            .truncate()
             .selected_text(label(view.tool_mode))
             .show_ui(ui, |ui| {
                 for mode in [ToolMode::Off, ToolMode::Ask, ToolMode::Auto] {
@@ -937,6 +945,8 @@ fn context_rows(ui: &mut Ui, view: &mut SettingsView) {
     form_row(ui, Texts::get(Key::ContextStrategyLabel), |ui| {
         let mut chosen = view.context_strategy;
         egui::ComboBox::from_id_salt("settings-context-strategy")
+            .width(ui.available_width())
+            .truncate()
             .selected_text(strategy_label(view.context_strategy))
             .show_ui(ui, |ui| {
                 for option in ContextStrategy::ALL {
@@ -1026,17 +1036,23 @@ fn parse_parallel_turns(text: &str) -> Result<u32, String> {
 
 fn key_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
     form_row_with_gap(ui, boven, Texts::get(Key::ApiKeyLabel), |ui| {
-        ui.horizontal(|ui| {
-            ui.add_sized(
-                [ui.available_width(), 20.0],
-                egui::TextEdit::singleline(&mut view.api_key).password(!view.reveal_key),
-            )
-            .on_hover_text(Texts::get(Key::TipApiKey));
-            let toggle = if view.reveal_key { "hide" } else { "show" };
-            if ui.small_button(toggle).clicked() {
-                view.reveal_key = !view.reveal_key;
-            }
-        });
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 20.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                let toggle = if view.reveal_key { "hide" } else { "show" };
+                if ui.small_button(toggle).clicked() {
+                    view.reveal_key = !view.reveal_key;
+                }
+                ui.add_sized(
+                    [ui.available_width(), 20.0],
+                    egui::TextEdit::singleline(&mut view.api_key)
+                        .password(!view.reveal_key)
+                        .desired_width(f32::INFINITY),
+                )
+                .on_hover_text(Texts::get(Key::TipApiKey));
+            },
+        );
     });
     form_row(ui, Texts::get(Key::OrEnvVar), |ui| {
         ui.add_sized(
@@ -1050,7 +1066,6 @@ fn key_row(ui: &mut Ui, view: &mut SettingsView, boven: f32) {
 }
 
 fn save_row(ui: &mut Ui, view: &mut SettingsView, commands: &mut Vec<SettingsCommand>) {
-    ui.add_space(lucht_voor_kader(ROW_GAP));
     let save = ui
         .add_enabled(!view.blocked, egui::Button::new(Texts::get(Key::SaveButton)))
         .on_hover_text(Texts::get(Key::TipSave))
@@ -1084,6 +1099,74 @@ mod tests {
     use super::{split_trusted_lines, Language, Reasoning, SettingsCommand, SettingsEvent, SettingsView, ToolMode};
     use baudet_settings::{ListingError, Model};
     use std::path::PathBuf;
+
+    #[test]
+    fn connection_fields_fill_the_form_and_save_stays_visible() {
+        use super::{body, palette};
+        use baudet_i18n::{Key, Texts};
+
+        for width in [280.0, 940.0] {
+            let ctx = egui::Context::default();
+            palette::install(&ctx);
+            let mut view = SettingsView::new();
+            view.base_url = "http://127.0.0.1:8000/v1".into();
+            view.api_key = "settings-placeholder-secret".into();
+            view.api_key_env_var = "BAUDET_LAYOUT_TEST_KEY".into();
+            view.model = Some("fixture-model".into());
+            let (tx, _) = std::sync::mpsc::channel();
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 660.0));
+            let input = || egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            let output = ctx.run_ui(input(), |ui| body(ui, &mut view, &tx));
+            let text_rect = |label: &str| {
+                output.shapes.iter().find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => Some(text.visual_bounding_rect()),
+                    _ => None,
+                }).unwrap_or_else(|| panic!("Missing settings label: {label}"))
+            };
+            let endpoint = text_rect(Texts::get(Key::BaseUrlLabel));
+            let key = text_rect(Texts::get(Key::ApiKeyLabel));
+            let env = text_rect(Texts::get(Key::OrEnvVar));
+            let model = text_rect(Texts::get(Key::ModelLabel));
+            assert!(endpoint.top() < key.top() && key.top() < env.top() && env.top() < model.top());
+            let url = text_rect(&view.base_url);
+            if width < 300.0 {
+                assert!(url.top() >= endpoint.bottom());
+                assert!((url.left() - endpoint.left()).abs() < 16.0);
+            } else {
+                assert!(url.left() >= endpoint.left() + super::LABEL_COLUMN);
+            }
+            assert!(output.shapes.iter().any(|shape| matches!(
+                &shape.shape,
+                egui::Shape::Rect(field) if field.fill == palette::FIELD
+                    && field.rect.contains(url.center()) && field.rect.right() > width - 25.0
+            )));
+            assert!(!output.shapes.iter().any(|shape| matches!(
+                &shape.shape,
+                egui::Shape::Text(text) if text.galley.text().contains(&view.api_key)
+            )));
+            let save = text_rect(Texts::get(Key::SaveButton));
+            assert!(save.bottom() > screen.bottom() - 40.0);
+            output.drop_without_applying_deltas();
+
+            let mut scrolled = input();
+            scrolled.events = vec![
+                egui::Event::PointerMoved(egui::pos2(width / 2.0, 180.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    phase: egui::TouchPhase::Move,
+                    delta: egui::vec2(0.0, -500.0),
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            let output = ctx.run_ui(scrolled, |ui| body(ui, &mut view, &tx));
+            assert!(output.shapes.iter().any(|shape| matches!(
+                &shape.shape,
+                egui::Shape::Text(text) if text.galley.text() == Texts::get(Key::SaveButton)
+                    && text.visual_bounding_rect() == save
+            )));
+            output.drop_without_applying_deltas();
+        }
+    }
 
     fn model(id: &str) -> Model {
         Model { id: id.to_string(), label: None, context_window: None }
@@ -1267,7 +1350,7 @@ git com"
         assert_eq!(panel.draft().unwrap().language, Language::Nl);
         panel.adopt(&panel.draft().unwrap());
         assert_eq!(panel.language, Language::Nl);
-        let dividers = crate::layout::Dividers { left: 1, right: 2, right_width: 4, files: 3 };
+        let dividers = crate::layout::Dividers { left: 1, right: 2, right_width: 4, files: 3, composer: 140, thinking: 60 };
         assert_eq!(panel.geometry_draft(&dividers).unwrap().language, Language::Nl);
     }
 

@@ -3,6 +3,7 @@
 mod app;
 mod approval;
 mod diff_view;
+mod folder_watch;
 mod markdown;
 pub mod clipboard;
 pub mod palette;

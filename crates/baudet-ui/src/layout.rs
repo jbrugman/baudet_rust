@@ -1,5 +1,6 @@
 
 pub const LEFT_WIDTH: f32 = 280.0;
+pub const RIGHT_WIDTH: f32 = 320.0;
 
 // Old configurations stored the offset of the right divider from the left edge.
 pub const CENTER_WIDTH: f32 = 720.0;
@@ -7,8 +8,6 @@ pub const CENTER_WIDTH: f32 = 720.0;
 pub const CHANGES_HEIGHT: f32 = 200.0;
 pub const CHANGES_MIN: f32 = 96.0;
 
-pub const PANEL_MIN: f32 = 180.0;
-pub(crate) const LEFT_PANEL_MIN: f32 = 190.0;
 pub(crate) const CENTER_MIN: f32 = 220.0;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -17,6 +16,18 @@ pub struct Dividers {
     pub right: i32,
     pub right_width: i32,
     pub files: i32,
+    pub composer: i32,
+    pub thinking: i32,
+}
+
+// Zero in existing settings means the panel has no saved width.
+pub(crate) fn encode_width(width: f32) -> i32 {
+    let width = width.round() as i32;
+    if width > 0 { width } else { -1 }
+}
+
+pub(crate) fn decode_width(stored: i32, fallback: f32) -> f32 {
+    if stored == -1 { 0.0 } else { resolve_divider(None, stored, fallback) }
 }
 
 pub fn resolve_divider(previous: Option<f32>, persisted: i32, fallback: f32) -> f32 {

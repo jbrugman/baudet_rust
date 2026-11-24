@@ -36,6 +36,8 @@ pub const FAINT: Color32 = rgb(120, 122, 128);
 
 pub const INK_SOFT: Color32 = rgb(97, 99, 101);
 
+pub const ACTIVE_SESSION: Color32 = rgb(33, 77, 124);
+
 pub const SELECTION: Color32 = rgb(61, 63, 65);
 
 pub const LIST_ROW: Color32 = rgb(42, 43, 48);

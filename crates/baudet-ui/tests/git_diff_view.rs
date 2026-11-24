@@ -60,6 +60,24 @@ fn wait_for_patch(ctx: &egui::Context, app: &mut TranscriptApp, time: &mut f64, 
     }
 }
 
+fn wait_for_row(
+    ctx: &egui::Context,
+    app: &mut TranscriptApp,
+    time: &mut f64,
+    id: egui::Id,
+) -> egui::Response {
+    let start = Instant::now();
+    loop {
+        *time += 0.02;
+        paint(ctx, app, *time, Vec::new()).drop_without_applying_deltas();
+        if let Some(row) = ctx.read_response(id) {
+            return row;
+        }
+        assert!(start.elapsed() < Duration::from_secs(4), "Expected a visible row for {id:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn a_double_click_in_either_list_opens_its_own_colored_patch() {
     let folder = tempfile::tempdir().unwrap();
@@ -86,6 +104,7 @@ fn a_double_click_in_either_list_opens_its_own_colored_patch() {
     sidebar.set_permissions(true, false, false).unwrap();
     let mut app = TranscriptApp::new(TranscriptApp::demo_backend()).with_sidebar_model(sidebar);
     let mut time = 0.0;
+    wait_for_row(&ctx, &mut app, &mut time, egui::Id::new(("change-row", "second.txt")));
     for (id, expected) in [
         (egui::Id::new(("file-row", project.join("first.txt").as_path())), "+from the tree"),
         (egui::Id::new(("change-row", "second.txt")), "+from the changes list"),
@@ -95,7 +114,7 @@ fn a_double_click_in_either_list_opens_its_own_colored_patch() {
             time += 0.2;
             paint(&ctx, &mut app, time, Vec::new()).drop_without_applying_deltas();
         }
-        let row = ctx.read_response(id).expect("the row is addressable");
+        let row = wait_for_row(&ctx, &mut app, &mut time, id);
         assert!(row.interact_rect.height() > 0.0 && row.interact_rect.height() < 35.0);
         let pos = row.interact_rect.center();
         click(&ctx, &mut app, pos, &mut time);
@@ -130,4 +149,48 @@ fn a_double_click_in_either_list_opens_its_own_colored_patch() {
         };
         paint(&ctx, &mut app, time, vec![escape]).drop_without_applying_deltas();
     }
+}
+
+#[test]
+fn external_edits_refresh_both_lists_and_keep_directories_above_files() {
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path();
+    let subfolder = root.join("zzz-folder");
+    std::fs::create_dir(&subfolder).unwrap();
+    std::fs::write(subfolder.join("seed.txt"), "before\n").unwrap();
+    std::fs::write(root.join("aaa.txt"), "before\n").unwrap();
+    git(root, &["init", "-q"]);
+    git(root, &["add", "."]);
+    git(root, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base"]);
+    std::fs::write(root.join("aaa.txt"), "first change\n").unwrap();
+
+    let ctx = egui::Context::default();
+    palette::install(&ctx);
+    let catalog = tempfile::tempdir().unwrap();
+    let mut sidebar = SidebarModel::new(baudet_projects::Catalog::open(catalog.path()).unwrap());
+    let linked = sidebar.add_project("Watched project").unwrap();
+    sidebar.select_project(Some(&linked.id));
+    sidebar.link_folder(&linked.id, root.to_str()).unwrap();
+    sidebar.set_permissions(true, false, false).unwrap();
+    let mut app = TranscriptApp::new(TranscriptApp::demo_backend()).with_sidebar_model(sidebar);
+    let mut time = 0.0;
+    wait_for_row(&ctx, &mut app, &mut time, egui::Id::new(("change-row", "aaa.txt")));
+
+    time += 0.02;
+    let out = paint(&ctx, &mut app, time, Vec::new());
+    let label = |name| {
+        out.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == name => Some(text.visual_bounding_rect()),
+            _ => None,
+        }).expect("the explorer row is visible")
+    };
+    let folder = label("zzz-folder");
+    assert!(folder.bottom() < label("aaa.txt").top());
+    out.drop_without_applying_deltas();
+    click(&ctx, &mut app, folder.center(), &mut time);
+
+    let new_file = subfolder.join("external.txt");
+    std::fs::write(&new_file, "created outside Baudet\n").unwrap();
+    wait_for_row(&ctx, &mut app, &mut time, egui::Id::new(("change-row", "zzz-folder/external.txt")));
+    assert!(ctx.read_response(egui::Id::new(("file-row", new_file.as_path()))).is_some());
 }
