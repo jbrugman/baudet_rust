@@ -2493,8 +2493,15 @@ pub fn run_from(startup: Startup) -> eframe::Result {
         println!("{}", describe_discovery(&discover_local(key)));
         return Ok(());
     }
-    let mut builder =
-        egui::ViewportBuilder::default().with_inner_size([1040.0, 720.0]).with_min_inner_size([0.0, 360.0]);
+    let icon = image::load_from_memory_with_format(include_bytes!("../assets/baudet.png"), image::ImageFormat::Png)
+        .expect("valid embedded Baudet icon")
+        .into_rgba8();
+    let (width, height) = icon.dimensions();
+    let mut builder = egui::ViewportBuilder::default()
+        .with_app_id("dev.baudet.desktop")
+        .with_icon(egui::IconData { rgba: icon.into_raw(), width, height })
+        .with_inner_size([1040.0, 720.0])
+        .with_min_inner_size([0.0, 360.0]);
     if startup.screenshot.is_some() {
         builder = builder.with_active(false);
     }

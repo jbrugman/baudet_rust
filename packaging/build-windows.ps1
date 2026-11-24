@@ -3,7 +3,8 @@ param([string]$OutputDirectory = "target/dist")
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
 
-if (-not (Get-Command dumpbin.exe -ErrorAction SilentlyContinue)) {
+if (-not (Get-Command dumpbin.exe -ErrorAction SilentlyContinue) -or
+    -not (Get-Command rc.exe -ErrorAction SilentlyContinue)) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
     $visualStudio = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
     if ($LASTEXITCODE -ne 0 -or -not $visualStudio) {
@@ -17,13 +18,24 @@ $targetDirectory = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "
 $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-static"
 rustup target add $target
 if ($LASTEXITCODE -ne 0) { throw "Could not install the Windows Rust target." }
-cargo build --locked --release -p baudet-ui --target-dir $targetDirectory --target $target
-if ($LASTEXITCODE -ne 0) { throw "Cargo build failed." }
-
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 $work = Join-Path ([IO.Path]::GetTempPath()) ("baudet-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
+    Copy-Item packaging/baudet.ico $work
+    Set-Content (Join-Path $work "baudet.rc") '1 ICON "baudet.ico"' -Encoding ascii
+    Push-Location $work
+    try {
+        & rc.exe /nologo /fo baudet.res baudet.rc
+        if ($LASTEXITCODE -ne 0) { throw "Could not compile the Windows app icon." }
+    } finally {
+        Pop-Location
+    }
+    $resource = Join-Path $work "baudet.res"
+    cargo rustc --locked --release -p baudet-ui --bin baudet-ui --target-dir $targetDirectory --target $target -- -C "link-arg=$resource"
+    if ($LASTEXITCODE -ne 0) { throw "Cargo build failed." }
+    Remove-Item $resource, (Join-Path $work "baudet.rc"), (Join-Path $work "baudet.ico")
+
     $exe = Join-Path $work "Baudet.exe"
     Copy-Item (Join-Path $targetDirectory "$target/release/baudet-ui.exe") $exe
     Copy-Item LICENSE (Join-Path $work "LICENSE.txt")

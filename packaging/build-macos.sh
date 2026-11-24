@@ -26,7 +26,7 @@ lipo -create -output "$binary" \
     "$target_dir/aarch64-apple-darwin/release/baudet-ui" \
     "$target_dir/x86_64-apple-darwin/release/baudet-ui"
 lipo "$binary" -verify_arch arm64 x86_64
-cp LICENSE packaging/FONT-LICENSES.txt "$app/Contents/Resources/"
+cp LICENSE packaging/FONT-LICENSES.txt packaging/baudet.icns "$app/Contents/Resources/"
 
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -36,6 +36,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>baudet-ui</string>
   <key>CFBundleIdentifier</key><string>dev.baudet.desktop</string>
   <key>CFBundleName</key><string>Baudet</string>
+  <key>CFBundleIconFile</key><string>baudet.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>$version</string>
   <key>CFBundleShortVersionString</key><string>$version</string>

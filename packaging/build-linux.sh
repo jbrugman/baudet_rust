@@ -21,6 +21,7 @@ binary="$stage/usr/bin/baudet-ui"
 install -Dm755 "$target_dir/$target/release/baudet-ui" "$binary"
 install -Dm644 LICENSE "$stage/usr/share/doc/baudet/copyright"
 install -Dm644 packaging/FONT-LICENSES.txt "$stage/usr/share/doc/baudet/FONT-LICENSES.txt"
+install -Dm644 crates/baudet-ui/assets/baudet.png "$stage/usr/share/icons/hicolor/256x256/apps/dev.baudet.desktop.png"
 mkdir -p "$stage/DEBIAN" "$stage/usr/share/applications" "$work/debian"
 cat > "$stage/usr/share/applications/dev.baudet.desktop" <<'DESKTOP'
 [Desktop Entry]
@@ -28,6 +29,7 @@ Type=Application
 Name=Baudet
 Comment=Desktop client for local and self-hosted model APIs
 Exec=baudet-ui
+Icon=dev.baudet.desktop
 Terminal=false
 Categories=Development;
 DESKTOP
