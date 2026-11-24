@@ -222,8 +222,10 @@ fn split_grip(ui: &mut Ui, rect: egui::Rect, id: egui::Id, vertical: bool) -> eg
     grip
 }
 
+pub(crate) const SPLIT_GRIP_HEIGHT: f32 = 8.0;
+
 pub(crate) fn horizontal_grip(ui: &mut Ui, id: &str) -> egui::Response {
-    let strip = ui.allocate_space(egui::vec2(ui.available_width(), 8.0)).1;
+    let strip = ui.allocate_space(egui::vec2(ui.available_width(), SPLIT_GRIP_HEIGHT)).1;
     split_grip(ui, strip, ui.make_persistent_id(id), false)
 }
 

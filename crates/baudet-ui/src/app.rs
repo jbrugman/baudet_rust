@@ -765,18 +765,31 @@ impl TranscriptApp {
                 self.thinking_hidden = !self.thinking_hidden;
             }
         });
-        if !self.thinking_hidden {
-            let max = (ui.available_height() - 40.0).max(0.0);
-            let min = 20.0_f32.min(max);
-            let height = layout::resolve_divider(None, self.dividers.thinking, 64.0).clamp(min, max);
-            ScrollArea::vertical().id_salt("reasoning-dock").max_height(height).stick_to_bottom(true)
-                .auto_shrink([false, false])
-                .show(ui, |ui| { for text in thought.into_iter().rev() { crate::markdown::show(ui, text, true); } });
-            if let Some(delta) = panels::released_split(ui, "thinking-split", min - height..=max - height) {
-                self.dividers.thinking = (height + delta).round() as i32;
-                self.remember_chat_layout();
-                ui.request_repaint();
-            }
+        if self.thinking_hidden {
+            return;
+        }
+
+        let separation = panels::SPLIT_GRIP_HEIGHT + 2.0 * ui.spacing().item_spacing.y;
+        let max = (ui.available_height() - separation - 32.0).max(0.0);
+        if max < 20.0 {
+            return;
+        }
+        let height = layout::resolve_divider(None, self.dividers.thinking, 64.0).clamp(20.0, max);
+        ScrollArea::vertical()
+            .id_salt("reasoning-dock")
+            .max_height(height)
+            .min_scrolled_height(0.0)
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for text in thought.into_iter().rev() {
+                    crate::markdown::show(ui, text, true);
+                }
+            });
+        if let Some(delta) = panels::released_split(ui, "thinking-split", 20.0 - height..=max - height) {
+            self.dividers.thinking = (height + delta).round() as i32;
+            self.remember_chat_layout();
+            ui.request_repaint();
         }
     }
 
@@ -883,7 +896,7 @@ impl TranscriptApp {
             && ui.memory(|memory| memory.has_focus(composer_id))
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Enter));
         let response = ScrollArea::vertical().id_salt("composer-scroll")
-            .max_height(input_height).auto_shrink([false, false]).show(ui, |ui| {
+            .max_height(input_height).min_scrolled_height(0.0).auto_shrink([false, false]).show(ui, |ui| {
                 ui.add_enabled(
                     self.server_beurt,
                     egui::TextEdit::multiline(&mut self.input)
@@ -1176,6 +1189,88 @@ mod geometry_tests {
                 saved.try_recv(),
                 Ok(SettingsCommand::SaveChatLayout { composer, thinking }) if [composer, thinking] == expected
             ));
+        }
+    }
+
+    #[test]
+    fn reasoning_split_keeps_the_composer_visible_in_the_full_chat_layout() {
+        let mut app = TranscriptApp::new(TranscriptApp::demo_backend()).with_server(String::new());
+        let (_snapshot_tx, snapshots) = ampcc::unbounded_channel();
+        app.snapshots = snapshots;
+        app.dividers.composer = 150;
+        app.rows.push(Row::from(&Item::Reasoning(baudet_core::ReasoningItem {
+            item_id: "test/long-reasoning".into(),
+            text: "A long reasoning block.\n\n".repeat(50),
+            status: ItemStatus::Completed,
+        })));
+        let ctx = egui::Context::default();
+        let (settings_tx, _) = mpsc::channel();
+        app.settings_tx = settings_tx;
+        let paint = |app: &mut TranscriptApp, height, events| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, height))),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |ui| app.paint(ui))
+        };
+        let controls = |out: &egui::FullOutput| {
+            for label in [Texts::get(Key::SendButton), Texts::get(Key::CompactButton), Texts::get(Key::StopButton),
+                "Ask something…  (Ctrl+Enter sends)"] {
+                assert!(out.shapes.iter().any(|shape| matches!(
+                    &shape.shape,
+                    egui::Shape::Text(text) if text.galley.text() == label
+                        && shape.clip_rect.contains_rect(text.visual_bounding_rect())
+                )), "{label} is clipped in the full chat layout");
+            }
+        };
+        let grips = |out: &egui::FullOutput| {
+            let panel = egui::containers::PanelState::load(&ctx, egui::Id::new("composer")).unwrap().outer_rect;
+            let mut grips: Vec<_> = out.shapes.iter().filter_map(|shape| match &shape.shape {
+                egui::Shape::LineSegment { points, stroke }
+                    if stroke.color == palette::CHECK_BORDER && points[0].y == points[1].y
+                        && panel.contains(points[0]) && panel.contains(points[1]) =>
+                {
+                    Some(points[0].lerp(points[1], 0.5))
+                }
+                _ => None,
+            }).collect();
+            grips.sort_by(|a, b| a.y.total_cmp(&b.y));
+            grips
+        };
+        for height in [760.0, 360.0] {
+            let out = paint(&mut app, height, Vec::new());
+            controls(&out);
+            let before = grips(&out);
+            out.drop_without_applying_deltas();
+            assert_eq!(before.len(), 2, "grips at height {height}: {before:?}");
+
+            let start = before[1];
+            let end = start - egui::vec2(0.0, 14.0);
+            for (pos, pressed) in [(start, None), (start, Some(true)), (end, None), (end, Some(false))] {
+                let mut events = vec![egui::Event::PointerMoved(pos)];
+                if let Some(pressed) = pressed {
+                    events.push(egui::Event::PointerButton {
+                        pos, pressed, button: egui::PointerButton::Primary, modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                paint(&mut app, height, events).drop_without_applying_deltas();
+            }
+            let out = paint(&mut app, height, Vec::new());
+            controls(&out);
+            let after = grips(&out);
+            out.drop_without_applying_deltas();
+            assert_eq!(after.len(), 2);
+            assert_eq!(after[0], before[0]);
+            assert!(after[1].y < before[1].y, "inner grip should move up when the input grows");
+
+            app.thinking_hidden = true;
+            let out = paint(&mut app, height, Vec::new());
+            controls(&out);
+            assert_eq!(grips(&out), [before[0]]);
+            out.drop_without_applying_deltas();
+            app.thinking_hidden = false;
+            app.dividers.thinking = 0;
         }
     }
 
