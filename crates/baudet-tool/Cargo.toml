@@ -9,6 +9,7 @@ baudet-core = { workspace = true }
 baudet-store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+shlex = "2.0.1"
 thiserror = { workspace = true }
 tempfile = { workspace = true }
 

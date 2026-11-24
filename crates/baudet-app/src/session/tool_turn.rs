@@ -78,20 +78,17 @@ impl AppState {
         let exec = project.is_some_and(|project| project.is_granted(FolderPermission::Execute));
         let s = run.settings;
         let git_writes = read && write && s.git_allow_writes;
+        let git = if git_writes { GitTool::with_writes() } else { GitTool::read_only() };
         let mut tools: Vec<Box<dyn Tool + Send + Sync>> = Vec::new();
         if read {
             tools.push(Box::new(ReadFileTool));
-            tools.push(Box::new(if git_writes {
-                GitTool::with_writes()
-            } else {
-                GitTool::read_only()
-            }));
+            tools.push(Box::new(git));
         }
         if write {
             tools.push(Box::new(EditFileTool));
         }
         if exec {
-            tools.push(Box::new(ExecuteTool::for_project()));
+            tools.push(Box::new(ExecuteTool::for_project(git)));
         }
         tools.extend(run.servers.tools(&s.mcp_servers, &run.cancelled));
         let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();

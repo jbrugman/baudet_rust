@@ -1,6 +1,7 @@
 
 use crate::command_signature;
 use crate::execute_workspace::ExecuteWorkspace;
+use crate::git_tool::GitTool;
 use crate::process_runner::ProcessRunner;
 use crate::safe_commands;
 use crate::tool::{Tool, ToolContext, ToolResult};
@@ -16,11 +17,12 @@ const MAX_TIMEOUT_SECONDS: u64 = 600;
 #[derive(Debug, Default)]
 pub struct ExecuteTool {
     workspace: bool,
+    git: GitTool,
 }
 
 impl ExecuteTool {
-    pub fn for_project() -> Self {
-        Self { workspace: cfg!(any(target_os = "macos", target_os = "linux")) }
+    pub fn for_project(git: GitTool) -> Self {
+        Self { workspace: cfg!(any(target_os = "macos", target_os = "linux")), git }
     }
 }
 
@@ -58,7 +60,9 @@ impl Tool for ExecuteTool {
     }
 
     fn can_run_parallel(&self, args: &Value, ctx: &ToolContext) -> bool {
-        ctx.auto_approve_safe && args.get("command").and_then(Value::as_str).is_some_and(safe_commands::is_safe)
+        ctx.auto_approve_safe && args.get("command").and_then(Value::as_str).is_some_and(|command| {
+            safe_commands::is_safe(command) && crate::git_tool::shell_git_calls(command).is_none()
+        })
     }
 
     fn execute(&self, args: &Value, ctx: &ToolContext) -> ToolResult {
@@ -68,6 +72,9 @@ impl Tool for ExecuteTool {
         let Some(command) = args.get("command").and_then(Value::as_str).filter(|text| !text.trim().is_empty()) else {
             return fail("needs a command argument");
         };
+        if let Some(result) = self.git.execute_shell(command, ctx) {
+            return result;
+        }
         let Some(root) = ctx.root.as_deref() else {
             return fail("no project folder is linked to run in");
         };
@@ -547,7 +554,7 @@ mod workspace_tests {
             marker.display(),
             address.port(),
         );
-        let tool = ExecuteTool::for_project();
+        let tool = ExecuteTool::for_project(GitTool::read_only());
         let result = tool.execute(&json!({"command": command}), &ctx);
         assert!(result.ok, "{}", result.output);
         assert_eq!(fs::read_to_string(&marker).unwrap(), "private");

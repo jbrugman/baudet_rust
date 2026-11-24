@@ -28,9 +28,116 @@ impl GitTool {
         Self { writes: GitWrites::Enabled }
     }
 
+    pub(crate) fn execute_shell(&self, command: &str, ctx: &ToolContext) -> Option<ToolResult> {
+        let calls = match shell_git_calls(command)? {
+            Ok(calls) => calls,
+            Err(reason) => return Some(fail(reason)),
+        };
+        for call in &calls {
+            if let Some(reason) = git_command::check_allowed(
+                &call.command, &call.args, self.writes, call.message.as_deref(),
+            ) {
+                return Some(ToolResult::fail(reason));
+            }
+        }
+
+        let mut combined = ToolResult::default();
+        for call in calls {
+            let args = json!({"command": call.command, "args": call.args, "message": call.message});
+            let mut result = self.execute(&args, ctx);
+            if !combined.output.is_empty() {
+                result.output = format!("{}\n\n{}", combined.output, result.output);
+                result.duration_ms += combined.duration_ms;
+            }
+            combined = result;
+            if !combined.ok {
+                break;
+            }
+        }
+        Some(combined)
+    }
+
     pub fn writes_allowed(&self) -> bool {
         self.writes == GitWrites::Enabled
     }
+}
+
+pub(crate) struct ShellGitCall {
+    command: String,
+    args: Vec<String>,
+    message: Option<String>,
+}
+
+fn git_program(word: &str) -> bool {
+    matches!(word.rsplit(['/', '\\']).next(), Some("git" | "git.exe"))
+}
+
+pub(crate) fn shell_git_calls(command: &str) -> Option<Result<Vec<ShellGitCall>, &'static str>> {
+    let command = command.trim();
+    let mut parts = Vec::new();
+    let mut chars = command.char_indices().peekable();
+    let mut start = 0;
+    let mut quote = None;
+    let mut literal = true;
+    while let Some((index, ch)) = chars.next() {
+        match (quote, ch) {
+            (Some('\''), '\'') | (Some('"'), '"') => quote = None,
+            (Some('\''), _) => {}
+            (_, '\\') => {
+                if chars.next().is_none_or(|(_, next)| next == '\n' || next == '\r') {
+                    literal = false;
+                }
+            }
+            (_, '$' | '`') => literal = false,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, '&' | '|' | ';' | '\n' | '\r' | '<' | '>') => {
+                parts.push(&command[start..index]);
+                if ch == '&' && chars.peek().is_some_and(|(_, next)| *next == '&') {
+                    let (end, _) = chars.next().unwrap();
+                    start = end + 1;
+                } else {
+                    literal = false;
+                    start = index + ch.len_utf8();
+                }
+            }
+            (None, '*' | '?' | '[' | '~' | '#' | '(' | ')' | '{' | '}') => literal = false,
+            _ => {}
+        }
+    }
+    parts.push(&command[start..]);
+    if !parts.iter().any(|part| shlex::Shlex::new(part).next().as_deref().is_some_and(git_program)) {
+        return None;
+    }
+    const UNSUPPORTED: &str =
+        "shell Git commands must be literal Git calls, optionally joined with &&. Use the git tool for supported operations.";
+    if !literal || quote.is_some() {
+        return Some(Err(UNSUPPORTED));
+    }
+    Some(parts.into_iter().map(|part| {
+        let words = shlex::split(part).ok_or(UNSUPPORTED)?;
+        let [program, verb, args @ ..] = words.as_slice() else { return Err(UNSUPPORTED) };
+        if !git_program(program) {
+            return Err(UNSUPPORTED);
+        }
+        let (verb, args, message) = match (verb.as_str(), args) {
+            ("commit", [flag, message]) if matches!(flag.as_str(), "-m" | "--message") => {
+                ("commit", &[][..], Some(message.clone()))
+            }
+            ("commit", [message]) if message.starts_with("--message=") => {
+                ("commit", &[][..], Some(message["--message=".len()..].to_owned()))
+            }
+            ("commit", _) => return Err("use git commit -m with one literal message, or call the git tool."),
+            ("diff", [flag, rest @ ..]) if matches!(flag.as_str(), "--staged" | "--cached") => {
+                ("diff_staged", rest, None)
+            }
+            ("add", [flag, rest @ ..]) if flag == "--" => ("add", rest, None),
+            ("ls-files", args) => ("ls_files", args, None),
+            ("rev-parse", args) => ("rev_parse", args, None),
+            (verb, args) => (verb, args, None),
+        };
+        Ok(ShellGitCall { command: verb.into(), args: args.to_vec(), message })
+    }).collect())
 }
 
 impl Tool for GitTool {
@@ -299,6 +406,73 @@ mod tests {
         let staged =
             Command::new("git").args(["diff", "--cached", "--name-only"]).current_dir(dir.path()).output().unwrap();
         assert_eq!(String::from_utf8(staged.stdout).unwrap().trim(), "a.txt");
+    }
+
+    #[test]
+    fn run_command_routes_git_to_the_same_permissions_and_approval() {
+        use crate::execute_tool::ExecuteTool;
+
+        let folder = repo();
+        let git = |args: &[&str]| {
+            let result = Command::new("git").args(args).current_dir(folder.path()).output().unwrap();
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+            String::from_utf8(result.stdout).unwrap().trim().to_owned()
+        };
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        fs::write(folder.path().join("README.md"), "fixture\n").unwrap();
+
+        let denied = recorder(false);
+        let mut context = ctx(folder.path(), true, true, &denied);
+        context.exec_granted = true;
+        let tool = ExecuteTool::for_project(GitTool::with_writes());
+        let invoke = |tool: &ExecuteTool, command: &str, context: &ToolContext| {
+            tool.execute(&json!({"command": command}), context)
+        };
+        assert!(invoke(&tool, "/usr/bin/git status", &context).ok);
+        assert!(denied.asked.lock().unwrap().is_empty());
+
+        let read_only = ExecuteTool::for_project(GitTool::read_only());
+        let add = "git add README.md";
+        let refusal = invoke(&read_only, add, &context);
+        assert!(refusal.output.contains("Git writes are disabled"));
+        assert!(denied.asked.lock().unwrap().is_empty());
+
+        let chain = "git add README.md && git commit -m 'Update README.md'";
+        let refusal = invoke(&tool, chain, &context);
+        assert!(refusal.output.contains("user declined this git write"));
+        assert_eq!(denied.asked.lock().unwrap().as_slice(), ["git add -- README.md"]);
+        assert!(git(&["diff", "--cached", "--name-only"]).is_empty());
+
+        let allowed = recorder(true);
+        let mut context = ctx(folder.path(), true, true, &allowed);
+        context.exec_granted = true;
+        for command in ["git add README.md && echo unexpected", "git add README.md && git reset --hard"] {
+            assert!(!invoke(&tool, command, &context).ok);
+        }
+        assert!(allowed.asked.lock().unwrap().is_empty());
+        assert!(git(&["diff", "--cached", "--name-only"]).is_empty());
+
+        let result = invoke(&tool, chain, &context);
+        assert!(result.ok, "{}", result.output);
+        assert_eq!(git(&["log", "-1", "--format=%s"]), "Update README.md");
+        assert_eq!(allowed.asked.lock().unwrap().as_slice(), [
+            "git add -- README.md", "git commit -m \"Update README.md\"",
+        ]);
+    }
+
+    #[test]
+    fn shell_git_parsing_preserves_literals_and_refuses_shell_expansions() {
+        let calls = shell_git_calls("git diff --staged && git rev-parse HEAD && git ls-files").unwrap().unwrap();
+        assert_eq!(calls.iter().map(|call| call.command.as_str()).collect::<Vec<_>>(),
+            ["diff_staged", "rev_parse", "ls_files"]);
+        let calls = shell_git_calls("git add -- 'a && b.md' && git commit -m 'Keep $literal'").unwrap().unwrap();
+        assert_eq!(calls[0].args, ["a && b.md"]);
+        assert_eq!(calls[1].message.as_deref(), Some("Keep $literal"));
+        for command in ["git add *.md", "git add \"$FILE\"", "git status | cat", "echo ready; git status"] {
+            assert!(shell_git_calls(command).unwrap().is_err(), "{command}");
+        }
+        assert!(shell_git_calls("echo 'git status'").is_none());
     }
 
     #[test]
