@@ -402,6 +402,8 @@ impl TranscriptApp {
             if let Some(result) = snapshot.compaction.take() {
                 self.compaction = Some(result);
                 self.compacting = false;
+            } else if snapshot.reason.is_some() && !self.compacting {
+                self.compaction = None;
             }
             if let Some((mut text, image)) = snapshot.rejected_draft.take() {
                 if !text.is_empty() && !self.input.is_empty() {
@@ -425,8 +427,8 @@ impl TranscriptApp {
             self.status = match (&report.reason, &self.fell_back, report.busy, report.loading) {
                 (Some(reason), _, _, _) => reason.clone(),
                 (None, Some(reason), false, false) if !reason.is_empty() => reason.clone(),
-                (None, _, true, _) => "streaming".to_string(),
-                (None, _, _, true) => "loading session".to_string(),
+                (None, _, true, _) => Texts::get(Key::Streaming).to_owned(),
+                (None, _, _, true) => Texts::get(Key::LoadingSession).to_owned(),
                 (None, _, _, false) => self.status_line(report.stored, report.turns),
             };
         }
@@ -447,11 +449,6 @@ impl TranscriptApp {
                 if ui.put(panels::toggle_rect(band, true), panels::Toggle::new(east, true)).clicked() {
                     self.show_filetree = !self.show_filetree;
                 }
-                let status = band.shrink2(egui::vec2(panels::TOGGLE_WIDTH + 6.0, 0.0));
-                if !self.status.is_empty() && status.width() > 0.0 {
-                    let status_rect = egui::Rect::from_min_size(status.min, egui::vec2(status.width(), panels::TOGGLE_SIZE));
-                    ui.put(status_rect, egui::Label::new(&self.status).truncate());
-                }
             });
         });
         ui.set_clip_rect(clip);
@@ -459,6 +456,7 @@ impl TranscriptApp {
         let tab = self.tab();
         if tab == Tab::Chat {
             self.honesty_footer(ui);
+            self.chat_status(ui);
             let max = (ui.available_height() - 36.0).max(0.0);
             let height = self.composer_height(max);
             Panel::bottom("composer").exact_size(height).show_separator_line(false)
@@ -581,10 +579,13 @@ impl TranscriptApp {
                     self.current_session = Some(id.clone());
                     let _ = self.intents.send(Intent::LoadSession(id));
                     self.loading = true;
-                    self.status = "loading session".to_string();
+                    self.status = Texts::get(Key::LoadingSession).to_owned();
                 }
                 SidebarIntent::DeleteSession(id) => {
                     if self.deletion.is_none() {
+                        if !self.compacting {
+                            self.compaction = None;
+                        }
                         let (reply, result) = mpsc::channel();
                         if self.intents.send(Intent::DeleteSession { id, reply }).is_ok() {
                             self.deletion = Some(result);
@@ -758,13 +759,10 @@ impl TranscriptApp {
         if thought.is_empty() {
             return;
         }
-        ui.horizontal(|ui| {
-            ui.strong(Texts::get(Key::ReasoningLabel));
-            let arrow = if self.thinking_hidden { "▸" } else { "▾" };
-            if ui.small_button(arrow).on_hover_text(Texts::get(Key::TipThinkingToggle)).clicked() {
-                self.thinking_hidden = !self.thinking_hidden;
-            }
-        });
+        let toggle = if self.thinking_hidden { Key::ShowReasoning } else { Key::HideReasoning };
+        if ui.small_button(Texts::get(toggle)).on_hover_text(Texts::get(Key::TipThinkingToggle)).clicked() {
+            self.thinking_hidden = !self.thinking_hidden;
+        }
         if self.thinking_hidden {
             return;
         }
@@ -856,6 +854,23 @@ impl TranscriptApp {
         }
     }
 
+    fn chat_status(&self, ui: &mut egui::Ui) {
+        let busy = self.compacting || self.busy || self.loading || self.deletion.is_some();
+        let message = if self.compacting || !busy {
+            self.compaction.as_deref().unwrap_or(&self.status)
+        } else {
+            &self.status
+        };
+        Panel::bottom("chat-status").exact_size(28.0).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if busy {
+                    ui.add(egui::Spinner::new().size(16.0).color(palette::ACCENT));
+                }
+                ui.add(egui::Label::new(message).truncate()).on_hover_text(message);
+            });
+        });
+    }
+
     fn composer(&mut self, ui: &mut egui::Ui, max: f32) {
         let height = self.composer_height(max);
         let min = 88.0_f32.min(max);
@@ -883,9 +898,7 @@ impl TranscriptApp {
             .inner;
         if compact_clicked {
             self.start_compaction();
-        }
-        if let Some(message) = &self.compaction {
-            ui.add(egui::Label::new(message).wrap());
+            ui.request_repaint();
         }
 
         self.thinking_dock(ui);
@@ -1076,11 +1089,10 @@ mod geometry_tests {
             labels
         };
 
-        for (arrow, visible) in [("▾", true), ("▸", false), ("▾", true)] {
+        for (toggle, visible) in [(Key::HideReasoning, true), (Key::ShowReasoning, false), (Key::HideReasoning, true)] {
             let labels = paint(Vec::new());
-            assert!(labels.iter().any(|(text, _)| text == Texts::get(Key::ReasoningLabel)));
             assert_eq!(labels.iter().any(|(text, _)| text == "Thinking summary"), visible);
-            let pos = labels.iter().find(|(text, _)| text == arrow).unwrap().1;
+            let pos = labels.iter().find(|(text, _)| text == Texts::get(toggle)).unwrap().1;
             for pressed in [true, false] {
                 paint(vec![
                     egui::Event::PointerMoved(pos),
@@ -1122,6 +1134,82 @@ mod geometry_tests {
         output.drop_without_applying_deltas();
         assert!(visible, "the composer must show why nothing was compacted");
         assert!(!app.loading);
+    }
+
+    #[test]
+    fn compact_click_shows_progress_and_result_in_the_fixed_chat_status() {
+        let mut app = TranscriptApp::new(TranscriptApp::demo_backend())
+            .with_server("Ready for a local model".into());
+        let (intents, submitted) = mpsc::channel();
+        app.intents = intents;
+        let (snapshots, updates) = ampcc::unbounded_channel();
+        app.snapshots = updates;
+        let ctx = egui::Context::default();
+        let mut paint = |events| {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 360.0))),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(raw, |ui| app.paint(ui));
+            out.textures_delta.clear();
+            out
+        };
+        let panel = |id| egui::containers::PanelState::load(&ctx, egui::Id::new(id)).unwrap().outer_rect;
+        let text = |out: &egui::FullOutput, label: &str| {
+            out.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => Some(text.visual_bounding_rect()),
+                _ => None,
+            }).expect("the chat text is visible")
+        };
+
+        let out = paint(Vec::new());
+        let status = panel("chat-status");
+        let composer = panel("composer");
+        assert!(status.top() >= composer.bottom());
+        assert!(status.contains_rect(text(&out, "Ready for a local model")));
+        let pos = text(&out, Texts::get(Key::CompactButton)).center();
+        for pressed in [true, false] {
+            paint(vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos, pressed, button: egui::PointerButton::Primary, modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+        }
+        assert!(matches!(submitted.try_recv(), Ok(Intent::Compact)));
+        let spinner = |out: &egui::FullOutput| {
+            out.shapes.iter().any(|shape| matches!(
+                &shape.shape,
+                egui::Shape::Path(path) if path.stroke.width == 3.0 && path.points.iter().all(|&p| status.contains(p))
+            ))
+        };
+        let out = paint(Vec::new());
+        assert!(status.contains_rect(text(&out, Texts::get(Key::Summarising))));
+        assert!(spinner(&out));
+
+        let result = Texts::fmt(Key::CompactionDone, &[&364]);
+        let snapshot = |busy, reason, compaction| Snapshot {
+            rows: Vec::new(), busy, loading: false, stored: true, turns: (0, 0),
+            has_more_older: false, reason, rejected_draft: None, compaction,
+        };
+        snapshots.send(snapshot(false, None, Some(result.clone()))).unwrap();
+        let out = paint(Vec::new());
+        assert!(status.contains_rect(text(&out, &result)));
+        assert!(!spinner(&out));
+        assert_eq!(panel("composer"), composer);
+
+        snapshots.send(snapshot(true, None, None)).unwrap();
+        let out = paint(Vec::new());
+        assert!(status.contains_rect(text(&out, Texts::get(Key::Streaming))));
+        assert!(spinner(&out));
+
+        let error = "The local model server did not answer";
+        snapshots.send(snapshot(false, Some(error.into()), None)).unwrap();
+        let out = paint(Vec::new());
+        assert!(status.contains_rect(text(&out, error)));
+        assert!(!spinner(&out));
+        assert_eq!(panel("composer"), composer);
     }
 
     #[test]
