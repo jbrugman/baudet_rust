@@ -32,7 +32,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config ca-certificates bubblewrap \
+            build-essential pkg-config ca-certificates bubblewrap apparmor-profiles \
             libssl-dev libdrm-dev libgbm-dev libxkbcommon-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxinerama-dev libxxf86vm-dev \
             libwayland-dev wayland-protocols \
@@ -42,6 +42,16 @@ jobs:
       # rustup/darwin staat al op de runner; rust-toolchain.toml selects 1.95.0 + clippy + rustfmt.
       - name: Workspace-tests
         run: cargo test --workspace --locked --no-fail-fast
+
+      - name: Prepare Bubblewrap for Linux workspace isolation
+        run: |
+          profile=/etc/apparmor.d/bwrap-userns-restrict
+          if [[ ! -f "$profile" ]]; then
+            profile=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          fi
+          sudo apparmor_parser -r "$profile"
+          /usr/bin/bwrap --unshare-user --disable-userns --unshare-pid --unshare-net \
+            --unshare-ipc --unshare-uts --ro-bind / / -- /bin/true
 
       - name: Linux workspace isolation
         env:
