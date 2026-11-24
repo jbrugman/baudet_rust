@@ -556,11 +556,6 @@ fn form_row_with_gap(ui: &mut Ui, boven: f32, label: impl Into<String>, build: i
 }
 
 pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<SettingsCommand>) {
-    egui::Frame::NONE.inner_margin(egui::Margin { top: 15, right: 15, ..egui::Margin::ZERO })
-        .show(ui, |ui| form(ui, view, tx));
-}
-
-fn form(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<SettingsCommand>) {
     let mut commands = Vec::new();
     egui::Panel::bottom("settings-actions").show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -570,7 +565,13 @@ fn form(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<Setti
             }
         });
     });
-    egui::ScrollArea::vertical().id_salt("settings-form").auto_shrink([false, false]).show(ui, |ui| {
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+    let scroll = egui::ScrollArea::vertical()
+        .id_salt("settings-form")
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+        .content_margin(egui::Margin { top: 15, right: 15, ..egui::Margin::ZERO })
+        .auto_shrink([false, false]);
+    scroll.show(ui, |ui| {
         if view.blocked {
             ui.colored_label(palette::DIFF_REMOVED, "Your settings file is unreadable.");
             ui.label(dim("Saving is disabled until it is fixed, so a save can never replace what is still in that file."));
@@ -1140,6 +1141,21 @@ mod tests {
             let env = text_rect(Texts::get(Key::OrEnvVar));
             let model = text_rect(Texts::get(Key::ModelLabel));
             assert!(endpoint.top() < key.top() && key.top() < env.top() && env.top() < model.top());
+            let language = text_rect(view.language.native_name());
+            let (picker, clip) = output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.rect.contains(language.center()) && rect.stroke.width > 0.0 => {
+                    Some((rect.rect, shape.clip_rect))
+                }
+                _ => None,
+            }).expect("Language picker border");
+            assert!(picker.bottom() <= clip.bottom());
+            assert!(picker.top() >= clip.top() + 10.0);
+            let scrollbar = output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.rect.width() <= 7.0
+                    && rect.rect.height() > 40.0 && rect.rect.right() > width - 12.0 => Some(rect.rect),
+                _ => None,
+            }).expect("Settings scrollbar");
+            assert!(scrollbar.left() - picker.right() >= 15.0);
             let url = text_rect(&view.base_url);
             if width < 300.0 {
                 assert!(url.top() >= endpoint.bottom());
@@ -1150,7 +1166,9 @@ mod tests {
             assert!(output.shapes.iter().any(|shape| matches!(
                 &shape.shape,
                 egui::Shape::Rect(field) if field.fill == palette::FIELD
-                    && field.rect.contains(url.center()) && field.rect.right() > width - 25.0
+                    && field.rect.contains(url.center())
+                    && field.rect.right() >= width - 26.0
+                    && scrollbar.left() - field.rect.right() >= 15.0
             )));
             assert!(!output.shapes.iter().any(|shape| matches!(
                 &shape.shape,
@@ -1158,6 +1176,14 @@ mod tests {
             )));
             let save = text_rect(Texts::get(Key::SaveButton));
             assert!(save.bottom() > screen.bottom() - 40.0);
+            output.drop_without_applying_deltas();
+
+            let mut hovered = input();
+            hovered.events.push(egui::Event::PointerMoved(scrollbar.center()));
+            let output = ctx.run_ui(hovered, |ui| body(ui, &mut view, &tx));
+            assert!(output.shapes.iter().any(|shape| matches!(
+                &shape.shape, egui::Shape::Rect(rect) if rect.rect == scrollbar
+            )));
             output.drop_without_applying_deltas();
 
             let mut scrolled = input();
