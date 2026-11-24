@@ -24,7 +24,7 @@ jobs:
     # Zelfde Linux als de lokale verificatie-container; ubuntu-24.04 is ook hier de basis.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
 
       # Systeem-sysdeps voor eframe/0.36 (features wayland+x11) en rfd (xdg-portal+wayland).
       # Rust bouwt deze crates ook zonder X-server, maar pkg-config vindt ze alleen met headers.
