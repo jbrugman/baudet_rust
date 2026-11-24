@@ -34,6 +34,21 @@ pub struct AppState {
     turn_counter: AtomicUsize,
     project: Mutex<Option<String>>,
     live: Mutex<Option<Arc<Mutex<TurnHandle>>>>,
+    last_turn: Mutex<Option<TurnReport>>,
+}
+
+#[derive(Clone)]
+pub struct TurnReport {
+    pub response_id: Option<String>,
+    pub usage: Option<baudet_core::Usage>,
+    pub final_event: Option<String>,
+}
+
+pub struct ContextStatus {
+    pub messages: usize,
+    pub reading: baudet_store::ContextReading,
+    pub server_session: Option<String>,
+    pub last_turn: Option<TurnReport>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -136,6 +151,7 @@ impl AppState {
                 active.messages = retained.to_vec();
                 active.summary = Some(summary.clone());
                 active.previous_response_id = None;
+                *self.last_turn.lock().unwrap() = None;
             }
             Ok(outcome)
         })();
@@ -154,6 +170,7 @@ impl AppState {
             live_turns: AtomicUsize::new(0),
             turn_counter: AtomicUsize::new(0),
             live: Mutex::new(None),
+            last_turn: Mutex::new(None),
             project: Mutex::new(None),
         }
     }
@@ -163,6 +180,7 @@ impl AppState {
     }
 
     pub fn replace_backend(&self, backend: Arc<dyn Backend>) {
+        *self.last_turn.lock().unwrap() = None;
         *self.backend.lock().unwrap() = backend;
         self.active.lock().unwrap().previous_response_id = None;
     }
@@ -225,6 +243,40 @@ impl AppState {
         };
         limits.max_output_tokens = choices.max_output_tokens.unwrap_or(0);
         limits
+    }
+
+    pub fn context_status(&self, settings: &baudet_settings::Settings, tools_active: bool) -> ContextStatus {
+        let choices = self.choices.lock().unwrap().clone();
+        let limits = Self::context_limits(&*self.backend(), settings, &choices);
+        let active = self.active.lock().unwrap();
+        let mut reading = limits.context_reading(&active.messages);
+        if reading.trimming {
+            reading.used += active.summary.as_deref().map_or(0, |summary| summary.chars().count().div_ceil(3) as u64);
+        } else {
+            reading.used = active.estimate_tokens();
+        }
+        if reading.budget != 0 {
+            reading.percent = reading.used.saturating_mul(100) / u64::from(reading.budget);
+        }
+        let server_session = if tools_active && Self::server_session_eligible(settings, &limits) {
+            active.previous_response_id.clone()
+        } else {
+            None
+        };
+        ContextStatus {
+            messages: active.messages.len(),
+            reading,
+            server_session,
+            last_turn: self.last_turn.lock().unwrap().clone(),
+        }
+    }
+
+    fn server_session_eligible(settings: &baudet_settings::Settings, limits: &baudet_store::ContextLimits) -> bool {
+        settings.use_server_session
+            && settings.use_responses_api
+            && settings.store_responses
+            && settings.protocol_word() != Some("chat_completions")
+            && limits.strategy.supports_server_session()
     }
 
     fn send_inner(
@@ -370,6 +422,11 @@ impl AppState {
 
     pub fn apply(&self, event: &ThreadEvent) -> bool {
         let mut active = self.active.lock().unwrap();
+        if let ThreadEvent::TurnCompleted { response_id, usage, final_event, .. } = event {
+            *self.last_turn.lock().unwrap() = Some(TurnReport {
+                response_id: response_id.clone(), usage: *usage, final_event: final_event.clone(),
+            });
+        }
         let mut rows = self.rows.lock().unwrap();
         let mut emitter = Emitter::storing(&mut rows, &mut active.items, "", "");
         match event {
@@ -437,6 +494,7 @@ impl AppState {
     }
 
     pub fn adopt(&self, session: Session) {
+        *self.last_turn.lock().unwrap() = None;
         let items = session.items.clone();
         *self.active.lock().unwrap() = session;
         self.draw(&items);
@@ -498,6 +556,7 @@ impl AppState {
     }
 
     pub fn switch_to(&self, transcript: Transcript, mut session: Session) -> Option<String> {
+        *self.last_turn.lock().unwrap() = None;
         if session.project_id.is_none() {
             session.project_id = self.project.lock().unwrap().clone();
         }

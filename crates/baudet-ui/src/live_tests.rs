@@ -182,7 +182,8 @@ fn deleting_the_active_conversation_waits_for_the_turn_and_keeps_the_next_draft(
 
     intents.send(Intent::Submit("the next conversation".into(), None)).unwrap();
     wait_for_snapshot(&mut frames, |frame| {
-        !frame.busy && frame.turns.0 > 0 && frame.rows.iter().any(|row| row.body == "the next conversation")
+        !frame.busy && state.disk_items().is_some_and(|count| count > 0)
+            && frame.rows.iter().any(|row| row.body == "the next conversation")
     });
     assert_ne!(state.session_id(), id);
     assert_eq!(catalog.sessions_in(None).len(), 1);

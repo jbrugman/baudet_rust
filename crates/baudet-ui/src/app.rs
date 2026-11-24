@@ -13,7 +13,7 @@ use crate::panels::{self, Changes, SidebarIntent, Workspace, NO_FOLDER, NO_READ}
 use crate::rows::Row;
 use crate::settings::{self, SettingsCommand, SettingsEvent, SettingsView};
 use crate::sidebar::SidebarModel;
-use baudet_app::session::pump;
+use baudet_app::session::{pump, ContextStatus};
 use baudet_app::AppState;
 use baudet_backend::protocol::Protocol;
 use baudet_backend::scripted::{Script, ScriptedBackend};
@@ -57,8 +57,7 @@ struct Snapshot {
     rows: Vec<Row>,
     busy: bool,
     loading: bool,
-    stored: bool,
-    turns: (usize, usize),
+    context: Option<ContextStatus>,
     has_more_older: bool,
     reason: Option<String>,
     rejected_draft: Option<(String, Option<String>)>,
@@ -429,7 +428,7 @@ impl TranscriptApp {
                 (None, Some(reason), false, false) if !reason.is_empty() => reason.clone(),
                 (None, _, true, _) => Texts::get(Key::Streaming).to_owned(),
                 (None, _, _, true) => Texts::get(Key::LoadingSession).to_owned(),
-                (None, _, _, false) => self.status_line(report.stored, report.turns),
+                (None, _, _, false) => report.context.as_ref().map_or_else(|| self.status.clone(), Self::status_line),
             };
         }
         self.poll_deletion();
@@ -533,15 +532,31 @@ impl TranscriptApp {
         self.active_tab.unwrap_or(Tab::Chat)
     }
 
-    fn status_line(&self, stored: bool, turns: (usize, usize)) -> String {
-        let (on_disk, on_screen) = turns;
-        if !stored {
-            return format!("{} rules, not stored", on_screen);
+    fn status_line(status: &ContextStatus) -> String {
+        let reading = status.reading;
+        let compact = if !reading.trimming && reading.percent > 80 {
+            Texts::get(Key::CompactRecommended)
+        } else {
+            ""
+        };
+        let context = if reading.budget == 0 {
+            format!("~{} / ? tokens (?%){compact}", reading.used)
+        } else {
+            format!("~{} / {} tokens ({}%){compact}", reading.used, reading.budget, reading.percent)
+        };
+        if let Some(turn) = &status.last_turn {
+            let id = turn.response_id.as_deref().unwrap_or("?");
+            let tokens = |value: Option<i64>| value.map_or_else(|| "?".to_owned(), |value| value.to_string());
+            let usage = turn.usage.unwrap_or_default();
+            let event = Texts::fmt(Key::LastEvent, &[&turn.final_event.as_deref().unwrap_or("?")]);
+            format!("id={id} · prompt={} · completion={} · {event} · {context}", tokens(usage.prompt), tokens(usage.completion))
+        } else {
+            let mode = status.server_session.as_deref().map_or_else(
+                || Texts::get(Key::ClientReplay).to_owned(),
+                |id| Texts::fmt(Key::ServerSession, &[&id]),
+            );
+            format!("{} · {context} · {mode}", Texts::fmt(Key::MessagesCount, &[&status.messages]))
         }
-        if on_disk > on_screen {
-            return format!("{} of {} rules — scroll up for older", on_screen, on_disk);
-        }
-        format!("{} rules, saved", on_screen)
     }
 
     pub fn frames(&self) -> u32 {
@@ -751,22 +766,27 @@ impl TranscriptApp {
         }
     }
 
-    fn thinking_dock(&mut self, ui: &mut egui::Ui) {
-        let thought: Vec<&str> = self.rows.iter().rev()
+    fn reasoning_rows(&self) -> impl Iterator<Item = &Row> {
+        self.rows.iter().rev()
             .take_while(|row| row.kind != baudet_core::ItemKind::UserMessage)
             .filter(|row| row.kind == baudet_core::ItemKind::Reasoning && !row.body.is_empty())
-            .map(|row| row.body.as_str()).collect();
-        if thought.is_empty() {
-            return;
-        }
+    }
+
+    fn reasoning_toggle(&mut self, ui: &mut egui::Ui) {
         let toggle = if self.thinking_hidden { Key::ShowReasoning } else { Key::HideReasoning };
-        if ui.small_button(Texts::get(toggle)).on_hover_text(Texts::get(Key::TipThinkingToggle)).clicked() {
+        if ui.button(Texts::get(toggle)).on_hover_text(Texts::get(Key::TipThinkingToggle)).clicked() {
             self.thinking_hidden = !self.thinking_hidden;
         }
+    }
+
+    fn thinking_dock(&mut self, ui: &mut egui::Ui) {
         if self.thinking_hidden {
             return;
         }
-
+        let thought: Vec<&str> = self.reasoning_rows().map(|row| row.body.as_str()).collect();
+        if thought.is_empty() {
+            return;
+        }
         let separation = panels::SPLIT_GRIP_HEIGHT + 2.0 * ui.spacing().item_spacing.y;
         let max = (ui.available_height() - separation - 32.0).max(0.0);
         if max < 20.0 {
@@ -888,14 +908,32 @@ impl TranscriptApp {
             });
         }
         let can_start = self.server_beurt && !self.busy && !self.loading && self.deletion.is_none();
-        let (send_clicked, compact_clicked, stop_clicked) = ui
-            .horizontal_wrapped(|ui| {
-                let send = ui.add_enabled(can_start, egui::Button::new(Texts::get(Key::SendButton))).clicked();
-                let compact = ui.add_enabled(can_start, egui::Button::new(Texts::get(Key::CompactButton))).clicked();
-                let stop = ui.add_enabled(self.busy, egui::Button::new(Texts::get(Key::StopButton))).clicked();
-                (send, compact, stop)
-            })
-            .inner;
+        let (send_clicked, compact_clicked, stop_clicked) = ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(9.0, 8.0);
+            let stop_text = Texts::get(Key::StopButton);
+            let font = egui::TextStyle::Button.resolve(ui.style());
+            let text_width = ui.painter().layout_no_wrap(stop_text.to_owned(), font, palette::TEXT).size().x;
+            let stop_width = (text_width + 2.0 * ui.spacing().button_padding.x)
+                .max(ui.spacing().interact_size.x);
+            let left_width = (ui.available_width() - stop_width - ui.spacing().item_spacing.x).max(0.0);
+            let (send, compact) = ui.allocate_ui_with_layout(
+                egui::vec2(left_width, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(left_width);
+                    ui.horizontal_wrapped(|ui| {
+                        let send = ui.add_enabled(can_start, egui::Button::new(Texts::get(Key::SendButton))).clicked();
+                        let compact = ui.add_enabled(can_start, egui::Button::new(Texts::get(Key::CompactButton))).clicked();
+                        if self.reasoning_rows().next().is_some() {
+                            self.reasoning_toggle(ui);
+                        }
+                        (send, compact)
+                    }).inner
+                },
+            ).inner;
+            let stop = ui.add_enabled(self.busy, egui::Button::new(stop_text).min_size(egui::vec2(stop_width, 0.0))).clicked();
+            (send, compact, stop)
+        }).inner;
         if compact_clicked {
             self.start_compaction();
             ui.request_repaint();
@@ -1080,7 +1118,10 @@ mod geometry_tests {
         let ctx = egui::Context::default();
         let mut paint = |events| {
             let raw = egui::RawInput { events, ..Default::default() };
-            let output = ctx.run_ui(raw, |ui| app.thinking_dock(ui));
+            let output = ctx.run_ui(raw, |ui| {
+                app.reasoning_toggle(ui);
+                app.thinking_dock(ui);
+            });
             let labels: Vec<_> = output.shapes.iter().filter_map(|shape| {
                 let egui::Shape::Text(text) = &shape.shape else { return None };
                 Some((text.galley.text().to_owned(), text.pos + text.galley.size() / 2.0))
@@ -1137,6 +1178,44 @@ mod geometry_tests {
     }
 
     #[test]
+    fn status_line_matches_kotlin_and_uses_live_turn_metadata() {
+        let state = AppState::new(TranscriptApp::demo_backend(), "");
+        let mut settings = baudet_settings::Settings {
+            context_budget_tokens: 24_576,
+            ..Default::default()
+        };
+        let context = state.context_status(&settings, false);
+        assert_eq!(
+            TranscriptApp::status_line(&context),
+            "0 messages · ~0 / 24576 tokens (0%) · client-side replay"
+        );
+        let mut session = baudet_store::session::Session::new("fixture", "");
+        session.messages.push(baudet_core::Msg::user("Explain this function."));
+        session.previous_response_id = Some("resp_previous".into());
+        state.adopt(session);
+        let context = state.context_status(&settings, false);
+        assert!(TranscriptApp::status_line(&context).starts_with("1 messages · ~"));
+        assert!(context.reading.used > 0);
+        settings.context_strategy = baudet_settings::config::ContextStrategy::StopAtLimit;
+        settings.use_server_session = true;
+        settings.use_responses_api = true;
+        settings.store_responses = true;
+        settings.protocol = Some("responses".into());
+        assert!(TranscriptApp::status_line(&state.context_status(&settings, true)).ends_with("server session resp_previous"));
+        assert!(TranscriptApp::status_line(&state.context_status(&settings, false)).ends_with("client-side replay"));
+
+        state.apply(&ThreadEvent::TurnCompleted {
+            thread_id: "th_1".into(), turn_id: "tu_1".into(), response_id: Some("resp_current".into()),
+            usage: Some(baudet_core::Usage::new(Some(48), None, None)),
+            final_event: Some("response.completed".into()), incomplete_reason: None,
+        });
+        let line = TranscriptApp::status_line(&state.context_status(&settings, true));
+        assert!(line.starts_with("id=resp_current · prompt=48 · completion=? · last=response.completed · ~"));
+        state.clear_session();
+        assert!(state.context_status(&settings, true).last_turn.is_none());
+    }
+
+    #[test]
     fn compact_click_shows_progress_and_result_in_the_fixed_chat_status() {
         let mut app = TranscriptApp::new(TranscriptApp::demo_backend())
             .with_server("Ready for a local model".into());
@@ -1190,7 +1269,7 @@ mod geometry_tests {
 
         let result = Texts::fmt(Key::CompactionDone, &[&364]);
         let snapshot = |busy, reason, compaction| Snapshot {
-            rows: Vec::new(), busy, loading: false, stored: true, turns: (0, 0),
+            rows: Vec::new(), busy, loading: false, context: None,
             has_more_older: false, reason, rejected_draft: None, compaction,
         };
         snapshots.send(snapshot(false, None, Some(result.clone()))).unwrap();
@@ -1311,6 +1390,17 @@ mod geometry_tests {
                         && shape.clip_rect.contains_rect(text.visual_bounding_rect())
                 )), "{label} is clipped in the full chat layout");
             }
+            let button = |key| out.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == Texts::get(key) =>
+                    Some(text.visual_bounding_rect()),
+                _ => None,
+            });
+            let compact = button(Key::CompactButton).unwrap();
+            let stop = button(Key::StopButton).unwrap();
+            let reasoning = button(Key::HideReasoning).or_else(|| button(Key::ShowReasoning)).unwrap();
+            assert!((compact.top() - reasoning.top()).abs() < 2.0);
+            assert!(reasoning.left() > compact.right() + 8.0);
+            assert!(stop.left() > reasoning.right());
         };
         let grips = |out: &egui::FullOutput| {
             let panel = egui::containers::PanelState::load(&ctx, egui::Id::new("composer")).unwrap().outer_rect;
@@ -1476,25 +1566,29 @@ fn worker_loop(
     let settings_file = root.as_ref().map(|path| baudet_settings::SettingsFile::at(path.join("settings.json")))
         .unwrap_or_else(baudet_settings::SettingsFile::default_location);
     let mut connection_problem: Option<String> = None;
-    let mut disk: Option<usize> = None;
     let mut draft_after_delete = false;
     let mut catalog = Some(catalog);
-    let publish = |state: &AppState, busy: bool, disk: Option<usize>, reason, rejected_draft| {
+    let publish = |state: &AppState, busy: bool, catalog: &Option<baudet_projects::Catalog>, reason, rejected_draft| {
         let rows = state.rows().iter().map(Row::from).collect::<Vec<_>>();
-        let on_screen = rows.len();
+        let loading = loading.load(Ordering::SeqCst);
+        let context = (!busy && !loading).then(|| {
+            let current = settings_file.read();
+            let settings = current.settings();
+            let project = state.project().and_then(|id| catalog.as_ref()?.project(&id));
+            state.context_status(settings, AppState::tools_active(settings, project.as_ref()))
+        });
         let _ = snapshots.send(Snapshot {
             rows,
             busy,
-            loading: loading.load(Ordering::SeqCst),
-            stored: state.persists(),
-            turns: (disk.unwrap_or(0), on_screen),
+            loading,
+            context,
             has_more_older: state.paging().0,
             reason,
             rejected_draft,
             compaction: None,
         });
     };
-    publish(&state, false, None, None, None);
+    publish(&state, false, &catalog, None, None);
     let mut learned_windows = std::collections::BTreeMap::new();
     let servers = Arc::new(std::sync::Mutex::new(baudet_tool::mcp::McpServers::default()));
     let mut deferred = std::collections::VecDeque::new();
@@ -1524,11 +1618,10 @@ fn worker_loop(
                 });
                 let rows: Vec<Row> = state.rows().iter().map(Row::from).collect();
                 let _ = snapshots.send(Snapshot {
-                    turns: (disk.unwrap_or(0), rows.len()),
                     rows,
                     busy: false,
                     loading: false,
-                    stored: state.persists(),
+                    context: None,
                     has_more_older: state.paging().0,
                     reason: None,
                     rejected_draft: None,
@@ -1538,7 +1631,7 @@ fn worker_loop(
             }
             Intent::Submit(text, image) => {
                 if let Some(reason) = &connection_problem {
-                    publish(&state, false, disk, Some(reason.clone()), Some((text, image)));
+                    publish(&state, false, &catalog, Some(reason.clone()), Some((text, image)));
                     continue;
                 }
                 if draft_after_delete && state.session_id().is_empty() {
@@ -1549,7 +1642,7 @@ fn worker_loop(
                     match opened {
                         Ok((transcript, session)) => { state.switch_to(transcript, session); }
                         Err(reason) => {
-                            publish(&state, false, disk, Some(reason), Some((text, image)));
+                            publish(&state, false, &catalog, Some(reason), Some((text, image)));
                             continue;
                         }
                     }
@@ -1570,11 +1663,11 @@ fn worker_loop(
                     let sent = match state.send_with_context(&text, image.clone(), &settings) {
                         Ok(sent) => sent,
                         Err(SendError::ContextLimit) => {
-                            publish(&state, false, disk, Some(Texts::get(Key::ContextTooLong).to_owned()), Some((text, image)));
+                            publish(&state, false, &catalog, Some(Texts::get(Key::ContextTooLong).to_owned()), Some((text, image)));
                             continue;
                         }
                         Err(SendError::Busy(_)) => {
-                            publish(&state, state.live_turns() > 0, disk, None, None);
+                            publish(&state, state.live_turns() > 0, &catalog, None, None);
                             continue;
                         }
                     };
@@ -1582,7 +1675,7 @@ fn worker_loop(
                 } else {
                     None
                 };
-                publish(&state, true, disk, None, None);
+                publish(&state, true, &catalog, None, None);
                 let folder = Arc::clone(&state);
                 let watched = Arc::new(AtomicBool::new(true));
                 let flag = Arc::clone(&watched);
@@ -1619,7 +1712,7 @@ fn worker_loop(
                 });
                 let mut pending_configuration = None;
                 while watched.load(Ordering::SeqCst) {
-                    publish(&state, true, disk, None, None);
+                    publish(&state, true, &catalog, None, None);
                     match intents.recv_timeout(std::time::Duration::from_millis(32)) {
                         Ok(Intent::UseCatalog(replacement)) => catalog = Some(replacement),
                         Ok(Intent::Stop) => {
@@ -1632,7 +1725,7 @@ fn worker_loop(
                             cancelled.store(true, Ordering::Relaxed);
                             state.cancel_turn();
                             drain.join().ok();
-                            publish(&state, false, disk, None, None);
+                            publish(&state, false, &catalog, None, None);
                             return;
                         }
                         Ok(Intent::Configure(backend, settings)) => {
@@ -1646,7 +1739,7 @@ fn worker_loop(
                     }
                 }
                 let failure = drain.join().ok().flatten();
-                disk = after_turn(&state, &catalog, &snapshots);
+                after_turn(&state, &catalog, &snapshots);
                 if let Some((backend, settings)) = pending_configuration {
                     apply_configuration(&state, backend, *settings, &mut connection_problem);
                 }
@@ -1657,9 +1750,11 @@ fn worker_loop(
                         learned_windows.insert(key.clone(), tokens);
                         let _ = settings_tx.send(SettingsCommand::LearnContext { key, tokens });
                     }
-                    publish(&state, false, disk, Some(Texts::get(Key::ContextOverflow).to_owned()), None);
+                    publish(&state, false, &catalog, Some(Texts::get(Key::ContextOverflow).to_owned()), None);
                     continue;
                 }
+                publish(&state, false, &catalog, failure, None);
+                continue;
             }
             Intent::Stop => state.cancel_turn(),
             Intent::Configure(backend, settings) => {
@@ -1668,15 +1763,14 @@ fn worker_loop(
             Intent::LoadSession(id) => {
                 let Some(project) = catalog.as_ref().and_then(|catalog| catalog.session_assignment(&id)) else {
                     loading.store(false, Ordering::SeqCst);
-                    publish(&state, false, disk, Some("conversation no longer exists in the catalogue".into()), None);
+                    publish(&state, false, &catalog, Some("conversation no longer exists in the catalogue".into()), None);
                     continue;
                 };
                 if !load_session(&state, root.as_deref(), &id, project.as_deref(), &loading, &snapshots) {
-                    publish(&state, state.live_turns() > 0, disk, None, None);
+                    publish(&state, state.live_turns() > 0, &catalog, None, None);
                     continue;
                 }
-                disk = state.disk_items();
-                publish(&state, state.live_turns() > 0, disk, None, None);
+                publish(&state, state.live_turns() > 0, &catalog, None, None);
             }
             Intent::NewSession(project) => {
                 match root.as_deref() {
@@ -1693,8 +1787,7 @@ fn worker_loop(
                                 rows: Vec::new(),
                                 busy: false,
                                 loading: false,
-                                stored: false,
-                                turns: (0, 0),
+                                context: None,
                                 has_more_older: state.paging().0,
                                 reason: Some(reason),
                                 rejected_draft: None,
@@ -1711,7 +1804,6 @@ fn worker_loop(
                         state.adopt(baudet_store::session::Session::new("", state.model()));
                     }
                 }
-                disk = state.disk_items();
             }
             Intent::DeleteSession { id, reply } => {
                 let result = (|| {
@@ -1728,11 +1820,10 @@ fn worker_loop(
                         state.switch_project(project.clone());
                         state.clear_session();
                         draft_after_delete = true;
-                        disk = None;
                     }
                     Ok(DeletedConversation { id, project, was_active, cleanup_warning })
                 })();
-                publish(&state, false, disk, None, None);
+                publish(&state, false, &catalog, None, None);
                 let _ = reply.send(result);
                 continue;
             }
@@ -1745,7 +1836,7 @@ fn worker_loop(
                 }
             }
         }
-        publish(&state, state.live_turns() > 0, disk, None, None);
+        publish(&state, state.live_turns() > 0, &catalog, None, None);
     }
 }
 
@@ -1753,15 +1844,14 @@ fn after_turn(
     state: &AppState,
     catalog: &Option<baudet_projects::Catalog>,
     report: &ampcc::UnboundedSender<Snapshot>,
-) -> Option<usize> {
+) {
     let id = state.session_id();
     if let Some(reason) = state.persist() {
         let _ = report.send(Snapshot {
             rows: Vec::new(),
             busy: false,
             loading: false,
-            stored: state.persists(),
-            turns: (state.disk_items().unwrap_or(0), 0),
+            context: None,
             has_more_older: state.paging().0,
             reason: Some(reason),
             rejected_draft: None,
@@ -1772,7 +1862,6 @@ fn after_turn(
         let (_, turns) = state.transcript_len();
         catalog.upsert_session(&id, Some(&state.model()), state.project().as_deref(), turns as i32).ok();
     }
-    state.disk_items()
 }
 
 fn load_session(
@@ -1802,8 +1891,7 @@ fn load_session(
                 rows: Vec::new(),
                 busy: false,
                 loading: false,
-                stored: state.persists(),
-                turns: state.transcript_len(),
+                context: None,
                 has_more_older: state.paging().0,
                 reason: Some(reason),
                 rejected_draft: None,

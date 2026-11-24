@@ -116,12 +116,11 @@ fn chatknoppen_staan_op_volgorde_boven_het_invoerveld() {
     for button in buttons {
         assert!(button.bottom() <= input.top(), "{button:?} hoort boven het invoerveld");
     }
-    for [first, next] in [[buttons[0], buttons[1]], [buttons[1], buttons[2]]] {
-        assert!(
-            next.top() >= first.bottom() || next.left() >= first.right() && next.bottom() > first.top(),
-            "onverwachte knopvolgorde {first:?}, {next:?}"
-        );
-    }
+    let [send, compact, stop] = buttons;
+    assert!(compact.top() >= send.bottom() || compact.left() >= send.right());
+    assert!(stop.left() > send.right().max(compact.right()));
+    assert!((stop.top() - send.top()).abs() < 2.0);
+    assert!(composer.right() - stop.right() < 30.0);
     out.drop_without_applying_deltas();
 }
 

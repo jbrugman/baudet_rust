@@ -109,13 +109,7 @@ impl AppState {
         let choices = self.choices.lock().unwrap().clone();
         let backend = self.backend();
         let limits = Self::context_limits(&*backend, s, &choices);
-        let previous = previous.as_deref().filter(|_| {
-            s.use_server_session
-                && s.use_responses_api
-                && s.store_responses
-                && s.protocol_word() != Some("chat_completions")
-                && limits.strategy.supports_server_session()
-        });
+        let previous = previous.as_deref().filter(|_| Self::server_session_eligible(s, &limits));
         let source =
             Source { backend: &*backend, choices, system, summary, limits, cancelled: Arc::clone(&ctx.1) };
         let outcome = tokio::runtime::Builder::new_current_thread().build().expect("local tool runtime").block_on(
@@ -133,11 +127,13 @@ impl AppState {
                     sink: &sink,
                 }),
         );
-        let (messages, response_id, failure) = match outcome {
+        let (messages, response_id, usage, final_event, failure) = match outcome {
             LoopOutcome::Completed { messages, final_turn, .. } => {
-                (messages, final_turn.response_id, final_turn.incomplete_reason)
+                (messages, final_turn.response_id, final_turn.usage, final_turn.final_event, final_turn.incomplete_reason)
             }
-            LoopOutcome::CapReached { messages, incomplete_reason, .. } => (messages, None, Some(incomplete_reason)),
+            LoopOutcome::CapReached { messages, incomplete_reason, .. } => {
+                (messages, None, None, None, Some(incomplete_reason))
+            }
         };
         self.active.lock().unwrap().messages.extend(messages.into_iter().filter(|msg| !msg.content.trim().is_empty()));
         if !ctx.1.load(Ordering::Relaxed) {
@@ -145,8 +141,8 @@ impl AppState {
                 thread_id: "th_1".into(),
                 turn_id,
                 response_id,
-                usage: None,
-                final_event: None,
+                usage,
+                final_event,
                 incomplete_reason: failure.clone(),
             });
         }
