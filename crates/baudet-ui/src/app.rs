@@ -747,7 +747,7 @@ impl TranscriptApp {
             });
         }
         for row in self.rows.iter().filter(|row| row.kind != baudet_core::ItemKind::Reasoning) {
-            paint_row(ui, row, self.settings.transcript_wrap());
+            paint_row(ui, row, self.current_session.as_deref(), self.settings.transcript_wrap());
         }
     }
 
@@ -1085,6 +1085,75 @@ impl Drop for TranscriptApp {
 #[cfg(test)]
 mod geometry_tests {
     use super::*;
+
+    #[test]
+    fn transcript_details_click_independently_and_keep_session_state_separate() {
+        let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+        app.current_session = Some("first-session".into());
+        app.rows = [("first", "first tool output"), ("second", "second tool output")]
+            .into_iter()
+            .map(|(id, output)| {
+                let mut row = Row::from(&item_tool(id));
+                row.body = output.into();
+                row
+            })
+            .collect();
+        let ctx = egui::Context::default();
+        palette::install(&ctx);
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let paint = |app: &TranscriptApp, events| {
+            let input = egui::RawInput { events, ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| app.transcript(ui));
+            output.textures_delta.clear();
+            output
+        };
+        let label = |shape: &egui::epaint::ClippedShape| match &shape.shape {
+            egui::Shape::Text(text) => Some((text.galley.text().to_owned(), text.visual_bounding_rect().center())),
+            _ => None,
+        };
+        let buttons = |output: &egui::FullOutput| {
+            output.shapes.iter().filter_map(label).filter_map(|(text, pos)| (text == "Details").then_some(pos))
+                .collect::<Vec<_>>()
+        };
+        let visible = |output: &egui::FullOutput| {
+            output.shapes.iter().filter_map(label).map(|(text, _)| text)
+                .filter(|text| text.ends_with("tool output")).collect::<Vec<_>>()
+        };
+        let click = |app: &TranscriptApp, pos| {
+            for pressed in [true, false] {
+                paint(app, vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+            }
+            paint(app, Vec::new())
+        };
+
+        let initial = paint(&app, Vec::new());
+        let positions = buttons(&initial);
+        assert_eq!(positions.len(), 2);
+        assert!(visible(&initial).is_empty());
+        for pos in &positions {
+            assert!(initial.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Rect(rect) if rect.fill == palette::BUTTON && rect.rect.contains(*pos)
+            )));
+        }
+
+        let first_open = click(&app, positions[0]);
+        assert_eq!(first_open.platform_output.cursor_icon, egui::CursorIcon::PointingHand);
+        assert_eq!(visible(&first_open), ["first tool output"]);
+        let both_open = click(&app, buttons(&first_open)[1]);
+        assert_eq!(visible(&both_open), ["first tool output", "second tool output"]);
+        let second_open = click(&app, buttons(&both_open)[0]);
+        assert_eq!(visible(&second_open), ["second tool output"]);
+
+        app.current_session = Some("second-session".into());
+        assert!(visible(&paint(&app, Vec::new())).is_empty());
+        app.current_session = Some("first-session".into());
+        assert_eq!(visible(&paint(&app, Vec::new())), ["second tool output"]);
+    }
 
     #[test]
     fn enter_inserts_a_newline_and_ctrl_enter_submits_the_draft_once() {
@@ -2302,7 +2371,7 @@ fn progress_indicator(ui: &mut egui::Ui) {
     ui.painter().circle_filled(centre, 2.5, palette::ACCENT);
 }
 
-fn paint_row(ui: &mut egui::Ui, row: &Row, wrap: bool) {
+fn paint_row(ui: &mut egui::Ui, row: &Row, session: Option<&str>, wrap: bool) {
     let label = kind_label(row);
     let frame = Frame::new().fill(row_background(ui, row)).corner_radius(6.0).inner_margin(8.0);
     frame.show(ui, |ui| {
@@ -2329,10 +2398,15 @@ fn paint_row(ui: &mut egui::Ui, row: &Row, wrap: bool) {
             progress_indicator(ui);
         }
         if row.collapsed {
-            egui::CollapsingHeader::new("details").icon(panels::compact_chevron).show(ui, |ui| {
-                let label = egui::Label::new(egui::RichText::new(&row.body).monospace().size(12.0)).selectable(true);
-                ui.add(if wrap { label.wrap() } else { label.extend() });
-            });
+            egui::CollapsingHeader::new("Details")
+                .id_salt(("row-details", session, &row.item_id))
+                .show_background(true)
+                .icon(panels::compact_chevron)
+                .show(ui, |ui| {
+                    let label = egui::Label::new(egui::RichText::new(&row.body).monospace().size(12.0)).selectable(true);
+                    ui.add(if wrap { label.wrap() } else { label.extend() });
+                })
+                .header_response.on_hover_cursor(egui::CursorIcon::PointingHand);
         } else if row.kind == baudet_core::ItemKind::AgentMessage {
             crate::markdown::show(ui, &row.body, wrap);
         } else {

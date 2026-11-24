@@ -2,6 +2,7 @@
 use baudet_core::{Item, ItemKind, ItemStatus};
 
 pub struct Row {
+    pub item_id: String,
     pub kind: ItemKind,
     pub status: ItemStatus,
     pub body: String,
@@ -12,16 +13,18 @@ pub struct Row {
 
 impl Row {
     pub fn from(item: &Item) -> Row {
+        let item_id = item.item_id().to_owned();
         let status = item.status();
         let kind = item.kind();
         match item {
-            Item::UserMessage(i) => Row { kind, status, body: i.text.clone(), subject: None, collapsed: false, image: None },
-            Item::AgentMessage(i) => Row { kind, status, body: i.text.clone(), subject: None, collapsed: false, image: None },
-            Item::Reasoning(i) => Row { kind, status, body: i.text.clone(), subject: None, collapsed: true, image: None },
+            Item::UserMessage(i) => Row { item_id, kind, status, body: i.text.clone(), subject: None, collapsed: false, image: None },
+            Item::AgentMessage(i) => Row { item_id, kind, status, body: i.text.clone(), subject: None, collapsed: false, image: None },
+            Item::Reasoning(i) => Row { item_id, kind, status, body: i.text.clone(), subject: None, collapsed: true, image: None },
             Item::CommandExecution(i) => {
-                Row { kind, status, body: i.output.clone(), subject: Some(i.command.clone()), collapsed: true, image: None }
+                Row { item_id, kind, status, body: i.output.clone(), subject: Some(i.command.clone()), collapsed: true, image: None }
             }
             Item::FileChange(i) => Row {
+                item_id,
                 kind,
                 status,
                 body: i.diff.clone().unwrap_or_default(),
@@ -30,6 +33,7 @@ impl Row {
                 image: None,
             },
             Item::ToolCall(i) => Row {
+                item_id,
                 kind,
                 status,
                 body: i.output.clone(),
@@ -38,6 +42,7 @@ impl Row {
                 image: None,
             },
             Item::Image(i) => Row {
+                item_id,
                 kind,
                 status,
                 body: String::new(),
@@ -47,6 +52,7 @@ impl Row {
                 image: Some((eframe::egui::Id::new((&i.item_id, &i.mime_type, &i.base64)), i.clone())),
             },
             Item::Plan(i) => Row {
+                item_id,
                 kind,
                 status,
                 body: i
@@ -59,7 +65,7 @@ impl Row {
                 collapsed: false,
                 image: None,
             },
-            Item::Error(i) => Row { kind, status, body: i.message.clone(), subject: None, collapsed: false, image: None },
+            Item::Error(i) => Row { item_id, kind, status, body: i.message.clone(), subject: None, collapsed: false, image: None },
         }
     }
 
