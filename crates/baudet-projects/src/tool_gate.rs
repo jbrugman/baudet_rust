@@ -11,7 +11,7 @@ pub enum ToolGate {
 
     NoFolder,
 
-    NoWrite,
+    NoPermissions,
 
     Active,
 }
@@ -22,7 +22,7 @@ impl ToolGate {
     }
 
     pub const fn warns(self) -> bool {
-        matches!(self, ToolGate::NoFolder | ToolGate::NoWrite)
+        matches!(self, ToolGate::NoFolder | ToolGate::NoPermissions)
     }
 }
 
@@ -37,8 +37,8 @@ pub fn decide(tools_on: bool, project: Option<&Project>) -> ToolGate {
     if project.folder_path.as_deref().unwrap_or("").trim().is_empty() {
         return ToolGate::NoFolder;
     }
-    if !project.is_granted(FolderPermission::Write) && !project.is_granted(FolderPermission::Execute) {
-        return ToolGate::NoWrite;
+    if !FolderPermission::all().into_iter().any(|permission| project.is_granted(permission)) {
+        return ToolGate::NoPermissions;
     }
     ToolGate::Active
 }
@@ -77,10 +77,10 @@ mod tests {
         for blank in [None, Some(""), Some("   ")] {
             assert_eq!(decide(true, Some(&project(blank, write_bits()))), ToolGate::NoFolder, "{blank:?}");
         }
-        assert_eq!(decide(true, Some(&project(Some("/tmp/x"), 0))), ToolGate::NoWrite);
+        assert_eq!(decide(true, Some(&project(Some("/tmp/x"), 0))), ToolGate::NoPermissions);
         assert_eq!(
             decide(true, Some(&project(Some("/tmp/x"), Permissions::encode([FolderPermission::Read])))),
-            ToolGate::NoWrite
+            ToolGate::Active
         );
         for extra in [FolderPermission::Write, FolderPermission::Execute] {
             let bits = Permissions::with(Permissions::encode([FolderPermission::Read]), extra, true);
@@ -91,12 +91,12 @@ mod tests {
     #[test]
     fn only_the_two_silent_surprises_are_worth_a_message() {
         assert!(ToolGate::NoFolder.warns());
-        assert!(ToolGate::NoWrite.warns());
+        assert!(ToolGate::NoPermissions.warns());
         for quiet in [ToolGate::Disabled, ToolGate::NoProject, ToolGate::Active] {
             assert!(!quiet.warns(), "{quiet:?} staat voor een bewuste keuze");
         }
         assert!(ToolGate::Active.is_active());
-        for inactive in [ToolGate::Disabled, ToolGate::NoProject, ToolGate::NoFolder, ToolGate::NoWrite] {
+        for inactive in [ToolGate::Disabled, ToolGate::NoProject, ToolGate::NoFolder, ToolGate::NoPermissions] {
             assert!(!inactive.is_active(), "{inactive:?}");
         }
     }
@@ -119,8 +119,10 @@ mod tests {
 
         assert_eq!(gate_for_session(&catalog, "s1", true), ToolGate::NoFolder);
 
+        catalog.set_folder(&project.id, Some("/tmp/baudet"), 0).unwrap();
+        assert_eq!(gate_for_session(&catalog, "s1", true), ToolGate::NoPermissions);
         catalog.set_folder(&project.id, Some("/tmp/baudet"), Permissions::encode([FolderPermission::Read])).unwrap();
-        assert_eq!(gate_for_session(&catalog, "s1", true), ToolGate::NoWrite);
+        assert_eq!(gate_for_session(&catalog, "s1", true), ToolGate::Active);
 
         catalog.set_folder(&project.id, Some("/tmp/baudet"), write_bits()).unwrap();
         assert_eq!(gate_for_session(&catalog, "s1", true), ToolGate::Active);

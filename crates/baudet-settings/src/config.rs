@@ -110,7 +110,7 @@ pub struct Settings {
     pub use_responses_api: bool,
     pub store_responses: bool,
     pub auto_approve_safe_commands: bool,
-    pub git_allow_writes: bool,
+    pub show_reasoning: bool,
     pub transcript_wrap: bool,
     pub honesty_footer: bool,
     pub system_prompt: String,
@@ -166,7 +166,7 @@ impl Default for Settings {
             use_responses_api: true,
             store_responses: true,
             auto_approve_safe_commands: true,
-            git_allow_writes: false,
+            show_reasoning: false,
             transcript_wrap: true,
             honesty_footer: true,
             system_prompt: String::new(),
@@ -471,12 +471,12 @@ mod tests {
     }
 
     #[test]
-    fn de_zeven_vinkjes_zijn_de_default_van_de_origineler_en_overleven_het_bestand() {
+    fn settings_flags_round_trip_and_ignore_the_old_git_switch() {
         let settings = Settings::default();
         assert!(settings.use_responses_api, "de origineler spreekt Responses");
         assert!(settings.store_responses);
         assert!(settings.auto_approve_safe_commands, "veilige alleen-lezen commando's gaan er automatisch door");
-        assert!(!settings.git_allow_writes, "git mag níét schrijven tot de persoon het aanzet");
+        assert!(!settings.show_reasoning);
         assert!(settings.transcript_wrap);
         assert!(settings.honesty_footer);
         assert!(settings.use_server_session);
@@ -485,15 +485,18 @@ mod tests {
             use_responses_api: false,
             store_responses: false,
             auto_approve_safe_commands: false,
-            git_allow_writes: true,
+            show_reasoning: true,
             transcript_wrap: false,
             honesty_footer: false,
             use_server_session: false,
             ..Default::default()
         };
         let json = serde_json::to_string(&flipped).unwrap();
-        assert!(json.contains("\"git_allow_writes\":true"), "het bestand noemt de git-vlag: {json}");
+        assert!(json.contains("\"show_reasoning\":true"));
+        assert!(!json.contains("git_allow_writes"));
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), flipped);
+        let legacy = serde_json::from_str::<Settings>(r#"{"git_allow_writes":false}"#).unwrap();
+        assert_eq!(legacy, Settings::default());
     }
 
     #[test]

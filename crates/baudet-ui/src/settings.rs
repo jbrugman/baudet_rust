@@ -18,6 +18,7 @@ pub enum SettingsCommand {
     Probe { endpoint: String, api_key: Option<String> },
     Save(Settings),
     SaveChatLayout { composer: i32, thinking: i32 },
+    SaveReasoningVisibility(bool),
     LearnContext { key: String, tokens: u32 },
     ApplyTrusted(Vec<String>),
     ClearTrusted,
@@ -67,7 +68,6 @@ pub struct SettingsView {
     store_responses: bool,
     use_server_session: bool,
     auto_approve_safe_commands: bool,
-    git_allow_writes: bool,
     transcript_wrap: bool,
     honesty_footer: bool,
     system_prompt: String,
@@ -193,7 +193,7 @@ impl SettingsView {
         self.store_responses = settings.store_responses;
         self.use_server_session = settings.use_server_session;
         self.auto_approve_safe_commands = settings.auto_approve_safe_commands;
-        self.git_allow_writes = settings.git_allow_writes;
+        self.stored_context.show_reasoning = settings.show_reasoning;
         self.transcript_wrap = settings.transcript_wrap;
         self.honesty_footer = settings.honesty_footer;
         self.system_prompt = settings.system_prompt.clone();
@@ -260,7 +260,7 @@ impl SettingsView {
             store_responses: self.store_responses,
             use_server_session: self.use_server_session,
             auto_approve_safe_commands: self.auto_approve_safe_commands,
-            git_allow_writes: self.git_allow_writes,
+            show_reasoning: self.stored_context.show_reasoning,
             transcript_wrap: self.transcript_wrap,
             honesty_footer: self.honesty_footer,
             system_prompt: self.system_prompt.clone(),
@@ -280,6 +280,14 @@ impl SettingsView {
             thinking_height: self.stored_context.thinking_height,
             language: self.language,
         })
+    }
+
+    pub(crate) fn show_reasoning(&self) -> bool {
+        self.stored_context.show_reasoning
+    }
+
+    pub(crate) fn set_show_reasoning(&mut self, show: bool) {
+        self.stored_context.show_reasoning = show;
     }
 
     pub fn dividers(&self) -> crate::layout::Dividers {
@@ -548,6 +556,11 @@ fn form_row_with_gap(ui: &mut Ui, boven: f32, label: impl Into<String>, build: i
 }
 
 pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<SettingsCommand>) {
+    egui::Frame::NONE.inner_margin(egui::Margin { top: 15, right: 15, ..egui::Margin::ZERO })
+        .show(ui, |ui| form(ui, view, tx));
+}
+
+fn form(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<SettingsCommand>) {
     let mut commands = Vec::new();
     egui::Panel::bottom("settings-actions").show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -585,7 +598,6 @@ pub fn body(ui: &mut Ui, view: &mut SettingsView, tx: &std::sync::mpsc::Sender<S
         parallel_row(ui, view);
         toggle_rows(ui, [
             (&mut view.auto_approve_safe_commands, Key::AutoApproveSafe),
-            (&mut view.git_allow_writes, Key::GitAllowWrites),
         ]);
         group_break(ui);
         command_rows(ui, view, &mut commands);
@@ -803,7 +815,6 @@ fn toggle_rows<const N: usize>(ui: &mut Ui, toggles: [(&mut bool, Key); N]) {
         let tip = match key {
             Key::StoreResponses => Key::TipStoreResponses,
             Key::AutoApproveSafe => Key::TipAutoApproveSafe,
-            Key::GitAllowWrites => Key::TipGitAllowWrites,
             Key::TranscriptWrap => Key::TipTranscriptWrap,
             Key::HonestyFooter => Key::TipHonestyFooter,
             _ => key,
@@ -1285,14 +1296,12 @@ mod tests {
     }
 
     #[test]
-    fn de_zeven_vinkjes_reizen_naar_hun_eigen_veld() {
+    fn tool_and_display_flags_survive_a_form_round_trip() {
         let mut view = view();
         view.use_responses_api = false;
-        view.git_allow_writes = true;
         view.use_server_session = false;
         let drafted = view.draft().expect("vinkjes veranderen mogen `draft` niet breken");
         assert!(!drafted.use_responses_api);
-        assert!(drafted.git_allow_writes, "git-schrijven aan komt als aan terug");
         assert!(!drafted.use_server_session, "de checkbox wint van de oude voorraad");
         assert!(drafted.auto_approve_safe_commands);
         assert!(drafted.transcript_wrap);
@@ -1336,7 +1345,6 @@ git com"
             store_responses: true,
             use_server_session: true,
             auto_approve_safe_commands: true,
-            git_allow_writes: false,
             transcript_wrap: true,
             honesty_footer: true,
             ..SettingsView::default()

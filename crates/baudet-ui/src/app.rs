@@ -158,7 +158,7 @@ impl TranscriptApp {
         let dividers = settings.dividers();
         TranscriptApp {
             attachment: None,
-            thinking_hidden: false,
+            thinking_hidden: !settings.show_reasoning(),
             help: None,
             input: String::new(),
             rows: Vec::new(),
@@ -786,6 +786,10 @@ impl TranscriptApp {
         let toggle = if self.thinking_hidden { Key::ShowReasoning } else { Key::HideReasoning };
         if ui.button(Texts::get(toggle)).on_hover_text(Texts::get(Key::TipThinkingToggle)).clicked() {
             self.thinking_hidden = !self.thinking_hidden;
+            let show = !self.thinking_hidden;
+            self.settings.set_show_reasoning(show);
+            let _ = self.settings_tx.send(SettingsCommand::SaveReasoningVisibility(show));
+            ui.request_repaint();
         }
     }
 
@@ -937,9 +941,7 @@ impl TranscriptApp {
                     ui.horizontal_wrapped(|ui| {
                         let send = ui.add_enabled(can_start, egui::Button::new(Texts::get(Key::SendButton))).clicked();
                         let compact = ui.add_enabled(can_start, egui::Button::new(Texts::get(Key::CompactButton))).clicked();
-                        if self.reasoning_rows().next().is_some() {
-                            self.reasoning_toggle(ui);
-                        }
+                        self.reasoning_toggle(ui);
                         (send, compact)
                     }).inner
                 },
@@ -1144,7 +1146,7 @@ mod geometry_tests {
             labels
         };
 
-        for (toggle, visible) in [(Key::HideReasoning, true), (Key::ShowReasoning, false), (Key::HideReasoning, true)] {
+        for (toggle, visible) in [(Key::ShowReasoning, false), (Key::HideReasoning, true), (Key::ShowReasoning, false)] {
             let labels = paint(Vec::new());
             assert_eq!(labels.iter().any(|(text, _)| text == "Thinking summary"), visible);
             let pos = labels.iter().find(|(text, _)| text == Texts::get(toggle)).unwrap().1;
@@ -1389,6 +1391,7 @@ mod geometry_tests {
     #[test]
     fn composer_and_thinking_grips_resize_independently() {
         let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+        app.thinking_hidden = false;
         app.rows.push(Row::from(&Item::Reasoning(baudet_core::ReasoningItem {
             item_id: "test/reasoning".into(),
             text: "Thinking summary".into(),
@@ -1437,6 +1440,7 @@ mod geometry_tests {
     #[test]
     fn reasoning_split_keeps_the_composer_visible_in_the_full_chat_layout() {
         let mut app = TranscriptApp::new(TranscriptApp::demo_backend()).with_server(String::new());
+        app.thinking_hidden = false;
         let (_snapshot_tx, snapshots) = ampcc::unbounded_channel();
         app.snapshots = snapshots;
         app.dividers.composer = 150;
@@ -2020,6 +2024,14 @@ fn settings_worker_loop(
                     endpoint,
                 ));
             }
+            SettingsCommand::SaveReasoningVisibility(show) => {
+                let current = file.read();
+                let mut settings = current.settings().clone();
+                settings.show_reasoning = show;
+                if let Err(error) = file.write(&settings) {
+                    let _ = report.send(SettingsEvent::Saved(Err(error)));
+                }
+            }
             SettingsCommand::SaveChatLayout { composer, thinking } => {
                 let current = file.read();
                 let mut settings = current.settings().clone();
@@ -2035,6 +2047,7 @@ fn settings_worker_loop(
                 settings.mcp_servers = current.settings().mcp_servers.clone();
                 settings.mcp_allow_servers = current.settings().mcp_allow_servers.clone();
                 settings.auto_allow_commands = current.settings().auto_allow_commands.clone();
+                settings.show_reasoning = current.settings().show_reasoning;
                 settings.learned_context_windows = current.settings().learned_context_windows.clone();
                 let outcome = file.write(&settings);
                 if outcome.is_ok() {

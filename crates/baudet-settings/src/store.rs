@@ -174,7 +174,7 @@ mod tests {
             use_responses_api: false,
             store_responses: false,
             auto_approve_safe_commands: false,
-            git_allow_writes: true,
+            show_reasoning: true,
             transcript_wrap: false,
             honesty_footer: false,
             system_prompt: "Regel een.\nRegel twee.".into(),

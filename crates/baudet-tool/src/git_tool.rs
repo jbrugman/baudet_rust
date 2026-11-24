@@ -157,7 +157,7 @@ impl Tool for GitTool {
             "Run a read-only git command in the project repository. Available commands: \
              status, diff, diff_staged, log, show, branch, ls_files, rev_parse, blame. \
              Optional args are extra read-only arguments or paths (for example a file path \
-             for diff, or a commit for show). Git writes are disabled for this project. \
+             for diff, or a commit for show). Git writes require Read and Write permissions for this project folder. \
              Returns stdout, stderr and the exit code."
         }
     }

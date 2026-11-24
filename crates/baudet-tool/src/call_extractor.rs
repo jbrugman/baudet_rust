@@ -111,7 +111,7 @@ pub fn protocol_for(enabled: &[&str], extra: &[ExtraTool], git_writes: bool) -> 
             out.push_str("  {\"tool\": \"git\", \"arguments\": {\"command\": \"add\", \"args\": [\"relative/path\"]}}\n");
             out.push_str("  {\"tool\": \"git\", \"arguments\": {\"command\": \"commit\", \"message\": \"Commit message\"}}\n");
         } else {
-            out.push_str("Git writes are disabled for this project.\n");
+            out.push_str("Git writes are disabled without Read and Write permissions for this project folder.\n");
         }
         out.push_str("Use the git tool for its supported operations, and do not perform Git writes through the shell.\n\n");
     }

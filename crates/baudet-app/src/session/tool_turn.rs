@@ -77,7 +77,7 @@ impl AppState {
         let write = project.is_some_and(|project| project.is_granted(FolderPermission::Write));
         let exec = project.is_some_and(|project| project.is_granted(FolderPermission::Execute));
         let s = run.settings;
-        let git_writes = read && write && s.git_allow_writes;
+        let git_writes = read && write;
         let git = if git_writes { GitTool::with_writes() } else { GitTool::read_only() };
         let mut tools: Vec<Box<dyn Tool + Send + Sync>> = Vec::new();
         if read {

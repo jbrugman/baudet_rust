@@ -346,7 +346,7 @@ fn a_tool_turn_feeds_the_observation_back_and_persists_the_final_answer() {
         });
         events
     };
-    let (_, state) = persistent(&root, vec![completed("tu_1", &first), completed("tu_2", "Read it.")]);
+    let (backend, state) = persistent(&root, vec![completed("tu_1", &first), completed("tu_2", "Read it.")]);
     std::fs::write(root.join("example.txt"), "known observation").unwrap();
     let mut project = Project::new("p-1".into(), "Fixture", 0);
     project.folder_path = Some(root.to_string_lossy().into_owned());
@@ -359,6 +359,11 @@ fn a_tool_turn_feeds_the_observation_back_and_persists_the_final_answer() {
         approval: Arc::new(|_| ApprovalDecision::Decline),
         cancelled: Arc::new(AtomicBool::new(false)),
     }).unwrap();
+    let (request, _) = backend.last_request().unwrap();
+    let tools: serde_json::Value = serde_json::from_str(&request.tools.unwrap()).unwrap();
+    let git = tools.as_array().unwrap().iter().find(|tool| tool["name"] == "git").unwrap();
+    let verbs = git["parameters"]["properties"]["command"]["enum"].as_array().unwrap();
+    assert!(verbs.contains(&serde_json::json!("commit")));
     assert_eq!(state.live_turns(), 0);
     assert!(state.rows().iter().any(|item| matches!(item, Item::ToolCall(call) if call.output.contains("known observation"))));
     assert_eq!(mentions_exact(&state, "Read it."), 1);
@@ -448,7 +453,14 @@ fn mcp_is_advertised_and_approved_without_project_write_access() {
         let (request, _) = backend.last_request().unwrap();
         let tools: serde_json::Value = serde_json::from_str(&request.tools.unwrap()).unwrap();
         let names: Vec<_> = tools.as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["mcp__fixture__echo"]);
+        if project.is_some() {
+            assert_eq!(names, ["read_file", "git", "mcp__fixture__echo"]);
+            let verbs = tools[1]["parameters"]["properties"]["command"]["enum"].as_array().unwrap();
+            assert!(verbs.contains(&serde_json::json!("status")));
+            assert!(!verbs.contains(&serde_json::json!("commit")));
+        } else {
+            assert_eq!(names, ["mcp__fixture__echo"]);
+        }
     }
     settings.tool_mode = ToolMode::Off;
     assert!(!AppState::tools_active(&settings, Some(&project)));

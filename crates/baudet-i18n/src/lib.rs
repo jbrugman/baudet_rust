@@ -176,8 +176,6 @@ pub enum Key {
     ApprovalDenied,
     ApprovalCancelled,
     AutoApproveSafe,
-    GitAllowWrites,
-    TipGitAllowWrites,
     TranscriptWrap,
     TipTranscriptWrap,
     MaxParallelTurnsLabel,
@@ -486,8 +484,6 @@ fn en(k: Key) -> &'static str {
         Key::ApprovalDenied => r"denied",
         Key::ApprovalCancelled => r"cancelled",
         Key::AutoApproveSafe => r"Auto-approve safe read-only commands",
-        Key::GitAllowWrites => r"Let git write (add, commit, checkout, stash, push)",
-        Key::TipGitAllowWrites => r"Adds the write verbs to the git tool. Each still needs the project's Write right and your approval on its card before it runs; force pushes, history rewrites and destructive stashes stay blocked.",
         Key::TranscriptWrap => r"wrap long lines in the transcript",
         Key::TipTranscriptWrap => r"On: a line longer than the pane folds to fit. Off: the line stays whole and a horizontal scrollbar appears, which suits diffs and long paths.",
         Key::MaxParallelTurnsLabel => r"max parallel turns",
@@ -639,7 +635,7 @@ By dropping cloud-first assumptions and putting real telemetry on screen, Baudet
 - **Responses API** and **store** - use the Responses endpoint, and let the backend keep the response.
 - **server session** - reuse the previous response id so the backend holds the context.
 - **auto-approve safe commands** - run read-only commands the tool lists as safe without asking each time.
-- **git can write** - lets the git tool run add, commit, checkout, stash and push; each still needs the project's Write right and your approval, and force pushes stay blocked.
+- **Git writes** require the project folder’s Read and Write permissions and approval for the action.
 - **wrap long lines** - on folds a line wider than the pane to fit; off keeps it whole and shows a horizontal scrollbar, which suits diffs and long paths.
 - **max parallel turns** - how many turns may run at once; raise it on a powerful machine. The app honours it only as far as its conversation model allows today.
 - **local-model note** - keeps a quiet line at the bottom reminding that a local model can be wrong; shown by default.
@@ -805,8 +801,6 @@ fn nl(k: Key) -> &'static str {
         Key::ApprovalDenied => r"geweiger",
         Key::ApprovalCancelled => r"geannuleerd",
         Key::AutoApproveSafe => r"Veilige alleen-lezen commando's automatisch goedkeuren",
-        Key::GitAllowWrites => r"Git laten schrijven (add, commit, checkout, stash, push)",
-        Key::TipGitAllowWrites => r"Voegt de schrijfcommando's toe aan de git-tool. Elk vraagt nog steeds om het Write-recht van het project én jouw goedkeuring op de kaart voordat het draait; force pushes, herschrijvingen van de historie en destructieve stashes blijven geblokkeerd.",
         Key::TranscriptWrap => r"lange regels in het transcript afbreken",
         Key::TipTranscriptWrap => r"Aan: een regel breder dan het paneel vouwt zich. Uit: de regel blijft heel en er verschijnt een horizontale scrollbalk, handig voor diffs en lange paden.",
         Key::MaxParallelTurnsLabel => r"max parallelle beurten",
@@ -958,7 +952,7 @@ Door cloud-first aannames los te laten en echte telemetrie in beeld te brengen, 
 - **Responses API** en **store** - het Responses-eindpunt gebruiken, en de backend de reactie laten bewaren.
 - **serversessie** - het vorige response-id hergebruiken zodat de backend de context vasthoudt.
 - **veilige commando's automatisch toestaan** - alleen-lezen commando's die het gereedschap als veilig opsomt, zonder telkens vragen uitvoeren.
-- **git mag schrijven** - laat de git-tool add, commit, checkout, stash en push uitvoeren; elk vraagt nog steeds het Write-recht van het project én jouw goedkeuring, en force pushes blijven geblokkeerd.
+- **Git-schrijfacties** vereisen lees- en schrijfrechten voor de projectmap en goedkeuring voor de actie.
 - **lange regels afbreken** - aan vouwt een regel breder dan het paneel; uit houdt de regel heel en toont een horizontale scrollbalk, handig voor diffs en lange paden.
 - **max parallelle beurten** - hoeveel beurten tegelijk mogen draaien; verhogen op een krachtige machine. De app houdt hier pas rekening mee voor zover haar gespreksmodel dat vandaag toelaat.
 - **notitie lokaal model** - houdt een subtiele regel onderaan die eraan herinnert dat een lokaal model fout kan zijn; standaard zichtbaar.
@@ -1124,8 +1118,6 @@ fn fr(k: Key) -> &'static str {
         Key::ApprovalDenied => r"refusé",
         Key::ApprovalCancelled => r"annulé",
         Key::AutoApproveSafe => r"Approuver automatiquement les commandes en lecture seule sûres",
-        Key::GitAllowWrites => r"Autoriser git à écrire (add, commit, checkout, stash, push)",
-        Key::TipGitAllowWrites => r"Ajoute les commandes d'écriture à l'outil git. Chacune exige toujours le droit d'écriture du projet et votre approbation sur sa carte avant de s'exécuter ; les push forcés, les réécritures d'historique et les stash destructifs restent bloqués.",
         Key::TranscriptWrap => r"retourner les lignes longues dans le transcript",
         Key::TipTranscriptWrap => r"Activé : une ligne plus large que le panneau se replie. Désactivé : la ligne reste entière et une barre de défilement horizontale apparaît, adaptée aux diffs et aux chemins longs.",
         Key::MaxParallelTurnsLabel => r"tours parallèles max",
@@ -1277,7 +1269,7 @@ En abandonnant les réflexes cloud-first et en affichant une télémétrie réel
 - **Responses API** et **store** - utiliser le point Responses, et laisser le backend garder la réponse.
 - **session serveur** - réutiliser l'identifiant de la réponse précédente pour que le backend conserve le contexte.
 - **approuver automatiquement les commandes sûres** - exécuter sans demander les commandes en lecture seule que l'outil liste comme sûres.
-- **git peut écrire** - autorise l'outil git à exécuter add, commit, checkout, stash et push ; chacun exige toujours le droit d'écriture du projet et votre approbation, et les push forcés restent bloqués.
+- **Écritures Git** requièrent les droits de lecture et d’écriture du dossier du projet ainsi que l’approbation de l’action.
 - **retour à la ligne** - activé, une ligne plus large que le panneau se replie ; désactivé, la ligne reste entière et une barre de défilement horizontale apparaît, adaptée aux diffs et chemins longs.
 - **tours parallèles max** - nombre de tours pouvant tourner à la fois ; à augmenter sur une machine puissante. L'application ne le respecte qu'aussi loin que son modèle de conversation le permet aujourd'hui.
 - **note du modèle local** - garde une ligne discrète en bas rappelant qu'un modèle local peut se tromper ; affichée par défaut.
@@ -1443,8 +1435,6 @@ fn de(k: Key) -> &'static str {
         Key::ApprovalDenied => r"abgelehnt",
         Key::ApprovalCancelled => r"abgebrochen",
         Key::AutoApproveSafe => r"Sichere schreibgeschützte Befehle automatisch genehmigen",
-        Key::GitAllowWrites => r"Git schreiben lassen (add, commit, checkout, stash, push)",
-        Key::TipGitAllowWrites => r"Fügt dem git-Werkzeug die Schreibbefehle hinzu. Jeder benötigt weiterhin das Schreibrecht des Projekts und Ihre Genehmigung auf seiner Karte vor der Ausführung; Pushes mit Kraft, Umschreiben der Historie und destruktive Stashes bleiben gesperrt.",
         Key::TranscriptWrap => r"Lange Zeilen im Transkript umbrechen",
         Key::TipTranscriptWrap => r"Ein: eine Zeile, die breiter als der Bereich ist, wird umgebrochen. Aus: die Zeile bleibt ganz und ein horizontaler Scrollbalken erscheint, passend für Diffs und lange Pfade.",
         Key::MaxParallelTurnsLabel => r"max. parallele Runden",
@@ -1596,7 +1586,7 @@ Indem Baudet Cloud-first-Annahmen ablegt und echte Telemetrie anzeigt, können d
 - **Responses API** und **store** - den Responses-Endpunkt nutzen und das Backend die Antwort behalten lassen.
 - **Server-Sitzung** - die vorherige Antwort-ID wiederverwenden, damit das Backend den Kontext hält.
 - **sichere Befehle automatisch genehmigen** - schreibgeschützte Befehle, die das Werkzeug als sicher auflistet, ohne jedes Mal fragen ausführen.
-- **git darf schreiben** - lässt das git-Werkzeug add, commit, checkout, stash und push ausführen; jeder benötigt weiterhin das Schreibrecht des Projekts und Ihre Genehmigung, und Pushes mit Kraft bleiben gesperrt.
+- **Git-Schreibaktionen** erfordern Lese- und Schreibrechte für den Projektordner sowie die Freigabe der Aktion.
 - **lange Zeilen umbrechen** - ein bricht eine breitere Zeile auf die Breite um; aus hält sie ganz und zeigt einen horizontalen Scrollbalken, passend für Diffs und lange Pfade.
 - **max. parallele Runden** - wie viele Runden gleichzeitig laufen; auf einem starken Rechner erhöhen. Die App beachtet dies nur, soweit ihr Gesprächsmodell es heute zulässt.
 - **Hinweis zum lokalen Modell** - hält eine dezente Zeile unten, die an ein lokales Modell erinnert, das falsch liegen kann; standardmäßig sichtbar.
