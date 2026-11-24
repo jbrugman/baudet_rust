@@ -118,7 +118,6 @@ pub struct TranscriptApp {
     data_root: Option<std::path::PathBuf>,
     loading: bool,
     more_older: bool,
-    stick: bool,
     show_sidebar: bool,
     show_filetree: bool,
     dividers: Dividers,
@@ -193,7 +192,6 @@ impl TranscriptApp {
             data_root: root,
             loading: false,
             more_older: false,
-            stick: true,
             show_sidebar: true,
             show_filetree: true,
             dividers,
@@ -510,7 +508,7 @@ impl TranscriptApp {
                     ScrollArea::new([!self.settings.transcript_wrap(), true])
                         .id_salt("center-scroll")
                         .auto_shrink([false, false])
-                        .stick_to_bottom(self.stick)
+                        .stick_to_bottom(true)
                         .show(ui, |ui| self.transcript(ui));
                     self.ask_for_older(ui);
                 }
@@ -838,7 +836,6 @@ impl TranscriptApp {
         if !self.has_more_older() {
             return;
         }
-        self.stick = false;
         self.loading = true;
         let _ = self.intents.send(Intent::LoadOlder);
     }
@@ -1087,6 +1084,89 @@ impl Drop for TranscriptApp {
 #[cfg(test)]
 mod geometry_tests {
     use super::*;
+
+    #[test]
+    fn streaming_follows_the_bottom_again_after_loading_older_messages() {
+        let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+        let (_reports, snapshots) = ampcc::unbounded_channel();
+        app.snapshots = snapshots;
+        app.more_older = true;
+        let (intents, requests) = mpsc::channel();
+        app.intents = intents;
+        let history = |start, end| {
+            (start..end).map(|number| Row::from(&Item::UserMessage(baudet_core::UserMessageItem {
+                item_id: format!("history/{number}"),
+                text: format!("History {number}"),
+                status: ItemStatus::Completed,
+            }))).collect::<Vec<_>>()
+        };
+        app.rows = history(10, 35);
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        let mut paint = |app: &mut TranscriptApp, wheel: f32| {
+            time += 0.05;
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 620.0))),
+                time: Some(time),
+                ..Default::default()
+            };
+            if wheel != 0.0 {
+                input.events = vec![
+                    egui::Event::PointerMoved(egui::pos2(600.0, 240.0)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point, phase: egui::TouchPhase::Move,
+                        delta: egui::vec2(0.0, wheel), modifiers: egui::Modifiers::NONE,
+                    },
+                ];
+            }
+            let output = ctx.run_ui(input, |ui| app.paint(ui));
+            let visible = output.shapes.iter().filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some((text, shape.clip_rect)),
+                _ => None,
+            }).flat_map(|(text, clip)| {
+                text.galley.rows.iter()
+                    .filter(move |row| clip.contains_rect(row.rect().translate(text.pos.to_vec2())))
+                    .map(|row| row.text())
+            }).collect::<Vec<_>>();
+            output.drop_without_applying_deltas();
+            visible
+        };
+        let has = |labels: &[String], label| labels.iter().any(|text| text == label);
+        paint(&mut app, 0.0);
+        assert!(has(&paint(&mut app, 0.0), "History 34"));
+
+        for _ in 0..4 {
+            paint(&mut app, 4000.0);
+        }
+        assert!(matches!(requests.try_recv(), Ok(Intent::LoadOlder)));
+        let mut older = history(0, 10);
+        older.append(&mut app.rows);
+        app.rows = older;
+        app.loading = false;
+        app.more_older = false;
+        assert!(has(&paint(&mut app, 0.0), "History 0"));
+
+        app.busy = true;
+        app.rows.push(Row::from(&agent("streaming", "First streamed text")));
+        let reading_history = paint(&mut app, 0.0);
+        assert!(has(&reading_history, "History 0"));
+        assert!(!has(&reading_history, "First streamed text"));
+
+        for _ in 0..4 {
+            paint(&mut app, -4000.0);
+        }
+        // Let the simulated wheel gesture settle before the next streamed update.
+        for _ in 0..20 {
+            paint(&mut app, 0.0);
+        }
+        assert!(has(&paint(&mut app, 0.0), "First streamed text"));
+        let body = &mut app.rows.last_mut().unwrap().body;
+        body.push_str(&"\n\nAnother streamed paragraph.".repeat(30));
+        body.push_str("\n\nLatest streamed text");
+        paint(&mut app, 0.0);
+        let latest = paint(&mut app, 0.0);
+        assert!(has(&latest, "Latest streamed text"), "{latest:?}");
+    }
 
     #[test]
     fn transcript_details_click_independently_and_keep_session_state_separate() {
