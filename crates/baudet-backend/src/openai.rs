@@ -262,16 +262,21 @@ impl TurnAccumulator {
         }
         if name.starts_with("response.") {
             self.absorb(name, object);
-            if self.reasoning.is_empty() {
-                let reasoning = if name.ends_with("reasoning_summary_text.done") || name.ends_with("reasoning_text.done") {
+            let text = (name == "response.completed" && self.text.is_empty())
+                .then(|| completed_output_text(object))
+                .flatten();
+            let reasoning = if self.reasoning.is_empty() {
+                if name.ends_with("reasoning_summary_text.done") || name.ends_with("reasoning_text.done") {
                     string_field(object, "text")
                 } else if matches!(name, "response.completed" | "response.incomplete") {
                     reasoning_summary(object)
                 } else {
                     None
-                };
-                return reasoning.map(|reasoning| Delta { text: None, reasoning: Some(reasoning) });
-            }
+                }
+            } else {
+                None
+            };
+            return (text.is_some() || reasoning.is_some()).then_some(Delta { text, reasoning });
         }
         None
     }
@@ -357,6 +362,19 @@ impl TurnAccumulator {
 
 fn string_field(object: &Map<String, Value>, key: &str) -> Option<String> {
     object.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn completed_output_text(event: &Map<String, Value>) -> Option<String> {
+    let response = event.get("response").and_then(Value::as_object).unwrap_or(event);
+    let text: String = response.get("output")?.as_array()?.iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("message"))
+        .filter(|item| item.get("role").and_then(Value::as_str) == Some("assistant"))
+        .filter_map(|item| item.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("output_text"))
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect();
+    (!text.is_empty()).then_some(text)
 }
 
 fn reasoning_summary(event: &Map<String, Value>) -> Option<String> {

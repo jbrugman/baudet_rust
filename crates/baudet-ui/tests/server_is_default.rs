@@ -44,6 +44,7 @@ fn een_venster_kiest_zonder_vlag_de_server_en_met_demo_het_script() {
             max_output_tokens: Some(16),
             model: Some("een-model".to_string()),
             reasoning: None,
+            store: None,
         };
         let stroom = match backend.send(request) {
             Ok(mut handle) => {

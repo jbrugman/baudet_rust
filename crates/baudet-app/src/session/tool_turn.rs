@@ -1,10 +1,10 @@
-use super::{history_events, AppState, RequestChoices, TurnBusy};
-use baudet_backend::{Backend, SendRequest, TurnHandle};
+use super::{failed, history_events, receive_turn, AppState, RequestChoices, TurnBusy};
+use baudet_backend::{Backend, SendRequest};
 use baudet_store::ContextStrategy;
-use crate::compaction::{CompactionOutcome, CompactionPlan, Compactor, SUMMARY_PROMPT};
+use crate::compaction::{summarize, CompactionOutcome, CompactionPlan, Compactor};
 use baudet_core::{
     AgentMessageItem, ApprovalDecision, ApprovalRequest, CommandExecutionItem, FileChangeItem, ImageItem, Item,
-    ItemKind, ItemStatus, Msg, ReasoningItem, ThreadEvent, ToolCallItem, Turn, UserMessageItem,
+    ItemKind, ItemStatus, Msg, ReasoningItem, ThreadEvent, ToolCallItem, UserMessageItem,
 };
 use baudet_projects::{tool_gate, FolderPermission, Project};
 use baudet_settings::{config::ToolMode, Settings};
@@ -23,7 +23,6 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
 };
-use std::time::Duration;
 
 pub type RequestApproval = dyn Fn(ApprovalRequest) -> ApprovalDecision + Send + Sync;
 
@@ -297,51 +296,7 @@ struct Source<'a> {
     compacting: &'a AtomicBool,
 }
 
-fn failed(detail: impl Into<String>) -> Turn {
-    Turn { final_event: None, incomplete_reason: Some(detail.into()), ..Turn::text("") }
-}
-
 impl Source<'_> {
-    fn receive(&self, request: SendRequest, on_delta: &mut dyn FnMut(&str), on_reasoning: &mut dyn FnMut(&str)) -> Turn {
-        if self.cancelled.load(Ordering::Relaxed) {
-            return failed("cancelled");
-        }
-        let mut handle: TurnHandle = match self.backend.send(request) {
-            Ok(handle) => handle,
-            Err(error) => return failed(error.to_string()),
-        };
-        let mut turn = failed("stream ended before completion");
-        loop {
-            if self.cancelled.load(Ordering::Relaxed) {
-                handle.cancel();
-                return Turn { text: turn.text, ..failed("cancelled") };
-            }
-            match handle.events().try_recv() {
-                Ok(ThreadEvent::ItemDelta { kind: ItemKind::AgentMessage, delta, .. }) => {
-                    turn.text.push_str(&delta);
-                    on_delta(&delta);
-                }
-                Ok(ThreadEvent::ItemDelta { kind: ItemKind::Reasoning, delta, .. }) => on_reasoning(&delta),
-                Ok(ThreadEvent::ItemCompleted { item: Item::AgentMessage(message), .. }) if !message.text.is_empty() => {
-                    turn.text = message.text;
-                }
-                Ok(ThreadEvent::TurnCompleted { response_id, usage, final_event, incomplete_reason, .. }) => {
-                    if let Some(result) = handle.take_result() {
-                        return result;
-                    }
-                    turn.response_id = response_id;
-                    turn.usage = usage;
-                    turn.final_event = final_event;
-                    turn.incomplete_reason = incomplete_reason;
-                    return turn;
-                }
-                Ok(_) => {}
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(5)),
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return turn,
-            }
-        }
-    }
-
     fn compact(&self, replay: &mut Replay, history: &[Msg]) -> Result<(), String> {
         let remaining = &history[replay.folded..];
         if remaining.len() < 2 {
@@ -354,14 +309,9 @@ impl Source<'_> {
             if self.cancelled.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
             }
-            Ok(self.receive(SendRequest {
-                system: SUMMARY_PROMPT.to_owned(),
-                user_text: text.to_owned(),
-                model: self.choices.model.clone(),
-                reasoning: Some(baudet_backend::openai::REASONING_NONE.to_owned()),
-                max_output_tokens: Some(max_tokens),
-                ..Default::default()
-            }, &mut |_| {}, &mut |_| {}))
+            Ok(summarize(self.backend, self.choices.model.clone(), text, max_tokens, || {
+                self.cancelled.load(Ordering::Relaxed)
+            }))
         });
         self.compacting.store(false, Ordering::Relaxed);
         if self.cancelled.load(Ordering::Relaxed) {
@@ -429,7 +379,7 @@ impl TurnSource for Source<'_> {
                 }
 
                 let emitted = std::cell::Cell::new(false);
-                let turn = self.receive(SendRequest {
+                let turn = receive_turn(self.backend, SendRequest {
                     turn_id: None,
                     system,
                     user_text,
@@ -440,7 +390,8 @@ impl TurnSource for Source<'_> {
                     model: self.choices.model.clone(),
                     reasoning: self.choices.reasoning.clone(),
                     max_output_tokens: self.choices.max_output_tokens,
-                }, &mut |delta| {
+                    store: None,
+                }, || self.cancelled.load(Ordering::Relaxed), &mut |delta| {
                     emitted.set(true);
                     (request.on_delta)(delta);
                 }, &mut |delta| {

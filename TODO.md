@@ -7,11 +7,6 @@ Do not give them tasks that modify files under `crates/baudet-ui`.
 
 For each implementation prompt, check all affected usages first, keep the diff minimal, and mark the task complete only after a clean compile and passing relevant tests.
 
-## P1 — Automatic Git inspection
-
-- [ ] Prevent automatic Git inspection from starting external processes based on project Git configuration.
-      **Prompt:** Trace all callers for the changes list and diff view. Harden automatic inspection against repository-configured external process execution. Verify that ordinary repositories still show the expected changes and patches.
-
 ## P2 — Workspace security
 
 - [ ] Enforce project permissions in the Git and file tools.

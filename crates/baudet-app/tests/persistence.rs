@@ -297,31 +297,25 @@ fn count_lines(root: &std::path::Path) -> usize {
 #[test]
 fn compaction_commits_summary_with_retained_context_and_keeps_the_display_trail() {
     use baudet_app::compaction::{CompactionOutcome, CompactionPlan};
-    use baudet_backend::{BackendError, SendRequest, TurnHandle};
-    use baudet_core::Turn;
-
-    struct Summarizer;
-    impl Backend for Summarizer {
-        fn send(&self, _: SendRequest) -> Result<TurnHandle, BackendError> {
-            unreachable!()
-        }
-
-        fn complete_once(&self, _: &str, text: &str, _: u32) -> Result<Turn, BackendError> {
-            assert!(text.contains("old question"));
-            assert!(!text.contains("recent question"));
-            Ok(Turn::text("retained facts"))
-        }
-    }
 
     let root = scratch("compaction");
     let (_, state) = persistent(&root, vec![answer("tu_1", "old answer"), answer("tu_2", "recent answer")]);
     run_turn(&state, "old question");
     run_turn(&state, "recent question");
     let id = state.session_id();
-    let state = AppState::new(Arc::new(Summarizer), "system").on_session(&root, &id, "model", None).unwrap();
+    let backend = Arc::new(ScriptedBackend::new(vec![answer("summary", "retained facts")
+        .into_iter().fold(Script::new(), |script, event| script.event(event))
+        .event(summary_terminal(Some("response.completed"), None))]));
+    let state = AppState::new(backend.clone(), "system").on_session(&root, &id, "model", None).unwrap();
+    state.set_request_choices(Some("chosen-model".into()), None, None);
     let before = state.rows();
     let plan = CompactionPlan { keep_recent: 2, max_chars: 4000, max_tokens: 1024 };
     assert_eq!(state.compact(&plan).unwrap(), CompactionOutcome::Compacted { summary: "retained facts".into(), folded: 2 });
+    let (request, _) = backend.last_request().unwrap();
+    assert!(request.user_text.contains("old question"));
+    assert!(!request.user_text.contains("recent question"));
+    assert_eq!(request.model.as_deref(), Some("chosen-model"));
+    assert_eq!(request.store, Some(false));
     assert_eq!(state.rows(), before);
     let reopened = state.build_session().unwrap();
     assert_eq!(reopened.summary.as_deref(), Some("retained facts"));
@@ -335,6 +329,42 @@ fn compaction_commits_summary_with_retained_context_and_keeps_the_display_trail(
     assert!(request.system.contains("retained facts"));
     assert!(!request.system.contains(baudet_store::CONTEXT_LOSS_NOTE));
     assert!(request.previous_response_id.is_none());
+}
+
+fn summary_terminal(final_event: Option<&str>, reason: Option<&str>) -> ThreadEvent {
+    ThreadEvent::TurnCompleted {
+        thread_id: "th_1".into(),
+        turn_id: "summary".into(),
+        response_id: None,
+        usage: None,
+        final_event: final_event.map(str::to_owned),
+        incomplete_reason: reason.map(str::to_owned),
+    }
+}
+
+#[test]
+fn manual_compact_preserves_history_when_a_summary_is_unusable() {
+    use baudet_app::compaction::{CompactionOutcome, CompactionPlan};
+
+    for (text, terminal, reason, expected) in [
+        ("", Some("response.completed"), None, "the model returned no summary text"),
+        ("partial", None, None, "missing successful completion event"),
+        ("partial", Some("response.failed"), Some("model overloaded"), "model overloaded"),
+    ] {
+        let root = std::env::temp_dir().join(baudet_projects::new_session_id());
+        let mut summary = answer("summary", text);
+        summary.push(summary_terminal(terminal, reason));
+        let (_, state) = persistent(&root, vec![answer("tu_1", "old answer"), summary]);
+        run_turn(&state, "old question");
+        let before = state.build_session().unwrap();
+        let plan = CompactionPlan { keep_recent: 1, max_chars: 4000, max_tokens: 1024 };
+        assert_eq!(state.compact(&plan).unwrap(), CompactionOutcome::SummaryRefused(expected.into()));
+        let retained = state.build_session().unwrap();
+        assert_eq!(retained.messages, before.messages);
+        assert_eq!(retained.summary, before.summary);
+        assert_eq!(retained.items, before.items);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }
 
 #[test]

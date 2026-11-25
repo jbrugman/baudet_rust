@@ -3,11 +3,12 @@ pub mod tool_turn;
 
 use crate::reducer::{reduce, Emitter, Rows};
 use baudet_backend::{Backend, SendRequest, TurnHandle};
-use baudet_core::{Item, ItemStatus, Msg, ThreadEvent};
+use baudet_core::{Item, ItemKind, ItemStatus, Msg, ThreadEvent, Turn};
 use baudet_store::session::Session;
 use baudet_store::Transcript;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 pub struct Sent {
@@ -93,6 +94,56 @@ pub fn pump(
     }
 }
 
+pub(crate) fn failed(detail: impl Into<String>) -> Turn {
+    Turn { final_event: None, incomplete_reason: Some(detail.into()), ..Turn::text("") }
+}
+
+pub(crate) fn receive_turn(
+    backend: &dyn Backend,
+    request: SendRequest,
+    cancelled: impl Fn() -> bool,
+    on_delta: &mut dyn FnMut(&str),
+    on_reasoning: &mut dyn FnMut(&str),
+) -> Turn {
+    if cancelled() {
+        return failed("cancelled");
+    }
+    let mut handle = match backend.send(request) {
+        Ok(handle) => handle,
+        Err(error) => return failed(error.to_string()),
+    };
+    let mut turn = failed("stream ended before completion");
+    loop {
+        if cancelled() {
+            handle.cancel();
+            return Turn { text: turn.text, ..failed("cancelled") };
+        }
+        match handle.events().try_recv() {
+            Ok(ThreadEvent::ItemDelta { kind: ItemKind::AgentMessage, delta, .. }) => {
+                turn.text.push_str(&delta);
+                on_delta(&delta);
+            }
+            Ok(ThreadEvent::ItemDelta { kind: ItemKind::Reasoning, delta, .. }) => on_reasoning(&delta),
+            Ok(ThreadEvent::ItemCompleted { item: Item::AgentMessage(message), .. }) if !message.text.is_empty() => {
+                turn.text = message.text;
+            }
+            Ok(ThreadEvent::TurnCompleted { response_id, usage, final_event, incomplete_reason, .. }) => {
+                if let Some(result) = handle.take_result() {
+                    return result;
+                }
+                turn.response_id = response_id;
+                turn.usage = usage;
+                turn.final_event = final_event;
+                turn.incomplete_reason = incomplete_reason;
+                return turn;
+            }
+            Ok(_) => {}
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(5)),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return turn,
+        }
+    }
+}
+
 // The backend reverses this list before putting it on the wire.
 fn history_events(messages: &[Msg]) -> Vec<ThreadEvent> {
     messages
@@ -129,7 +180,7 @@ fn msg_of(item: &Item) -> Option<Msg> {
 impl AppState {
     // Commit storage before changing the conversation in memory.
     pub fn compact(&self, plan: &crate::compaction::CompactionPlan) -> Result<crate::compaction::CompactionOutcome, String> {
-        use crate::compaction::{CompactionOutcome, Compactor, SUMMARY_PROMPT};
+        use crate::compaction::{summarize, CompactionOutcome, Compactor};
 
         self.live_turns.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).map_err(|_| TurnBusy.to_string())?;
         let result = (|| {
@@ -138,8 +189,9 @@ impl AppState {
                 (active.messages.clone(), active.summary.clone())
             };
             let backend = self.backend();
+            let model = self.choices.lock().unwrap().model.clone();
             let outcome = Compactor::fold(plan, &messages, summary.as_deref(), |source, cap| {
-                backend.complete_once(SUMMARY_PROMPT, source, cap).map_err(|error| error.to_string())
+                Ok(summarize(&*backend, model.clone(), source, cap, || false))
             })?;
             if let CompactionOutcome::Compacted { summary, folded } = &outcome {
                 self.commit_compacted_context(&messages[*folded..], summary)?;
@@ -343,6 +395,7 @@ impl AppState {
             max_output_tokens: choices.max_output_tokens,
             model: choices.model.clone(),
             reasoning: choices.reasoning.clone(),
+            store: None,
         };
 
         let handle = match backend.send(request) {

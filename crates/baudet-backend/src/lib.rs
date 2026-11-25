@@ -21,6 +21,7 @@ pub struct SendRequest {
     pub max_output_tokens: Option<u32>,
     pub model: Option<String>,
     pub reasoning: Option<String>,
+    pub store: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

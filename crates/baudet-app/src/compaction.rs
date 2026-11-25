@@ -1,7 +1,29 @@
 use baudet_core::{Msg, Turn};
 use baudet_store::ContextLimits;
 
-pub const SUMMARY_PROMPT: &str = "Summarise the conversation so work can continue after compaction. +    Preserve the active user request, constraints, decisions, completed actions and their results, +    and work still outstanding. Keep relevant file names, symbols and factual conclusions. +    Be concise and omit commentary and preamble.";
+pub const SUMMARY_PROMPT: &str = "Summarise the conversation so work can continue after compaction. \
+    Preserve the active user request, constraints, decisions, completed actions and their results, \
+    and work still outstanding. Keep relevant file names, symbols and factual conclusions. \
+    Be concise and omit commentary and preamble.";
+
+pub(crate) fn summarize(
+    backend: &dyn baudet_backend::Backend,
+    model: Option<String>,
+    source: &str,
+    max_tokens: u32,
+    cancelled: impl Fn() -> bool,
+) -> Turn {
+    let request = baudet_backend::SendRequest {
+        system: SUMMARY_PROMPT.to_owned(),
+        user_text: source.to_owned(),
+        model,
+        reasoning: Some(baudet_backend::openai::REASONING_NONE.to_owned()),
+        max_output_tokens: Some(max_tokens),
+        store: Some(false),
+        ..Default::default()
+    };
+    crate::session::receive_turn(backend, request, cancelled, &mut |_| {}, &mut |_| {})
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CompactionOutcome {
@@ -64,8 +86,11 @@ fn accepted(turn: Turn) -> Result<String, CompactionOutcome> {
     if let Some(reason) = &turn.incomplete_reason {
         return Err(CompactionOutcome::SummaryRefused(reason.clone()));
     }
-    if !turn.completed() || turn.text.trim().is_empty() {
-        return Err(CompactionOutcome::SummaryRefused("empty or incomplete response".into()));
+    if !turn.completed() {
+        return Err(CompactionOutcome::SummaryRefused("missing successful completion event".into()));
+    }
+    if turn.text.trim().is_empty() {
+        return Err(CompactionOutcome::SummaryRefused("the model returned no summary text".into()));
     }
     Ok(turn.text.trim().to_owned())
 }

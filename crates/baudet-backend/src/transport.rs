@@ -194,7 +194,7 @@ impl Shared {
             enable_thinking,
             temperature: self.temperature,
             top_p: self.top_p,
-            store: self.endpoint.store,
+            store: request.store.unwrap_or(self.endpoint.store),
         };
         let body = match self.endpoint.protocol {
             Protocol::Responses => Value::Object(request_body(&shape)),

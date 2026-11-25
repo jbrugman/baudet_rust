@@ -330,6 +330,21 @@ fn chat_finish_reason_stop_marks_a_complete_summary() {
     assert!(finished.completed());
 }
 
+#[test]
+fn responses_terminal_output_supplies_text_when_no_text_was_streamed() {
+    let terminal = r#"{"type":"response.completed","response":{"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Summary"}]}]}}"#;
+    let mut terminal_only = TurnAccumulator::new();
+    assert_eq!(terminal_only.feed(None, terminal).unwrap().text.as_deref(), Some("Summary"));
+    let completed = terminal_only.finish();
+    assert!(completed.completed());
+    assert_eq!(completed.text, "Summary");
+
+    let mut streamed = TurnAccumulator::new();
+    streamed.feed(None, r#"{"type":"response.output_text.delta","delta":"Summary"}"#);
+    assert!(streamed.feed(None, terminal).is_none());
+    assert_eq!(streamed.finish().text, "Summary");
+}
+
 fn item_id_of(event: &ThreadEvent) -> Option<&str> {
     match event {
         ThreadEvent::ItemDelta { item_id, .. } => Some(item_id),
