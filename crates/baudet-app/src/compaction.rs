@@ -1,7 +1,7 @@
 use baudet_core::{Msg, Turn};
 use baudet_store::ContextLimits;
 
-pub const SUMMARY_PROMPT: &str = "Summarise the following conversation as compactly as possible. Keep: file names, symbols, decisions taken, open points, and every factual conclusion. No commentary, no preamble.";
+pub const SUMMARY_PROMPT: &str = "Summarise the conversation so work can continue after compaction. +    Preserve the active user request, constraints, decisions, completed actions and their results, +    and work still outstanding. Keep relevant file names, symbols and factual conclusions. +    Be concise and omit commentary and preamble.";
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CompactionOutcome {

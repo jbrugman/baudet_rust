@@ -131,14 +131,28 @@ impl TranscriptApp {
     }
 
     fn new_inner(backend: Arc<dyn Backend>, live_settings: bool, preview: bool) -> TranscriptApp {
+        let app = Self::new_with_storage(
+            backend, live_settings, preview, baudet_store::data_dir(), SidebarModel::open_default(),
+        );
+        Texts::set_language(app.settings.language());
+        app
+    }
+
+    fn new_with_storage(
+        backend: Arc<dyn Backend>,
+        live_settings: bool,
+        preview: bool,
+        root: std::path::PathBuf,
+        sidebar: SidebarModel,
+    ) -> TranscriptApp {
         let (intent_tx, intent_rx) = mpsc::channel::<Intent>();
         let (snap_tx, snap_rx) = ampcc::unbounded_channel();
         let state = Arc::new(AppState::new(backend, baudet_settings::DEFAULT_SYSTEM_PROMPT));
-        let root = Some(baudet_store::data_dir());
+        let settings_file = baudet_settings::SettingsFile::at(root.join("settings.json"));
+        let root = Some(root);
         let worker_root = if preview { None } else { root.clone() };
         let approvals = Arc::new(crate::approval::Approvals::default());
         let worker_approvals = Arc::clone(&approvals);
-        let sidebar = SidebarModel::open_default();
         // The sidebar and worker must see the same permission grants and session records.
         let catalog = sidebar.catalog().clone();
         let (settings_tx, settings_rx) = mpsc::channel::<SettingsCommand>();
@@ -148,12 +162,12 @@ impl TranscriptApp {
         });
         let (report_tx, settings_events) = mpsc::channel::<SettingsEvent>();
         let configure = live_settings.then(|| intent_tx.clone());
+        let writable_settings = settings_file.clone();
         let settings_worker = std::thread::spawn(move || {
-            settings_worker_loop(settings_rx, report_tx, configure, baudet_settings::SettingsFile::default_location())
+            settings_worker_loop(settings_rx, report_tx, configure, writable_settings)
         });
         let mut settings = SettingsView::new();
-        settings.load(&baudet_settings::SettingsFile::default_location());
-        Texts::set_language(settings.language());
+        settings.load(&settings_file);
         let dividers = settings.dividers();
         TranscriptApp {
             attachment: None,
@@ -782,15 +796,17 @@ impl TranscriptApp {
             .filter(|row| row.kind == baudet_core::ItemKind::Reasoning && !row.body.is_empty())
     }
 
-    fn reasoning_toggle(&mut self, ui: &mut egui::Ui) {
+    fn reasoning_toggle(&mut self, ui: &mut egui::Ui) -> egui::Response {
         let toggle = if self.thinking_hidden { Key::ShowReasoning } else { Key::HideReasoning };
-        if ui.button(Texts::get(toggle)).on_hover_text(Texts::get(Key::TipThinkingToggle)).clicked() {
+        let button = ui.button(Texts::get(toggle)).on_hover_text(Texts::get(Key::TipThinkingToggle));
+        if button.clicked() {
             self.thinking_hidden = !self.thinking_hidden;
             let show = !self.thinking_hidden;
             self.settings.set_show_reasoning(show);
             let _ = self.settings_tx.send(SettingsCommand::SaveReasoningVisibility(show));
             ui.request_repaint();
         }
+        button
     }
 
     fn thinking_dock(&mut self, ui: &mut egui::Ui) {
@@ -1085,6 +1101,15 @@ impl Drop for TranscriptApp {
 mod geometry_tests {
     use super::*;
 
+    fn isolated_app() -> (tempfile::TempDir, TranscriptApp) {
+        let root = tempfile::tempdir().unwrap();
+        let catalog = baudet_projects::Catalog::open(root.path()).unwrap();
+        let app = TranscriptApp::new_with_storage(
+            TranscriptApp::demo_backend(), false, false, root.path().to_owned(), SidebarModel::new(catalog),
+        );
+        (root, app)
+    }
+
     #[test]
     fn streaming_follows_the_bottom_again_after_loading_older_messages() {
         let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
@@ -1276,7 +1301,10 @@ mod geometry_tests {
 
     #[test]
     fn reasoning_can_be_collapsed_and_reopened() {
-        let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+        let (_root, mut app) = isolated_app();
+        app.thinking_hidden = true;
+        let (settings_tx, saved) = mpsc::channel();
+        app.settings_tx = settings_tx;
         app.rows.push(Row::from(&Item::Reasoning(baudet_core::ReasoningItem {
             item_id: "test/reasoning".into(),
             text: "Thinking summary".into(),
@@ -1285,22 +1313,21 @@ mod geometry_tests {
         let ctx = egui::Context::default();
         let mut paint = |events| {
             let raw = egui::RawInput { events, ..Default::default() };
+            let mut pos = egui::Pos2::ZERO;
             let output = ctx.run_ui(raw, |ui| {
-                app.reasoning_toggle(ui);
+                pos = app.reasoning_toggle(ui).rect.center();
                 app.thinking_dock(ui);
             });
-            let labels: Vec<_> = output.shapes.iter().filter_map(|shape| {
-                let egui::Shape::Text(text) = &shape.shape else { return None };
-                Some((text.galley.text().to_owned(), text.pos + text.galley.size() / 2.0))
-            }).collect();
+            let visible = output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Thinking summary")
+            });
             output.drop_without_applying_deltas();
-            labels
+            (pos, visible)
         };
 
-        for (toggle, visible) in [(Key::ShowReasoning, false), (Key::HideReasoning, true), (Key::ShowReasoning, false)] {
-            let labels = paint(Vec::new());
-            assert_eq!(labels.iter().any(|(text, _)| text == "Thinking summary"), visible);
-            let pos = labels.iter().find(|(text, _)| text == Texts::get(toggle)).unwrap().1;
+        assert!(!paint(Vec::new()).1);
+        for show in [true, false, true] {
+            let (pos, _) = paint(Vec::new());
             for pressed in [true, false] {
                 paint(vec![
                     egui::Event::PointerMoved(pos),
@@ -1312,6 +1339,8 @@ mod geometry_tests {
                     },
                 ]);
             }
+            assert_eq!(paint(Vec::new()).1, show);
+            assert!(matches!(saved.try_recv(), Ok(SettingsCommand::SaveReasoningVisibility(value)) if value == show));
         }
     }
 
@@ -1541,7 +1570,8 @@ mod geometry_tests {
 
     #[test]
     fn composer_and_thinking_grips_resize_independently() {
-        let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
+        let (_root, mut app) = isolated_app();
+        app.dividers = Dividers::default();
         app.thinking_hidden = false;
         app.rows.push(Row::from(&Item::Reasoning(baudet_core::ReasoningItem {
             item_id: "test/reasoning".into(),
@@ -1761,15 +1791,18 @@ fn the_worker_learns_from_the_endpoint_and_model_that_received_the_turn() {
         final_event: None,
         incomplete_reason: Some("Maximum context length is 8,192 tokens".into()),
     });
-    let state = Arc::new(AppState::new(Arc::new(BackendWithEndpoint(ScriptedBackend::new(vec![script]))), "test"));
-    state.set_request_choices(Some("chosen-model".into()), None, None);
     let folder = tempfile::tempdir().unwrap();
+    let state = Arc::new(AppState::new(Arc::new(BackendWithEndpoint(ScriptedBackend::new(vec![script]))), "test")
+        .with_persistence(folder.path(), "default-model").unwrap());
+    state.set_request_choices(Some("chosen-model".into()), None, None);
     let catalog = baudet_projects::Catalog::open(folder.path()).unwrap();
+    catalog.upsert_session(&state.session_id(), Some("default-model"), None, 0).unwrap();
+    let root = folder.path().to_owned();
     let (intents, worker_intents) = mpsc::channel();
     let (snapshots, _reports) = ampcc::unbounded_channel();
     let (settings, commands) = mpsc::channel();
     let worker = std::thread::spawn(move || {
-        worker_loop(state, None, worker_intents, snapshots, Arc::default(), catalog, settings);
+        worker_loop(state, Some(root), worker_intents, snapshots, Arc::default(), catalog, settings);
     });
 
     intents.send(Intent::Submit("question".into(), None)).unwrap();
@@ -1812,7 +1845,9 @@ fn worker_loop(
             loading,
             context,
             has_more_older: state.paging().0,
-            reason,
+            reason: if busy && state.is_auto_compacting() {
+                Some(Texts::get(Key::AutoCompacting).to_owned())
+            } else { reason },
             rejected_draft,
             compaction: None,
         });
@@ -1877,7 +1912,8 @@ fn worker_loop(
                 }
                 let project = state.project().and_then(|id| catalog.as_ref()?.project(&id));
                 let tools_active = AppState::tools_active(&settings, project.as_ref());
-                let handle = if !tools_active {
+                let auto_compact = settings.context_strategy == baudet_settings::config::ContextStrategy::AutoCompact;
+                let handle = if !tools_active && !auto_compact {
                     use baudet_app::session::SendError;
                     let sent = match state.send_with_context(&text, image.clone(), &settings) {
                         Ok(sent) => sent,
@@ -1903,15 +1939,20 @@ fn worker_loop(
                 let approvals = Arc::clone(&approvals);
                 let servers = Arc::clone(&servers);
                 let drain = std::thread::spawn(move || {
-                    let failure = if tools_active {
+                    let failure = if tools_active || auto_compact {
                         let approval_cancelled = Arc::clone(&tool_cancelled);
-                        folder.run_tools(&text, image.as_deref(), baudet_app::session::tool_turn::ToolTurn {
+                        let run = baudet_app::session::tool_turn::ToolTurn {
                             project: project.as_ref(),
                             settings: &settings,
                             servers: &mut servers.lock().unwrap(),
                             approval: Arc::new(move |request| approvals.request(request, &approval_cancelled)),
                             cancelled: tool_cancelled,
-                        }).ok().flatten()
+                        };
+                        if tools_active {
+                            folder.run_tools(&text, image.as_deref(), run)
+                        } else {
+                            folder.run_auto_chat(&text, image.as_deref(), run)
+                        }.ok().flatten()
                     } else if let Some(handle) = handle {
                         let mut failure = None;
                         let (tx, _rx) = ampcc::unbounded_channel();

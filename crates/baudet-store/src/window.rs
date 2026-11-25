@@ -9,11 +9,16 @@ pub enum ContextStrategy {
     RecentMessages,
     RollingWindow,
     StopAtLimit,
+    AutoCompact,
 }
 
 impl ContextStrategy {
     pub fn supports_server_session(self) -> bool {
         self == ContextStrategy::StopAtLimit
+    }
+
+    pub fn trims_history(self) -> bool {
+        matches!(self, Self::RecentMessages | Self::RollingWindow)
     }
 
     pub fn trims_by_turn_count(self) -> bool {
@@ -22,7 +27,7 @@ impl ContextStrategy {
 }
 
 pub fn bound(history: &[Msg], strategy: ContextStrategy, budget_tokens: usize, keep_recent: usize) -> Vec<Msg> {
-    if strategy == ContextStrategy::StopAtLimit {
+    if !strategy.trims_history() {
         return history.to_vec();
     }
     trim(history, strategy, budget_tokens, keep_recent)
@@ -38,7 +43,7 @@ pub fn trim(history: &[Msg], strategy: ContextStrategy, budget_tokens: usize, ke
             &history[history.len() - keep_recent..]
         }
         ContextStrategy::RecentMessages | ContextStrategy::RollingWindow => history,
-        ContextStrategy::StopAtLimit => return history.to_vec(),
+        ContextStrategy::StopAtLimit | ContextStrategy::AutoCompact => return history.to_vec(),
     };
     fit(window, budget_chars)
 }

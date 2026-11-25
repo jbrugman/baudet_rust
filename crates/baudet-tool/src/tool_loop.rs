@@ -2,6 +2,7 @@
 use crate::call_extractor::PromptedCallExtractor;
 use crate::tool::{ToolCall, ToolContext, ToolRegistry, ToolResult, ToolRunner, Undo};
 use crate::turn_source::{CallExtractor, TurnRequest, TurnSource};
+use baudet_core::error::CONTEXT_LIMIT_REASON;
 use baudet_core::item::{
     CommandExecutionItem, FileChangeItem, FileChangeKind, ItemKind, ItemStatus, ToolCallItem,
 };
@@ -21,9 +22,7 @@ const TRUNCATION_SKELETON: &str = "\n\n[... output truncated: keeping the first 
 
 const MAX_ITERATIONS_REASON: &str = "max_tool_iterations";
 
-const CONTEXT_LIMIT_REASON: &str = "context_limit";
-
-const BLANK_NUDGE: &str = "Your previous turn returned neither an answer nor a tool call. If you intend to use a tool, emit the call now; otherwise reply with your final answer.";
+pub const BLANK_NUDGE: &str = "Your previous turn returned neither an answer nor a tool call. If you intend to use a tool, emit the call now; otherwise reply with your final answer.";
 
 fn is_blankish(text: &str) -> bool {
     text.chars().all(|c| c.is_whitespace() || c == '.' || c == '\u{2026}')
@@ -344,8 +343,8 @@ impl<'a> ToolLoop<'a> {
         let mut call_steps = 0u32;
         let mut blanks = 0u32;
 
-        for _ in 0..self.max_iterations {
-            if self.context_ceiling > 0 && self.chain_response_id && estimate_tokens_of(&msgs) > self.context_ceiling {
+        for iteration in 0..=self.max_iterations {
+            if self.context_ceiling > 0 && estimate_tokens_of(&msgs) > self.context_ceiling {
                 return LoopOutcome::CapReached {
                     response_id: prev,
                     steps,
@@ -353,6 +352,9 @@ impl<'a> ToolLoop<'a> {
                     undos,
                     incomplete_reason: CONTEXT_LIMIT_REASON.to_string(),
                 };
+            }
+            if iteration == self.max_iterations {
+                break;
             }
             run.sink.reply_started();
             let turn = self.ask(run, &mut prev, &msgs, tools.as_ref(), &mut pending_image).await;
@@ -394,7 +396,7 @@ impl<'a> ToolLoop<'a> {
             prev = settle.response_id.clone();
         }
         self.add_assistant(run, &mut msgs, &mut added, &settle);
-        if self.extractor.extract(&settle, self.registry).is_empty() {
+        if settle.incomplete_reason.is_some() || self.extractor.extract(&settle, self.registry).is_empty() {
             steps.push(ToolStep { assistant_text: settle.text.clone(), calls: Vec::new(), results: Vec::new() });
             return LoopOutcome::Completed {
                 final_text: settle.text.clone(),
@@ -1386,14 +1388,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_ceiling_is_only_enforced_for_a_server_session() {
+    async fn the_ceiling_is_enforced_without_a_server_session() {
         let reg = two_readers();
         let asking = StubSource::calls_for("werk", &[("read_file", json!({"file": "a"}))]);
         let src = source(vec![asking, StubSource::prose("klaar")]);
         let (outcome, _sink) =
             drive(&reg, &src, &[Msg::user("vraag")], &ctx(), 5, |l| l.context_ceiling(1)).await;
-        assert!(matches!(outcome, LoopOutcome::Completed { .. }), "geen keten, dus geen plafond: {outcome:?}");
-        assert_eq!(turns(&src), 2);
+        assert!(matches!(outcome, LoopOutcome::CapReached { incomplete_reason, .. }
+            if incomplete_reason == CONTEXT_LIMIT_REASON));
+        assert_eq!(turns(&src), 0);
+    }
+
+    #[tokio::test]
+    async fn a_large_result_is_retained_when_the_final_request_would_exceed_the_ceiling() {
+        let output = "saved observation ".repeat(200);
+        let reg = ToolRegistry::new(vec![Box::new(StubToolWithOutput {
+            inner: StubTool::new("read_file"),
+            output: output.clone(),
+        })]);
+        let src = source(vec![
+            StubSource::calls_for("Inspect the file", &[("read_file", json!({"file": "a"}))]),
+            StubSource::prose("This request should not be sent"),
+        ]);
+        let history = [Msg::user("Review the project")];
+        let (outcome, _) = drive(&reg, &src, &history, &ctx(), 1, |loop_| loop_.context_ceiling(100)).await;
+        let LoopOutcome::CapReached { incomplete_reason, messages, steps, .. } = outcome else {
+            panic!("expected the context ceiling to stop the final request");
+        };
+        assert_eq!(incomplete_reason, CONTEXT_LIMIT_REASON);
+        assert_eq!(turns(&src), 1);
+        assert_eq!(steps[0].results[0].output, output);
+        assert!(messages.iter().any(|msg| msg.content.contains(&output)));
     }
 
     #[tokio::test]

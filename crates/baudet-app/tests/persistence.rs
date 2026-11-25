@@ -327,6 +327,227 @@ fn compaction_commits_summary_with_retained_context_and_keeps_the_display_trail(
     assert_eq!(reopened.summary.as_deref(), Some("retained facts"));
     assert_eq!(reopened.messages.iter().map(|msg| msg.content.as_str()).collect::<Vec<_>>(), ["recent question", "recent answer"]);
     assert_eq!(reopened.items, before);
+
+    let backend = Arc::new(ScriptedBackend::new(vec![]));
+    state.replace_backend(backend.clone());
+    let _sent = state.send("Continue the request").unwrap();
+    let (request, _) = backend.last_request().unwrap();
+    assert!(request.system.contains("retained facts"));
+    assert!(!request.system.contains(baudet_store::CONTEXT_LOSS_NOTE));
+    assert!(request.previous_response_id.is_none());
+}
+
+#[test]
+fn tool_turns_replay_long_history_or_stop_without_losing_the_request() {
+    use baudet_app::session::tool_turn::ToolTurn;
+    use baudet_projects::{FolderPermission, Permissions, Project};
+    use baudet_settings::config::ContextStrategy;
+    use baudet_tool::mcp::McpServers;
+    use std::sync::atomic::AtomicBool;
+
+    let root = scratch("tool-context");
+    let (backend, state) = persistent(&root, vec![answer("tu_1", "Started"), answer("tu_2", "Reviewed")]);
+    let original = format!("Review the project and report findings.\n{}", "original context ".repeat(3_500));
+    run_turn(&state, &original);
+    let mut project = Project::new("p-1".into(), "Fixture", 0);
+    project.folder_path = Some(root.to_string_lossy().into_owned());
+    project.permissions = Permissions::encode([FolderPermission::Read]);
+    let mut settings = baudet_settings::Settings {
+        context_strategy: ContextStrategy::StopAtLimit,
+        context_budget_tokens: 0,
+        model: Some("unknown-fixture-model".into()),
+        use_server_session: false,
+        ..Default::default()
+    };
+    let submit = |text, settings: &baudet_settings::Settings| {
+        state.run_tools(text, None, ToolTurn {
+            project: Some(&project),
+            settings,
+            servers: &mut McpServers::default(),
+            approval: Arc::new(|_| ApprovalDecision::Decline),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }).unwrap()
+    };
+
+    submit("Continue the review", &settings);
+    let (request, _) = backend.last_request().unwrap();
+    assert!(baudet_backend::protocol::wire_history(&request.history).iter().any(|msg| msg.content == original));
+    assert!(!request.system.contains(baudet_store::CONTEXT_LOSS_NOTE));
+    assert_eq!(backend.turns_started(), 2);
+
+    settings.context_budget_tokens = 12_000;
+    let stopped = submit("Check the last issue", &settings);
+    assert!(baudet_core::error::looks_like_context_overflow(stopped.as_deref()));
+    assert_eq!(backend.turns_started(), 2, "the oversized request never reaches the backend");
+    assert_eq!(state.persist(), None);
+    let messages = state.build_session().unwrap().messages;
+    assert!(messages.iter().any(|msg| msg.content == original));
+    assert_eq!(messages.last().unwrap().content, "Check the last issue");
+}
+
+#[test]
+fn auto_compact_keeps_a_running_tool_turn_and_persists_the_checkpoint() {
+    use baudet_app::session::tool_turn::ToolTurn;
+    use baudet_projects::{FolderPermission, Permissions, Project};
+    use baudet_settings::config::ContextStrategy;
+    use baudet_tool::mcp::McpServers;
+    use std::sync::atomic::AtomicBool;
+
+    let completed = |id: &str, text: &str| {
+        let mut events = answer(id, text);
+        events.push(ThreadEvent::TurnCompleted {
+            thread_id: "th_1".into(), turn_id: id.into(), response_id: None,
+            usage: None, final_event: Some("response.completed".into()), incomplete_reason: None,
+        });
+        events
+    };
+    let root = scratch("automatic-compact");
+    let (backend, state) = persistent(&root, vec![
+        completed("tu_1", "Ready"),
+        completed("tu_2", r#"{"tool":"read_file","arguments":{"file":"example.txt"}}"#),
+        completed("tu_3", "Continue the review and report the findings from the file."),
+        completed("tu_4", "Review complete"),
+    ]);
+    run_turn(&state, &"previous research ".repeat(600));
+    std::fs::write(root.join("example.txt"), "file observation ".repeat(600)).unwrap();
+    let mut project = Project::new("p-1".into(), "Fixture", 0);
+    project.folder_path = Some(root.to_string_lossy().into_owned());
+    project.permissions = Permissions::encode([FolderPermission::Read]);
+    let settings = baudet_settings::Settings {
+        context_strategy: ContextStrategy::AutoCompact,
+        context_budget_tokens: 6_000,
+        context_keep_recent_messages: 1,
+        model: Some("unknown-fixture-model".into()),
+        ..Default::default()
+    };
+    assert_eq!(state.run_tools("Review the file", None, ToolTurn {
+        project: Some(&project), settings: &settings,
+        servers: &mut McpServers::default(),
+        approval: Arc::new(|_| ApprovalDecision::Decline),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    }).unwrap(), None);
+
+    assert_eq!(backend.turns_started(), 4);
+    let (request, _) = backend.last_request().unwrap();
+    assert!(request.system.contains("Continue the review and report the findings"));
+    assert!(request.user_text.contains("file observation"));
+    assert!(baudet_backend::protocol::wire_history(&request.history).iter().any(|msg| msg.content == "Review the file"));
+    assert!(request.previous_response_id.is_none());
+    let rows = state.rows();
+    assert_eq!(rows.iter().filter(|item| matches!(item, Item::ToolCall(_))).count(), 1);
+    assert_eq!(state.persist(), None);
+    let reopened = state.build_session().unwrap();
+    assert!(reopened.summary.unwrap().contains("Continue the review"));
+    assert!(reopened.messages.iter().any(|msg| msg.content.contains("file observation")));
+    assert!(reopened.messages.iter().any(|msg| msg.content == "Review the file"));
+    assert_eq!(reopened.items, rows);
+}
+
+#[test]
+fn auto_compact_retries_plain_chat_after_an_unknown_window_rejects_the_request() {
+    use baudet_app::session::tool_turn::ToolTurn;
+    use baudet_settings::config::ContextStrategy;
+    use baudet_tool::mcp::McpServers;
+    use std::sync::atomic::AtomicBool;
+
+    let terminal = |turn_id: &str, failure: Option<&str>| ThreadEvent::TurnCompleted {
+        thread_id: "th_1".into(), turn_id: turn_id.into(), response_id: None, usage: None,
+        final_event: Some(if failure.is_some() { "response.failed" } else { "response.completed" }.into()),
+        incomplete_reason: failure.map(str::to_owned),
+    };
+    let root = scratch("auto-compact-server-limit");
+    let mut summary = answer("tu_3", "The user is reviewing the project.");
+    summary.push(terminal("tu_3", None));
+    let mut resumed = answer("tu_4", "Continuing the review.");
+    resumed.push(terminal("tu_4", None));
+    let (backend, state) = persistent(&root, vec![
+        answer("tu_1", "Ready"),
+        vec![terminal("tu_2", Some("context_length_exceeded"))],
+        summary,
+        resumed,
+    ]);
+    run_turn(&state, "Start a project review.");
+    let settings = baudet_settings::Settings {
+        context_strategy: ContextStrategy::AutoCompact,
+        model: Some("unknown-fixture-model".into()),
+        ..Default::default()
+    };
+    let result = state.run_auto_chat("Continue", None, ToolTurn {
+        project: None, settings: &settings, servers: &mut McpServers::default(),
+        approval: Arc::new(|_| ApprovalDecision::Decline),
+        cancelled: Arc::new(AtomicBool::new(false)),
+    }).unwrap();
+    let (request, _) = backend.last_request().unwrap();
+    assert_eq!(backend.turns_started(), 4);
+    assert_eq!(request.user_text, "Continue");
+    assert!(request.system.contains("The user is reviewing the project."));
+    assert!(request.tools.is_none());
+    assert_eq!(result, None);
+    assert_eq!(state.persist(), None);
+    let reopened = state.build_session().unwrap();
+    assert_eq!(reopened.messages.iter().filter(|msg| msg.content == "Continue").count(), 1);
+}
+
+#[test]
+fn stopping_during_auto_compaction_cancels_the_summary_and_keeps_history() {
+    use baudet_app::session::tool_turn::ToolTurn;
+    use baudet_backend::{BackendError, SendRequest, TurnHandle};
+    use baudet_settings::config::ContextStrategy;
+    use baudet_tool::mcp::McpServers;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct StalledSummary {
+        started: std::sync::mpsc::Sender<()>,
+        cancelled: Arc<AtomicBool>,
+    }
+    impl Backend for StalledSummary {
+        fn send(&self, request: SendRequest) -> Result<TurnHandle, BackendError> {
+            assert_eq!(request.system, baudet_app::compaction::SUMMARY_PROMPT);
+            let (tx, rx) = mpsc::unbounded_channel();
+            self.started.send(()).unwrap();
+            let cancelled = self.cancelled.clone();
+            Ok(TurnHandle::new("summary", rx, |_| {}, move || {
+                let _keep_open = &tx;
+                cancelled.store(true, Ordering::Relaxed);
+            }))
+        }
+    }
+
+    let root = scratch("auto-compact-stop");
+    let (_, state) = persistent(&root, vec![answer("tu_1", "Ready")]);
+    let original = "previous context ".repeat(850);
+    run_turn(&state, &original);
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let handle_cancelled = Arc::new(AtomicBool::new(false));
+    state.replace_backend(Arc::new(StalledSummary { started: started_tx, cancelled: handle_cancelled.clone() }));
+    let settings = baudet_settings::Settings {
+        context_strategy: ContextStrategy::AutoCompact,
+        context_budget_tokens: 3_000,
+        model: Some("unknown-fixture-model".into()),
+        ..Default::default()
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    std::thread::scope(|scope| {
+        let thread_stop = stop.clone();
+        let settings = &settings;
+        let state = &state;
+        let runner = scope.spawn(move || state.run_auto_chat("Continue the review", None, ToolTurn {
+            project: None, settings, servers: &mut McpServers::default(),
+            approval: Arc::new(|_| ApprovalDecision::Decline), cancelled: thread_stop,
+        }));
+        let started = started_rx.recv_timeout(std::time::Duration::from_secs(3));
+        let showed_progress = state.is_auto_compacting();
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(runner.join().unwrap().unwrap().as_deref(), Some("cancelled"));
+        assert!(started.is_ok() && showed_progress);
+    });
+    assert!(handle_cancelled.load(Ordering::Relaxed));
+    assert!(!state.is_auto_compacting());
+    assert_eq!(state.persist(), None);
+    let reopened = state.build_session().unwrap();
+    assert!(reopened.summary.is_none());
+    assert!(reopened.messages.iter().any(|msg| msg.content == original));
+    assert_eq!(reopened.messages.last().unwrap().content, "Continue the review");
 }
 
 #[test]

@@ -1,5 +1,5 @@
 
-use baudet_ui::{palette, Tab, TranscriptApp, GROUP_GAP, ROW_GAP};
+use baudet_ui::{palette, settings_body, SettingsView, GROUP_GAP, ROW_GAP};
 use eframe::egui;
 
 const SCREEN: [f32; 2] = [1200.0, 1600.0];
@@ -25,8 +25,16 @@ struct Geschilderd {
 fn settings() -> Geschilderd {
     let ctx = egui::Context::default();
     palette::install(&ctx);
-    let mut app = TranscriptApp::new(TranscriptApp::demo_backend()).with_tab(Tab::Settings);
-    let out = ctx.run_ui(input(), |ui| app.paint(ui));
+    let mut view = SettingsView::new();
+    let (commands, _received) = std::sync::mpsc::channel();
+    let out = ctx.run_ui(input(), |ui| {
+        egui::Panel::left("projects").exact_size(280.0).show(ui, |_| {});
+        egui::Panel::right("filetree").exact_size(320.0).show(ui, |_| {});
+        egui::Panel::top("fixture-header").exact_size(70.0).show(ui, |_| {});
+        egui::CentralPanel::default().show(ui, |ui| {
+            settings_body(ui, &mut view, &commands);
+        });
+    });
     let vormen: Vec<egui::Shape> = out.shapes.iter().map(|c| c.shape.clone()).collect();
     let panel = |id| egui::containers::PanelState::load(&ctx, egui::Id::new(id)).unwrap().outer_rect;
     let midden = panel("projects").right()..=panel("filetree").left();

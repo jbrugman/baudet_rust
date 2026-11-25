@@ -1,5 +1,7 @@
 use super::{history_events, AppState, RequestChoices, TurnBusy};
-use baudet_backend::{Backend, SendRequest};
+use baudet_backend::{Backend, SendRequest, TurnHandle};
+use baudet_store::ContextStrategy;
+use crate::compaction::{CompactionOutcome, CompactionPlan, Compactor, SUMMARY_PROMPT};
 use baudet_core::{
     AgentMessageItem, ApprovalDecision, ApprovalRequest, CommandExecutionItem, FileChangeItem, ImageItem, Item,
     ItemKind, ItemStatus, Msg, ReasoningItem, ThreadEvent, ToolCallItem, Turn, UserMessageItem,
@@ -44,13 +46,24 @@ impl AppState {
         if !Self::tools_active(run.settings, run.project) {
             return Err(TurnBusy);
         }
+        self.run_context_turn(text, image, run, true)
+    }
+
+    pub fn run_auto_chat(&self, text: &str, image: Option<&str>, run: ToolTurn<'_>) -> Result<Option<String>, TurnBusy> {
+        if run.settings.context_strategy != baudet_settings::config::ContextStrategy::AutoCompact {
+            return Err(TurnBusy);
+        }
+        self.run_context_turn(text, image, run, false)
+    }
+
+    fn run_context_turn(&self, text: &str, image: Option<&str>, run: ToolTurn<'_>, use_tools: bool) -> Result<Option<String>, TurnBusy> {
         self.live_turns.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).map_err(|_| TurnBusy)?;
-        let result = self.tool_turn(text, image, run);
+        let result = self.tool_turn(text, image, run, use_tools);
         self.finish();
         result
     }
 
-    fn tool_turn(&self, text: &str, image: Option<&str>, run: ToolTurn<'_>) -> Result<Option<String>, TurnBusy> {
+    fn tool_turn(&self, text: &str, image: Option<&str>, run: ToolTurn<'_>, use_tools: bool) -> Result<Option<String>, TurnBusy> {
         let turn_id = format!("tu_{}", self.turn_counter.fetch_add(1, Ordering::SeqCst) + 1);
         let sink = Sink {
             app: self,
@@ -71,7 +84,7 @@ impl AppState {
             (active.messages.clone(), active.summary.clone(), active.previous_response_id.clone())
         };
 
-        let project = run.project.filter(|_| tool_gate::decide(true, run.project).is_active());
+        let project = run.project.filter(|_| use_tools && tool_gate::decide(true, run.project).is_active());
         let root = project.and_then(|project| project.folder_path.as_deref());
         let read = project.is_some_and(|project| project.is_granted(FolderPermission::Read));
         let write = project.is_some_and(|project| project.is_granted(FolderPermission::Write));
@@ -90,7 +103,9 @@ impl AppState {
         if exec {
             tools.push(Box::new(ExecuteTool::for_project(git)));
         }
-        tools.extend(run.servers.tools(&s.mcp_servers, &run.cancelled));
+        if use_tools {
+            tools.extend(run.servers.tools(&s.mcp_servers, &run.cancelled));
+        }
         let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
         let extra: Vec<ExtraTool> = tools
             .iter()
@@ -101,19 +116,35 @@ impl AppState {
                 parameters: tool.parameters().to_string(),
             })
             .collect();
-        let system = format!("{}\n\n{}", s.resolved_system_prompt(), protocol_for(&names, &extra, git_writes));
+        let mut system = s.resolved_system_prompt().to_owned();
+        if use_tools {
+            system.push_str("\n\n");
+            system.push_str(&protocol_for(&names, &extra, git_writes));
+        }
         let registry = ToolRegistry::new(tools);
         let ctx = tool_context(run, root, read, write, exec);
         let choices = self.choices.lock().unwrap().clone();
         let backend = self.backend();
         let limits = Self::context_limits(&*backend, s, &choices);
         let previous = previous.as_deref().filter(|_| Self::server_session_eligible(s, &limits));
-        let source =
-            Source { backend: &*backend, choices, system, summary, limits, cancelled: Arc::clone(&ctx.1) };
+        let context_ceiling = if limits.strategy == ContextStrategy::StopAtLimit {
+            limits.context_ceiling()
+        } else {
+            0
+        };
+        let source = Source {
+            backend: &*backend,
+            choices,
+            system,
+            replay: Mutex::new(Replay { summary, folded: 0, prefix: Vec::new(), initial_len: history.len() }),
+            limits,
+            cancelled: Arc::clone(&ctx.1),
+            compacting: &self.auto_compacting,
+        };
         let outcome = tokio::runtime::Builder::new_current_thread().build().expect("local tool runtime").block_on(
             ToolLoop::new(&source, &registry, s.max_tool_iterations)
                 .chain_response_id(previous.is_some())
-                .context_ceiling(source.limits.context_ceiling())
+                .context_ceiling(context_ceiling)
                 .run(&mut LoopRun {
                     history: &history,
                     ctx: &ctx.0,
@@ -125,7 +156,7 @@ impl AppState {
                     sink: &sink,
                 }),
         );
-        let (messages, response_id, usage, final_event, failure) = match outcome {
+        let (messages, response_id, usage, final_event, mut failure) = match outcome {
             LoopOutcome::Completed { messages, final_turn, .. } => {
                 (messages, final_turn.response_id, final_turn.usage, final_turn.final_event, final_turn.incomplete_reason)
             }
@@ -133,7 +164,26 @@ impl AppState {
                 (messages, None, None, None, Some(incomplete_reason))
             }
         };
-        self.active.lock().unwrap().messages.extend(messages.into_iter().filter(|msg| !msg.content.trim().is_empty()));
+        {
+            let mut active = self.active.lock().unwrap();
+            active.messages.extend(messages.into_iter().filter(|msg| !msg.content.trim().is_empty()));
+            if baudet_core::error::looks_like_context_overflow(failure.as_deref()) {
+                // The server's last response may predate the locally preserved tool results.
+                active.previous_response_id = None;
+            }
+        }
+        let replay = source.replay.into_inner().unwrap();
+        if replay.folded > 0 {
+            let retained = {
+                let active = self.active.lock().unwrap();
+                active.messages.strip_prefix(replay.prefix.as_slice()).map(|tail| replay.retained(tail, text).into_owned())
+            };
+            let saved = retained.ok_or_else(|| "the compacted history changed before it could be saved".to_owned())
+                .and_then(|retained| self.commit_compacted_context(&retained, replay.summary.as_deref().unwrap()));
+            if let Err(error) = saved {
+                failure = Some(format!("Automatic compaction could not be saved: {error}"));
+            }
+        }
         if !ctx.1.load(Ordering::Relaxed) {
             self.apply(&ThreadEvent::TurnCompleted {
                 thread_id: "th_1".into(),
@@ -217,81 +267,195 @@ fn tool_context(run: ToolTurn<'_>, root: Option<&str>, read: bool, write: bool, 
     (ctx, run.cancelled)
 }
 
+struct Replay {
+    summary: Option<String>,
+    folded: usize,
+    prefix: Vec<Msg>,
+    initial_len: usize,
+}
+
+impl Replay {
+    fn retained<'a>(&self, tail: &'a [Msg], user_text: &str) -> std::borrow::Cow<'a, [Msg]> {
+        if self.folded < self.initial_len {
+            return std::borrow::Cow::Borrowed(tail);
+        }
+        let mut retained = Vec::with_capacity(tail.len() + 1);
+        // Keep the active request verbatim in its original user role, ahead of tool results.
+        retained.push(Msg::user(user_text));
+        retained.extend_from_slice(tail);
+        std::borrow::Cow::Owned(retained)
+    }
+}
+
 struct Source<'a> {
     backend: &'a dyn Backend,
     choices: RequestChoices,
     system: String,
-    summary: Option<String>,
+    replay: Mutex<Replay>,
     limits: baudet_store::ContextLimits,
     cancelled: Arc<AtomicBool>,
+    compacting: &'a AtomicBool,
 }
 
 fn failed(detail: impl Into<String>) -> Turn {
     Turn { final_event: None, incomplete_reason: Some(detail.into()), ..Turn::text("") }
 }
 
+impl Source<'_> {
+    fn receive(&self, request: SendRequest, on_delta: &mut dyn FnMut(&str), on_reasoning: &mut dyn FnMut(&str)) -> Turn {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return failed("cancelled");
+        }
+        let mut handle: TurnHandle = match self.backend.send(request) {
+            Ok(handle) => handle,
+            Err(error) => return failed(error.to_string()),
+        };
+        let mut turn = failed("stream ended before completion");
+        loop {
+            if self.cancelled.load(Ordering::Relaxed) {
+                handle.cancel();
+                return Turn { text: turn.text, ..failed("cancelled") };
+            }
+            match handle.events().try_recv() {
+                Ok(ThreadEvent::ItemDelta { kind: ItemKind::AgentMessage, delta, .. }) => {
+                    turn.text.push_str(&delta);
+                    on_delta(&delta);
+                }
+                Ok(ThreadEvent::ItemDelta { kind: ItemKind::Reasoning, delta, .. }) => on_reasoning(&delta),
+                Ok(ThreadEvent::ItemCompleted { item: Item::AgentMessage(message), .. }) if !message.text.is_empty() => {
+                    turn.text = message.text;
+                }
+                Ok(ThreadEvent::TurnCompleted { response_id, usage, final_event, incomplete_reason, .. }) => {
+                    if let Some(result) = handle.take_result() {
+                        return result;
+                    }
+                    turn.response_id = response_id;
+                    turn.usage = usage;
+                    turn.final_event = final_event;
+                    turn.incomplete_reason = incomplete_reason;
+                    return turn;
+                }
+                Ok(_) => {}
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(5)),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return turn,
+            }
+        }
+    }
+
+    fn compact(&self, replay: &mut Replay, history: &[Msg]) -> Result<(), String> {
+        let remaining = &history[replay.folded..];
+        if remaining.len() < 2 {
+            return Err(baudet_core::error::CONTEXT_LIMIT_REASON.to_owned());
+        }
+        let mut plan = CompactionPlan::from(&self.limits);
+        plan.keep_recent = plan.keep_recent.clamp(1, remaining.len() / 2);
+        self.compacting.store(true, Ordering::Relaxed);
+        let outcome = Compactor::fold(&plan, remaining, replay.summary.as_deref(), |text, max_tokens| {
+            if self.cancelled.load(Ordering::Relaxed) {
+                return Err("cancelled".into());
+            }
+            Ok(self.receive(SendRequest {
+                system: SUMMARY_PROMPT.to_owned(),
+                user_text: text.to_owned(),
+                model: self.choices.model.clone(),
+                reasoning: Some(baudet_backend::openai::REASONING_NONE.to_owned()),
+                max_output_tokens: Some(max_tokens),
+                ..Default::default()
+            }, &mut |_| {}, &mut |_| {}))
+        });
+        self.compacting.store(false, Ordering::Relaxed);
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
+        match outcome? {
+            CompactionOutcome::Compacted { summary, folded } => {
+                replay.folded += folded;
+                replay.prefix = history[..replay.folded].iter().enumerate()
+                    .filter(|(index, msg)| *index < replay.initial_len
+                        || (!msg.content.trim().is_empty()
+                            && !(msg.role == "user" && msg.content == baudet_tool::tool_loop::BLANK_NUDGE)))
+                    .map(|(_, msg)| msg.clone())
+                    .collect();
+                replay.summary = Some(summary);
+                Ok(())
+            }
+            CompactionOutcome::NothingToFold => Err(baudet_core::error::CONTEXT_LIMIT_REASON.to_owned()),
+            CompactionOutcome::OversizedTurn { .. } => Err("Automatic compaction could not fit the oldest message".into()),
+            CompactionOutcome::SummaryRefused(reason) => Err(format!("Automatic compaction failed: {reason}")),
+        }
+    }
+}
+
 impl TurnSource for Source<'_> {
     fn next_turn<'a>(&'a self, mut request: TurnRequest<'a>) -> TurnFuture<'a> {
         Box::pin(async move {
-            if self.cancelled.load(Ordering::Relaxed) {
-                return failed("cancelled");
-            }
-            let (history, user_text) = baudet_tool::transcript::for_loop(
-                request.history,
-                self.limits.strategy,
-                self.limits.trim_budget(100),
-                request.previous_response_id.is_some(),
-                self.limits.keep_recent_messages,
-            );
-            let trimmed = history.len() + 1 < request.history.len() && request.previous_response_id.is_none();
-            let mut handle = match self.backend.send(SendRequest {
-                turn_id: None,
-                system: baudet_store::instructions(&self.system, self.summary.as_deref(), trimmed),
-                user_text,
-                history: history_events(&history),
-                previous_response_id: request.previous_response_id.map(str::to_owned),
-                tools: request.tools.map(serde_json::Value::to_string),
-                image: request.image.map(str::to_owned),
-                model: self.choices.model.clone(),
-                reasoning: self.choices.reasoning.clone(),
-                max_output_tokens: self.choices.max_output_tokens,
-            }) {
-                Ok(handle) => handle,
-                Err(error) => return failed(error.to_string()),
-            };
-            let mut turn = failed("stream ended before completion");
+            let mut replay = self.replay.lock().unwrap();
+            let auto = self.limits.strategy == ContextStrategy::AutoCompact;
+            let tools = request.tools.map(serde_json::Value::to_string);
+            let mut retried = false;
             loop {
                 if self.cancelled.load(Ordering::Relaxed) {
-                    handle.cancel();
-                    return Turn { text: turn.text, ..failed("cancelled") };
+                    return failed("cancelled");
                 }
-                match handle.events().try_recv() {
-                    Ok(ThreadEvent::ItemDelta { kind: ItemKind::AgentMessage, delta, .. }) => {
-                        turn.text.push_str(&delta);
-                        (request.on_delta)(&delta);
-                    }
-                    Ok(ThreadEvent::ItemDelta { kind: ItemKind::Reasoning, delta, .. }) => {
-                        (request.on_reasoning)(&delta)
-                    }
-                    Ok(ThreadEvent::ItemCompleted { item: Item::AgentMessage(message), .. })
-                        if !message.text.is_empty() =>
+                let active_request = &request.history[replay.initial_len - 1].content;
+                let replay_history = replay.retained(&request.history[replay.folded..], active_request);
+                let previous = request.previous_response_id.filter(|_| !auto);
+                let (history, user_text) = baudet_tool::transcript::for_loop(
+                    &replay_history,
+                    self.limits.strategy,
+                    self.limits.trim_budget(100),
+                    previous.is_some(),
+                    self.limits.keep_recent_messages,
+                );
+                let trimmed = history.len() + 1 < replay_history.len() && previous.is_none();
+                let system = baudet_store::instructions(&self.system, replay.summary.as_deref(), trimmed);
+                if !self.limits.strategy.trims_history() {
+                    let chars = replay_history.iter().map(baudet_store::cost_chars).sum::<usize>()
+                        + system.chars().count()
+                        + tools.as_ref().map_or(0, |tools| tools.chars().count());
+                    let tokens = chars.div_ceil(3) as u64;
+                    let over = self.limits.over(tokens, self.limits.hard_ceiling());
+                    if auto && (over || (request.history.len() - replay.folded > self.limits.keep_recent_messages.max(1)
+                        && self.limits.over(tokens, self.limits.fold_ceiling())))
                     {
-                        turn.text = message.text;
-                    }
-                    Ok(ThreadEvent::TurnCompleted { response_id, usage, final_event, incomplete_reason, .. }) => {
-                        if let Some(result) = handle.take_result() {
-                            return result;
+                        match self.compact(&mut replay, request.history) {
+                            Ok(()) => continue,
+                            Err(error) => return failed(error),
                         }
-                        turn.response_id = response_id;
-                        turn.usage = usage;
-                        turn.final_event = final_event;
-                        turn.incomplete_reason = incomplete_reason;
-                        return turn;
                     }
-                    Ok(_) => {}
-                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(5)),
-                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return turn,
+                    if over {
+                        return failed(baudet_core::error::CONTEXT_LIMIT_REASON);
+                    }
                 }
+
+                let emitted = std::cell::Cell::new(false);
+                let turn = self.receive(SendRequest {
+                    turn_id: None,
+                    system,
+                    user_text,
+                    history: history_events(&history),
+                    previous_response_id: previous.map(str::to_owned),
+                    tools: tools.clone(),
+                    image: request.image.map(str::to_owned),
+                    model: self.choices.model.clone(),
+                    reasoning: self.choices.reasoning.clone(),
+                    max_output_tokens: self.choices.max_output_tokens,
+                }, &mut |delta| {
+                    emitted.set(true);
+                    (request.on_delta)(delta);
+                }, &mut |delta| {
+                    emitted.set(true);
+                    (request.on_reasoning)(delta);
+                });
+                let overflow = baudet_core::error::looks_like_context_overflow(turn.incomplete_reason.as_deref());
+                if auto && overflow && !retried && !emitted.get() && turn.text.is_empty() && request.history.len() - replay.folded > 1 {
+                    if let Err(error) = self.compact(&mut replay, request.history) {
+                        return failed(error);
+                    }
+                    retried = true;
+                    continue;
+                }
+                return turn;
             }
         })
     }

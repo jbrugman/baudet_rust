@@ -1,3 +1,6 @@
+use std::path::{Component, Path, PathBuf};
+
+use git2::{DiffFindOptions, DiffFlags, DiffFormat, DiffOptions, Repository, Status, StatusOptions};
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -110,46 +113,124 @@ impl ChangeKind {
 
 pub const GIT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+// Inspect local repositories in-process. No application filters are registered with
+// libgit2, so Git's repository-configured command filters are never invoked.
+fn open_worktree(cwd: &str) -> Option<Repository> {
+    if !Path::new(cwd).is_dir() {
+        return None;
+    }
+    let repo = Repository::discover(cwd).ok()?;
+    repo.workdir()?;
+    Some(repo)
+}
+
+fn project_prefix(repo: &Repository, cwd: &str) -> Option<PathBuf> {
+    let root = repo.workdir()?.canonicalize().ok()?;
+    let project = Path::new(cwd).canonicalize().ok()?;
+    Some(project.strip_prefix(root).ok()?.to_owned())
+}
+
 pub fn probe_git(cwd: &str) -> Option<GitMeta> {
-    if !std::path::Path::new(cwd).is_dir() {
-        return None;
-    }
-    if ask(cwd, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true") {
-        return None;
-    }
+    let repo = open_worktree(cwd)?;
+    let head = repo.head().ok();
     Some(GitMeta {
-        repository_url: ask(cwd, &["config", "--get", "remote.origin.url"]),
-        branch: ask(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|b| b != "HEAD"),
-        commit_hash: ask(cwd, &["rev-parse", "HEAD"]),
+        repository_url: repo
+            .config()
+            .ok()
+            .and_then(|config| config.get_string("remote.origin.url").ok())
+            .and_then(non_empty_trimmed),
+        branch: head.as_ref().filter(|head| head.is_branch()).and_then(|head| head.shorthand()).map(str::to_owned),
+        commit_hash: head.as_ref().and_then(|head| head.target()).map(|id| id.to_string()),
     })
 }
 
-// Return project-relative paths. NUL-delimited Git status itself is repository-relative.
 pub fn probe_changes(cwd: &str) -> Option<Vec<ChangedFile>> {
-    probe_git(cwd)?;
-    let prefix = raw(cwd, &["rev-parse", "--show-prefix"])?;
-    let prefix = prefix.trim_end_matches('\n');
-    let status = raw(cwd, &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."])?;
-    let counts =
-        raw(cwd, &["diff", "--no-ext-diff", "--no-textconv", "--no-relative", "--numstat", "HEAD", "--", "."])
-            .as_deref()
-            .and_then(parse_numstat)
-            .unwrap_or_default();
+    let repo = open_worktree(cwd)?;
+    let prefix = project_prefix(&repo, cwd)?;
+    let mut options = StatusOptions::new();
+    options
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .renames_head_to_index(true)
+        .disable_pathspec_match(true);
+    if !prefix.as_os_str().is_empty() {
+        options.pathspec(&prefix);
+    }
+    let statuses = repo.statuses(Some(&mut options)).ok()?;
+    let mut diff_options = DiffOptions::new();
+    diff_options.disable_pathspec_match(true);
+    if !prefix.as_os_str().is_empty() {
+        diff_options.pathspec(&prefix);
+    }
+    let counts = change_counts(&repo, &mut diff_options).unwrap_or_default();
+
     let mut files = Vec::new();
-    let mut records = status.split_terminator('\0');
-    while let Some(record) = records.next() {
-        let [x, y, b' ', ..] = record.as_bytes() else { continue };
-        let change = ChangeKind::from_xy(*x as char, *y as char);
-        // NUL-delimited rename records contain the destination before the source.
-        let old_path = if matches!(x, b'R' | b'C') || matches!(y, b'R' | b'C') { records.next() } else { None };
-        let repo_path = &record[3..];
-        let Some(path) = repo_path.strip_prefix(prefix).filter(|p| !p.is_empty()) else { continue };
-        let (additions, deletions) = counts.get(old_path.unwrap_or(repo_path)).copied().unwrap_or((None, None));
-        let old_path = old_path.and_then(|path| path.strip_prefix(prefix)).map(str::to_owned);
-        files.push(ChangedFile { path: path.to_owned(), additions, deletions, change, old_path });
+    for entry in statuses.iter() {
+        let status = entry.status();
+        let rename = status.contains(Status::INDEX_RENAMED).then(|| entry.head_to_index()).flatten();
+        let path = rename.as_ref().and_then(|delta| delta.new_file().path()).or_else(|| entry.path().map(Path::new));
+        let Some(path) = path else { continue };
+        let Some(relative) = path.strip_prefix(&prefix).ok().and_then(Path::to_str) else { continue };
+        let old_path = rename.as_ref().and_then(|delta| delta.old_file().path());
+        let (additions, deletions) =
+            counts.get(path).or_else(|| old_path.and_then(|path| counts.get(path))).copied().unwrap_or_default();
+        files.push(ChangedFile {
+            path: relative.to_owned(),
+            additions,
+            deletions,
+            change: change_kind(status),
+            old_path: old_path
+                .and_then(|path| path.strip_prefix(&prefix).ok())
+                .and_then(Path::to_str)
+                .map(str::to_owned),
+        });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Some(files)
+}
+
+fn change_kind(status: Status) -> ChangeKind {
+    if status.contains(Status::CONFLICTED) {
+        ChangeKind::Unmerged
+    } else if status.contains(Status::INDEX_NEW) {
+        ChangeKind::Added
+    } else if status.contains(Status::INDEX_DELETED) {
+        if status.contains(Status::WT_NEW) {
+            ChangeKind::Removed
+        } else {
+            ChangeKind::Deleted
+        }
+    } else if status.contains(Status::INDEX_RENAMED) {
+        ChangeKind::Renamed
+    } else if status.intersects(Status::INDEX_MODIFIED | Status::WT_MODIFIED) {
+        ChangeKind::Modified
+    } else if status.contains(Status::WT_DELETED) {
+        ChangeKind::Removed
+    } else if status.contains(Status::WT_NEW) {
+        ChangeKind::Untracked
+    } else {
+        ChangeKind::Other
+    }
+}
+
+type Numstat = std::collections::HashMap<PathBuf, (Option<u32>, Option<u32>)>;
+
+fn change_counts(repo: &Repository, options: &mut DiffOptions) -> Option<Numstat> {
+    let tree = repo.head().ok()?.peel_to_tree().ok()?;
+    let mut diff = repo.diff_tree_to_workdir_with_index(Some(&tree), Some(options)).ok()?;
+    diff.find_similar(Some(DiffFindOptions::new().renames(true))).ok()?;
+    let mut counts = Numstat::new();
+    for (index, delta) in diff.deltas().enumerate() {
+        let Some(path) = delta.new_file().path() else { continue };
+        if let Ok(Some(patch)) = git2::Patch::from_diff(&diff, index) {
+            if let Ok((_, additions, deletions)) = patch.line_stats() {
+                if !patch.delta().flags().contains(DiffFlags::BINARY) {
+                    counts.insert(path.to_owned(), (additions.try_into().ok(), deletions.try_into().ok()));
+                }
+            }
+        }
+    }
+    Some(counts)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -161,31 +242,83 @@ pub enum FilePatch {
 
 // Prefer the working-tree patch and fall back to the index.
 pub fn probe_patch(cwd: &str, path: &str, old_path: Option<&str>) -> Option<FilePatch> {
-    use std::path::{Component, Path};
-
     let literal_path = |path: &str| {
-        !path.is_empty() && Path::new(path).components().all(|part| matches!(part, Component::Normal(_)))
+        !path.is_empty()
+            && !path.contains('\0')
+            && Path::new(path).components().all(|part| matches!(part, Component::Normal(_)))
     };
     if !literal_path(path) || old_path.is_some_and(|path| !literal_path(path)) {
         return None;
     }
-    const PATCH_LIMIT: u64 = 1_000_000;
-    let read_patch = |staged: bool| {
-        let mut args = vec!["--literal-pathspecs", "-c", "core.quotePath=false", "diff"];
-        args.extend(staged.then_some("--cached"));
-        args.extend(["--no-ext-diff", "--no-textconv", "--no-color", "--find-renames", "--", path]);
-        args.extend(old_path);
-        raw_with_limit(cwd, &args, Some(PATCH_LIMIT))
+
+    const PATCH_LIMIT: usize = 1_000_000;
+    let repo = open_worktree(cwd)?;
+    let prefix = project_prefix(&repo, cwd)?;
+    let path = prefix.join(path);
+    let mut options = DiffOptions::new();
+    options.disable_pathspec_match(true).pathspec(&path);
+    if let Some(old_path) = old_path {
+        options.pathspec(prefix.join(old_path));
+    }
+    let tree = match repo.head() {
+        Ok(head) => Some(head.peel_to_tree().ok()?),
+        Err(error) if error.code() == git2::ErrorCode::UnbornBranch => None,
+        Err(_) => return None,
     };
     for staged in [false, true] {
-        let output = read_patch(staged)?;
+        let mut diff = if staged {
+            repo.diff_tree_to_index(tree.as_ref(), None, Some(&mut options))
+        } else {
+            repo.diff_index_to_workdir(None, Some(&mut options))
+        }
+        .ok()?;
+        diff.find_similar(Some(DiffFindOptions::new().renames(true))).ok()?;
+        let mut output = Vec::new();
+        diff.print(DiffFormat::Patch, |_, _, line| {
+            let origin = line.origin();
+            let has_prefix = matches!(origin, '+' | '-' | ' ');
+            let content = line.content();
+            if output.len() + content.len() + usize::from(has_prefix) > PATCH_LIMIT {
+                return false;
+            }
+            if has_prefix {
+                output.push(origin as u8);
+            }
+            output.extend_from_slice(content);
+            true
+        })
+        .ok()?;
         if !output.is_empty() {
-            return Some(FilePatch::Diff(output));
+            return Some(FilePatch::Diff(unquote_rename_headers(&String::from_utf8_lossy(&output))));
         }
     }
-    // Check again at open time because status may predate the new file.
-    let untracked = raw(cwd, &["--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "--", path])?;
-    Some(if untracked.is_empty() { FilePatch::Unchanged } else { FilePatch::Untracked })
+    let status = repo.status_file(&path).ok();
+    Some(if status.is_some_and(|status| status.contains(Status::WT_NEW)) {
+        FilePatch::Untracked
+    } else {
+        FilePatch::Unchanged
+    })
+}
+
+fn unquote_rename_headers(patch: &str) -> String {
+    let mut output = String::with_capacity(patch.len());
+    for line in patch.split_inclusive('\n') {
+        if let Some((label, path)) = ["rename from ", "rename to "]
+            .into_iter()
+            .find_map(|label| line.strip_prefix(label).map(|path| (label, path)))
+        {
+            let decoded = unquote_git_path(path.trim_end_matches('\n'));
+            // Match Git's core.quotePath=false without putting control characters in headers.
+            if !decoded.contains(|c: char| c.is_control() || c == '"' || c == '\\') {
+                output.push_str(label);
+                output.push_str(&decoded);
+                output.push('\n');
+                continue;
+            }
+        }
+        output.push_str(line);
+    }
+    output
 }
 
 fn unquote_git_path(path: &str) -> String {
@@ -236,77 +369,21 @@ fn unquote_git_path(path: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-type Numstat = std::collections::HashMap<String, (Option<u32>, Option<u32>)>;
-
-fn parse_numstat(output: &str) -> Option<Numstat> {
-    let mut map = std::collections::HashMap::new();
-    for line in output.lines() {
-        let mut fields = line.split('\t');
-        let (Some(add), Some(del), Some(path)) = (fields.next(), fields.next(), fields.next()) else {
-            continue;
-        };
-        map.insert(unquote_git_path(path), (add.parse::<u32>().ok(), del.parse::<u32>().ok()));
-    }
-    Some(map)
-}
-
-fn ask(cwd: &str, args: &[&str]) -> Option<String> {
-    raw(cwd, args).and_then(non_empty_trimmed)
-}
-
 fn non_empty_trimmed(output: String) -> Option<String> {
     let trimmed = output.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+#[cfg(test)]
 fn raw(cwd: &str, args: &[&str]) -> Option<String> {
-    raw_with_limit(cwd, args, None)
-}
-
-fn raw_with_limit(cwd: &str, args: &[&str], limit: Option<u64>) -> Option<String> {
-    let child = std::process::Command::new("git")
+    let output = std::process::Command::new("git")
         .arg("-C")
         .arg(cwd)
-        .args(["-c", "core.fsmonitor=false"])
         .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_PAGER", "cat")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+        .output()
         .ok()?;
-    wait_output(child, limit)
-}
-
-// Drain stdout concurrently so Git cannot block on a full pipe.
-fn wait_output(mut child: std::process::Child, limit: Option<u64>) -> Option<String> {
-    use std::io::Read;
-
-    let mut stdout = child.stdout.take()?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let output = if let Some(limit) = limit {
-            let mut bytes = Vec::new();
-            stdout.take(limit + 1).read_to_end(&mut bytes).ok().filter(|&size| size as u64 <= limit)
-                .map(|_| String::from_utf8_lossy(&bytes).into_owned())
-        } else {
-            let mut text = String::new();
-            stdout.read_to_string(&mut text).ok().map(|_| text)
-        };
-        let _ = tx.send(output);
-    });
-    match rx.recv_timeout(GIT_PROBE_TIMEOUT) {
-        Ok(Some(output)) => match child.wait().ok() {
-            Some(status) if status.success() => Some(output),
-            _ => None,
-        },
-        _ => {
-            let _ = child.kill();
-            let _ = child.wait();
-            None
-        }
-    }
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[cfg(test)]
@@ -545,6 +622,34 @@ mod changes_tests {
         assert!(diff("bin.dat").contains("Binary files"));
         assert!(diff("sub/g.md").contains("deleted file mode"));
         assert_eq!(probe_patch(cwd, "brandnew.rs", None), Some(FilePatch::Untracked));
+    }
+
+    #[test]
+    fn local_inspection_ignores_repository_command_filters() {
+        let folder = scratch().expect("Git fixture");
+        let cwd = folder.path().to_str().unwrap();
+        let repo = Repository::open(folder.path()).unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("filter.fixture.clean", "baudet-unavailable-test-filter").unwrap();
+        config.set_str("filter.fixture.process", "baudet-unavailable-test-filter").unwrap();
+        config.set_bool("filter.fixture.required", true).unwrap();
+        std::fs::write(folder.path().join(".gitattributes"), "f.txt filter=fixture\n").unwrap();
+
+        let changes = probe_changes(cwd).unwrap();
+        let file = changes.iter().find(|file| file.path == "f.txt").unwrap();
+        assert_eq!((file.change, file.additions, file.deletions), (ChangeKind::Modified, Some(2), Some(1)));
+        let Some(FilePatch::Diff(patch)) = probe_patch(cwd, "f.txt", None) else {
+            panic!("expected a patch with the fixture filter configured");
+        };
+        assert!(patch.contains("-b\n+B\n"));
+    }
+
+    #[test]
+    fn an_oversized_patch_is_unavailable() {
+        let folder = scratch().expect("Git fixture");
+        let cwd = folder.path().to_str().unwrap();
+        std::fs::write(folder.path().join("f.txt"), "long line\n".repeat(120_000)).unwrap();
+        assert_eq!(probe_patch(cwd, "f.txt", None), None);
     }
 
     #[test]

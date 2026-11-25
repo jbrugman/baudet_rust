@@ -19,9 +19,11 @@ pub const CONTEXT_LOSS_NOTE: &str = "Earlier turns were dropped from this reques
 pub fn instructions(base: &str, summary: Option<&str>, truncated: bool) -> String {
     let mut out = match summary {
         None => base.to_string(),
-        Some(summary) => format!("{base}\n\nSummary of the earlier conversation:\n{summary}"),
+        Some(summary) => format!(
+            "{base}\n\nSummary of the earlier conversation:\n{summary}\n\n+             Use this summary with the recent messages to continue any unfinished user request. +             Follow the latest user instructions and account for work already completed."
+        ),
     };
-    if summary.is_some() || truncated {
+    if truncated {
         out.push_str("\n\n");
         out.push_str(CONTEXT_LOSS_NOTE);
     }
@@ -147,7 +149,7 @@ impl ContextLimits {
     }
 
     pub fn context_reading(&self, history: &[Msg]) -> ContextReading {
-        let trimming = self.strategy != ContextStrategy::StopAtLimit;
+        let trimming = self.strategy.trims_history();
         let budget = self.fold_ceiling();
         let used = if trimming {
             crate::window::bound(history, self.strategy, self.trim_budget(100), self.keep_recent_messages)
@@ -285,13 +287,14 @@ mod tests {
     }
 
     #[test]
-    fn the_loss_note_rides_with_a_summary_and_with_a_cut_window() {
+    fn the_loss_note_only_reports_a_cut_window() {
         let base = "Wees nauwkeurig.";
         assert_eq!(instructions(base, None, false), base);
         assert!(!instructions(base, None, true).contains("Summary"), "niets samengevat, dus geen kop");
         let with_summary = instructions(base, Some("er was een plan"), false);
         assert!(with_summary.starts_with(&format!("{base}\n\nSummary of the earlier conversation:\ner was een plan")));
-        for text in [with_summary, instructions(base, None, true), instructions(base, Some("s"), true)] {
+        assert!(!with_summary.contains(CONTEXT_LOSS_NOTE));
+        for text in [instructions(base, None, true), instructions(base, Some("s"), true)] {
             assert!(text.ends_with(CONTEXT_LOSS_NOTE), "{text}");
         }
     }

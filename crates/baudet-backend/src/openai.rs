@@ -238,6 +238,9 @@ impl TurnAccumulator {
                 }
             }
             if let Some(reason) = choice.and_then(|choice| string_field(choice, "finish_reason")) {
+                if reason == "stop" {
+                    self.final_event = Some("response.completed".into());
+                }
                 if reason == "tool_calls" {
                     self.calls.extend(std::mem::take(&mut self.chat_calls).into_values().filter(|call| {
                         !call.name.is_empty()

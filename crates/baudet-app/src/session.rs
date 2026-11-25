@@ -6,7 +6,7 @@ use baudet_backend::{Backend, SendRequest, TurnHandle};
 use baudet_core::{Item, ItemStatus, Msg, ThreadEvent};
 use baudet_store::session::Session;
 use baudet_store::Transcript;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -31,6 +31,7 @@ pub struct AppState {
     transcript: Mutex<Option<Transcript>>,
     active: Mutex<Session>,
     live_turns: AtomicUsize,
+    auto_compacting: AtomicBool,
     turn_counter: AtomicUsize,
     project: Mutex<Option<String>>,
     live: Mutex<Option<Arc<Mutex<TurnHandle>>>>,
@@ -141,22 +142,30 @@ impl AppState {
                 backend.complete_once(SUMMARY_PROMPT, source, cap).map_err(|error| error.to_string())
             })?;
             if let CompactionOutcome::Compacted { summary, folded } = &outcome {
-                let retained = &messages[*folded..];
-                let mut transcript = self.transcript.lock().unwrap();
-                let mut active = self.active.lock().unwrap();
-                if let Some(transcript) = transcript.as_mut() {
-                    transcript.compact_context(retained, summary).map_err(|error| error.to_string())?;
-                    active.persisted_messages = retained.len();
-                }
-                active.messages = retained.to_vec();
-                active.summary = Some(summary.clone());
-                active.previous_response_id = None;
-                *self.last_turn.lock().unwrap() = None;
+                self.commit_compacted_context(&messages[*folded..], summary)?;
             }
             Ok(outcome)
         })();
         self.finish();
         result
+    }
+
+    fn commit_compacted_context(&self, retained: &[Msg], summary: &str) -> Result<(), String> {
+        let mut transcript = self.transcript.lock().unwrap();
+        let mut active = self.active.lock().unwrap();
+        if let Some(transcript) = transcript.as_mut() {
+            transcript.compact_context(retained, summary).map_err(|error| error.to_string())?;
+            active.persisted_messages = retained.len();
+        }
+        active.messages = retained.to_vec();
+        active.summary = Some(summary.to_owned());
+        active.previous_response_id = None;
+        *self.last_turn.lock().unwrap() = None;
+        Ok(())
+    }
+
+    pub fn is_auto_compacting(&self) -> bool {
+        self.auto_compacting.load(Ordering::Relaxed)
     }
 
     pub fn new(backend: Arc<dyn Backend>, system: impl Into<String>) -> AppState {
@@ -168,6 +177,7 @@ impl AppState {
             transcript: Mutex::new(None),
             active: Mutex::new(Session::new("", "")),
             live_turns: AtomicUsize::new(0),
+            auto_compacting: AtomicBool::new(false),
             turn_counter: AtomicUsize::new(0),
             live: Mutex::new(None),
             last_turn: Mutex::new(None),
@@ -359,7 +369,7 @@ impl AppState {
         user_text: &str,
         limits: &baudet_store::ContextLimits,
     ) -> Result<(Vec<ThreadEvent>, String), SendError> {
-        use baudet_store::{cost_chars, instructions, ContextStrategy};
+        use baudet_store::{cost_chars, instructions};
 
         let first = if limits.strategy.trims_by_turn_count() {
             prior.len().saturating_sub(limits.keep_recent_messages.saturating_sub(1))
@@ -372,13 +382,13 @@ impl AppState {
         let mut system = instructions(base_prompt, summary, first > 0);
         let budget = limits.trim_budget(100);
         let trim = !prior.is_empty()
-            && limits.strategy != ContextStrategy::StopAtLimit
+            && limits.strategy.trims_history()
             && limits.over((prompt_chars + prior_chars + system.chars().count()).div_ceil(3) as u64, budget as u32);
         if trim {
             system = instructions(base_prompt, summary, true);
         }
         let input_tokens = (prompt_chars + system.chars().count()).div_ceil(3);
-        let history_tokens = if limits.strategy == ContextStrategy::StopAtLimit {
+        let history_tokens = if !limits.strategy.trims_history() {
             prior_chars.div_ceil(3)
         } else {
             0

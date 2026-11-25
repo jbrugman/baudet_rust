@@ -84,7 +84,7 @@ jobs:
 
   linux:
     needs: version
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -93,14 +93,49 @@ jobs:
         if: needs.version.outputs.release != ''
         with:
           name: release-manifests
-      - name: Install Linux build dependencies
+      - name: Build and test on Debian Trixie
+        # Bubblewrap configures user namespaces and /proc/sys inside the container.
+        run: |
+          docker run --rm --platform linux/amd64 \
+            --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
+            --security-opt systempaths=unconfined \
+            -e CARGO_PROFILE_TEST_DEBUG=0 -e CARGO_INCREMENTAL=0 \
+            -v "$PWD:/workspace" -w /workspace rust:1.95.0-trixie bash -euxc '
+              apt-get update
+              apt-get install -y --no-install-recommends bubblewrap dpkg-dev pkg-config libwayland-dev libxkbcommon-dev
+              bash packaging/build-linux.sh
+              cargo test --workspace --locked --no-fail-fast
+              BAUDET_WORKSPACE_TEST_SECRET=fixture cargo test --locked -p baudet-tool \
+                workspace_enforces_project_permissions_without_command_approval -- --ignored
+            '
+      - name: Smoke test the package on Debian Trixie
+        run: |
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD/target/dist:/packages:ro" debian:trixie bash -euxc '
+              apt-get update
+              apt-get install -y xvfb xauth libgl1-mesa-dri /packages/baudet_*_amd64.deb
+              xvfb-run -a timeout 60s baudet-ui --demo --screenshot=/tmp/baudet.png
+              test -s /tmp/baudet.png
+            '
+      - name: Smoke test the same package on Ubuntu 26.04 LTS
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential dpkg-dev pkg-config libwayland-dev libxkbcommon-dev
-      - run: bash packaging/build-linux.sh
+          sudo apt-get install -y bubblewrap xvfb xauth libgl1-mesa-dri ./target/dist/baudet_*_amd64.deb
+          screenshot="$RUNNER_TEMP/baudet.png"
+          xvfb-run -a timeout 60s baudet-ui --demo --screenshot="$screenshot"
+          test -s "$screenshot"
+          sudo apt-get install -y libwayland-dev libxkbcommon-dev apparmor-profiles
+          profile=/etc/apparmor.d/bwrap-userns-restrict
+          if [[ ! -f "$profile" ]]; then
+            profile=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          fi
+          sudo apparmor_parser -r "$profile"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/baudet-ubuntu-target" BAUDET_WORKSPACE_TEST_SECRET=fixture \
+            cargo test --locked -p baudet-tool \
+            workspace_enforces_project_permissions_without_command_approval -- --ignored
       - uses: actions/upload-artifact@v7.0.2
         with:
-          name: Baudet-Ubuntu-24.04-x64
+          name: Baudet-Linux-amd64
           path: target/dist/baudet_*_amd64.deb
           if-no-files-found: error
           overwrite: true

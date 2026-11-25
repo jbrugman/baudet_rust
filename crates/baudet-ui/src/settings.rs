@@ -1006,6 +1006,7 @@ fn strategy_label(strategy: ContextStrategy) -> &'static str {
         ContextStrategy::RecentMessages => Texts::get(Key::StrategyRecent),
         ContextStrategy::RollingWindow => Texts::get(Key::StrategyRolling),
         ContextStrategy::StopAtLimit => Texts::get(Key::StrategyStop),
+        ContextStrategy::AutoCompact => Texts::get(Key::StrategyAutoCompact),
     }
 }
 

@@ -320,6 +320,16 @@ fn a_stream_that_closed_is_reported_as_such_rather_than_as_a_completion() {
     assert!(!finished.completed());
 }
 
+#[test]
+fn chat_finish_reason_stop_marks_a_complete_summary() {
+    let mut turn = TurnAccumulator::new();
+    turn.feed(None, r#"{"object":"chat.completion.chunk","choices":[{"delta":{"content":"Summary"},"finish_reason":null}]}"#);
+    turn.feed(None, r#"{"object":"chat.completion.chunk","choices":[{"delta":{},"finish_reason":"stop"}]}"#);
+    let finished = turn.finish();
+    assert_eq!(finished.text, "Summary");
+    assert!(finished.completed());
+}
+
 fn item_id_of(event: &ThreadEvent) -> Option<&str> {
     match event {
         ThreadEvent::ItemDelta { item_id, .. } => Some(item_id),

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

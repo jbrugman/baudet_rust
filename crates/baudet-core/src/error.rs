@@ -42,9 +42,14 @@ const MAX_WINDOW: u32 = 10_000_000;
 
 pub fn looks_like_context_overflow(message: Option<&str>) -> bool {
     let Some(raw) = message else { return false };
+    if raw == CONTEXT_LIMIT_REASON {
+        return true;
+    }
     let text = raw.to_lowercase();
     OVERFLOW_WORDS.iter().any(|needle| text.contains(needle))
 }
+
+pub const CONTEXT_LIMIT_REASON: &str = "context_limit";
 
 const OVERFLOW_WORDS: [&str; 6] = [
     "prompt is too long",

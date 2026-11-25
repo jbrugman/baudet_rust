@@ -2,8 +2,6 @@
 use baudet_core::Msg;
 use baudet_store::window::{self, ContextStrategy};
 
-const MAX_REPLAY_CHARS: usize = 48_000;
-
 pub fn scrub(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -87,12 +85,7 @@ pub fn split_for_window(history: &[Msg]) -> (Vec<Msg>, String) {
 }
 
 pub fn for_call(history: &[Msg]) -> (Vec<Msg>, String) {
-    let user_text = history.last().map(|msg| scrub(&msg.content)).unwrap_or_default();
-    let prior = history[..history.len().saturating_sub(1)]
-        .iter()
-        .map(scrubbed)
-        .collect::<Vec<_>>();
-    (fit(&prior, MAX_REPLAY_CHARS), user_text)
+    split_for_window(history)
 }
 
 pub fn for_loop(
@@ -238,12 +231,14 @@ mod tests {
     }
 
     #[test]
-    fn for_loop_under_stop_at_limit_keeps_the_clamp_and_a_trimming_strategy_does_not() {
+    fn for_loop_under_stop_at_limit_keeps_all_history_even_above_the_old_replay_limit() {
         let big = "z".repeat(30_000);
         let history = vec![chat("user", &big), chat("assistant", &big), chat("user", "nu")];
-        let (prior, input) = for_loop(&history, ContextStrategy::StopAtLimit, 1_000_000, false, usize::MAX);
-        assert_eq!(prior.len(), 2, "noot plus het tweede bericht blijven");
-        assert_eq!(input, "nu");
+        for budget in [0, 1_000_000] {
+            let (prior, input) = for_loop(&history, ContextStrategy::StopAtLimit, budget, false, usize::MAX);
+            assert_eq!(prior, history[..2]);
+            assert_eq!(input, "nu");
+        }
         let (prior, _) = for_loop(&history, ContextStrategy::RecentMessages, 0, false, usize::MAX);
         assert_eq!(prior.len(), 2, "geen budget betekent hier niet de vaste klem");
         let (prior, _) = for_loop(&history, ContextStrategy::RecentMessages, 1, false, usize::MAX);

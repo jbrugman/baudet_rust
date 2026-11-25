@@ -46,17 +46,19 @@ pub enum ContextStrategy {
     RecentMessages,
     RollingWindow,
     StopAtLimit,
+    AutoCompact,
 }
 
 impl ContextStrategy {
-    pub const ALL: [ContextStrategy; 3] =
-        [ContextStrategy::RecentMessages, ContextStrategy::RollingWindow, ContextStrategy::StopAtLimit];
+    pub const ALL: [ContextStrategy; 4] =
+        [ContextStrategy::RecentMessages, ContextStrategy::RollingWindow, ContextStrategy::StopAtLimit, ContextStrategy::AutoCompact];
 
     pub fn index(self) -> usize {
         match self {
             ContextStrategy::RecentMessages => 0,
             ContextStrategy::RollingWindow => 1,
             ContextStrategy::StopAtLimit => 2,
+            ContextStrategy::AutoCompact => 3,
         }
     }
 
@@ -65,6 +67,7 @@ impl ContextStrategy {
             ContextStrategy::RecentMessages => "recent",
             ContextStrategy::RollingWindow => "rolling",
             ContextStrategy::StopAtLimit => "stop",
+            ContextStrategy::AutoCompact => "auto_compact",
         }
     }
 
@@ -73,6 +76,7 @@ impl ContextStrategy {
             "recent" => Some(ContextStrategy::RecentMessages),
             "rolling" => Some(ContextStrategy::RollingWindow),
             "stop" => Some(ContextStrategy::StopAtLimit),
+            "auto_compact" => Some(ContextStrategy::AutoCompact),
             _ => None,
         }
     }
@@ -248,6 +252,7 @@ impl Settings {
                 ContextStrategy::RecentMessages => baudet_store::ContextStrategy::RecentMessages,
                 ContextStrategy::RollingWindow => baudet_store::ContextStrategy::RollingWindow,
                 ContextStrategy::StopAtLimit => baudet_store::ContextStrategy::StopAtLimit,
+                ContextStrategy::AutoCompact => baudet_store::ContextStrategy::AutoCompact,
             },
             budget_tokens: self.context_budget_tokens,
             max_output_tokens: self.max_output_tokens.unwrap_or(0),
@@ -600,7 +605,7 @@ mod tests {
     #[test]
     fn context_strategy_words_and_positions_match_the_reference_list() {
         let strategies =
-            [ContextStrategy::RecentMessages, ContextStrategy::RollingWindow, ContextStrategy::StopAtLimit];
+            [ContextStrategy::RecentMessages, ContextStrategy::RollingWindow, ContextStrategy::StopAtLimit, ContextStrategy::AutoCompact];
         for (expected, strategy) in strategies.iter().copied().enumerate() {
             assert_eq!(strategy.index(), expected);
             assert_eq!(ContextStrategy::from_word(strategy.word()), Some(strategy));
