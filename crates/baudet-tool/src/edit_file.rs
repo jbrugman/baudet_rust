@@ -1,13 +1,18 @@
-
 use crate::diff::{LineDiff, UnifiedDiff};
 use crate::folder_boundary::FolderBoundary;
 use crate::folder_listing;
 use crate::patch::{Edit, PatchApplier, PatchOutcome};
 use crate::tool::{Tool, ToolContext, ToolResult, Undo};
 use baudet_core::item::ItemKind;
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, OpenOptions},
+};
+use same_file::Handle;
 use serde_json::{json, Value};
-use std::fs;
-use std::path::Path;
+use std::io::{self, Read, Seek, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 #[derive(Debug, Default)]
 pub struct EditFileTool;
@@ -72,26 +77,77 @@ impl Tool for EditFileTool {
             crate::folder_boundary::Resolved::Refused(reason) => return fail(reason),
         };
 
-        let original = match fs::read_to_string(&resolved) {
+        let mut target = match EditTarget::open(root, resolved) {
+            Ok(target) => target,
+            Err(_) => return fail(format!("{rel} could not be read.{}", folder_listing::hint(root))),
+        };
+        let original = match contents(&mut target.preview) {
             Ok(text) => text,
             Err(_) => return fail(format!("{rel} could not be read.{}", folder_listing::hint(root))),
         };
 
         match PatchApplier::apply(&original, &edits) {
             PatchOutcome::Rejected { reason } => fail(reason),
-            PatchOutcome::Applied { content } => write_if_approved(ctx, root, &resolved, rel, &original, &content),
+            PatchOutcome::Applied { content } => write_if_approved(ctx, target, rel, &original, &content),
         }
     }
 }
 
-fn write_if_approved(
-    ctx: &ToolContext,
-    root: &Path,
-    resolved: &Path,
-    rel: &str,
-    original: &str,
-    updated: &str,
-) -> ToolResult {
+struct EditTarget {
+    project: Dir,
+    root: PathBuf,
+    resolved: PathBuf,
+    preview: Handle,
+}
+
+impl EditTarget {
+    fn open(root: &Path, resolved: PathBuf) -> io::Result<Self> {
+        let root = root.canonicalize()?;
+        let project = Dir::open_ambient_dir(&root, ambient_authority())?;
+        let preview = Self::open_file(&project, &root, &resolved, false)?;
+        Ok(Self { project, root, resolved, preview })
+    }
+
+    fn open_file(project: &Dir, root: &Path, resolved: &Path, writable: bool) -> io::Result<Handle> {
+        // Canonicalization supports in-project absolute symlinks. The directory
+        // handle, rather than the resolved string, enforces containment at open time.
+        let canonical = resolved.canonicalize()?;
+        let relative = canonical
+            .strip_prefix(root)
+            .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "path leaves the project folder"))?;
+        let file = project.open_with(relative, OpenOptions::new().read(true).write(writable))?.into_std();
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "target is not a regular file"));
+        }
+        Handle::from_file(file)
+    }
+
+    fn reopen(&self, writable: bool) -> io::Result<Handle> {
+        let original_root = Handle::from_file(self.project.try_clone()?.into_std_file())?;
+        let current_root = Dir::open_ambient_dir(&self.root, ambient_authority())?;
+        if Handle::from_file(current_root.into_std_file())? != original_root {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "project folder changed since the preview"));
+        }
+        Self::open_file(&self.project, &self.root, &self.resolved, writable)
+    }
+}
+
+fn contents(handle: &mut Handle) -> io::Result<String> {
+    let file = handle.as_file_mut();
+    file.rewind()?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+fn replace_contents(handle: &mut Handle, text: &str) -> io::Result<()> {
+    let file = handle.as_file_mut();
+    file.rewind()?;
+    file.write_all(text.as_bytes())?;
+    file.set_len(text.len() as u64)
+}
+
+fn write_if_approved(ctx: &ToolContext, target: EditTarget, rel: &str, original: &str, updated: &str) -> ToolResult {
     if original == updated {
         return ToolResult::ok(format!("no change: new_text equals old_text for {rel}"));
     }
@@ -104,34 +160,33 @@ fn write_if_approved(
             ..Default::default()
         };
     }
-    let safe = match FolderBoundary::real_within(root, resolved) {
-        Some(path) => path,
-        None => return fail(format!("{rel} resolves outside the folder once links are followed")),
+    let mut file = match target.reopen(true) {
+        Ok(file) if file == target.preview => file,
+        Ok(_) => return fail(format!("{rel} no longer refers to the file shown in the preview")),
+        Err(error) => return fail(format!("{rel} could not be safely opened for writing: {error}")),
     };
-    let current = match fs::read_to_string(&safe) {
+    let current = match contents(&mut file) {
         Ok(text) => text,
         Err(_) => return fail(format!("{rel} could not be re-read before writing")),
     };
     if current != original {
         return fail(format!("{rel} changed since the preview; not overwriting a newer edit"));
     }
-    let undo: Undo = {
-        let path = safe.clone();
-        let restore = original.to_owned();
-        Box::new(move || {
-            let _ = fs::write(&path, &restore);
-        })
-    };
-    match fs::write(&safe, updated) {
-        Ok(()) => ToolResult {
-            ok: true,
-            output: format!("wrote {rel}"),
-            diff: Some(diff),
-            undo: Some(undo),
-            ..Default::default()
-        },
-        Err(e) => fail(format!("writing {rel} failed: {e}")),
+    if let Err(error) = replace_contents(&mut file, updated) {
+        return fail(format!("writing {rel} failed: {error}"));
     }
+    let file = Mutex::new(file);
+    let restore = original.to_owned();
+    let expected = updated.to_owned();
+    let undo: Undo = Box::new(move || {
+        let Ok(mut file) = file.lock() else { return };
+        if target.reopen(false).is_ok_and(|current| current == *file)
+            && contents(&mut file).is_ok_and(|current| current == expected)
+        {
+            let _ = replace_contents(&mut file, &restore);
+        }
+    });
+    ToolResult { ok: true, output: format!("wrote {rel}"), diff: Some(diff), undo: Some(undo), ..Default::default() }
 }
 
 fn parse_edits(value: Option<&Value>) -> Vec<Edit> {
@@ -157,6 +212,7 @@ fn fail(reason: impl Into<String>) -> ToolResult {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::fs;
     use std::path::{Path as StdPath, PathBuf as StdPathBuf};
     use std::sync::{Arc, Mutex};
 
@@ -326,6 +382,78 @@ mod tests {
     }
 
     #[test]
+    fn it_refuses_a_replacement_file_even_when_its_contents_match_the_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        let original = dir.path().join("original.txt");
+        fs::write(&file, "before").unwrap();
+        let mut ctx = write_ctx(dir.path(), &Recorder::new(true));
+        let (current, parked) = (file.clone(), original.clone());
+        ctx.approve = Box::new(move |_, _| {
+            fs::rename(&current, &parked).unwrap();
+            fs::write(&current, "before").unwrap();
+            true
+        });
+
+        let result = EditFileTool
+            .execute(&json!({"file": "notes.txt", "edits": [{"old_text": "before", "new_text": "after"}]}), &ctx);
+        assert!(!result.ok);
+        assert!(result.output.contains("no longer refers to the file shown in the preview"), "{}", result.output);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "before");
+        assert_eq!(fs::read_to_string(&original).unwrap(), "before");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_refuses_an_approved_path_whose_parent_now_points_outside_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        let parked = dir.path().join("original");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("notes.txt"), "before").unwrap();
+        fs::write(outside.path().join("notes.txt"), "before").unwrap();
+        let mut ctx = write_ctx(dir.path(), &Recorder::new(true));
+        let (backup, external) = (parked.clone(), outside.path().to_path_buf());
+        ctx.approve = Box::new(move |_, _| {
+            fs::rename(&sub, &backup).unwrap();
+            std::os::unix::fs::symlink(&external, &sub).unwrap();
+            true
+        });
+
+        let result = EditFileTool
+            .execute(&json!({"file": "sub/notes.txt", "edits": [{"old_text": "before", "new_text": "after"}]}), &ctx);
+        assert!(!result.ok);
+        assert_eq!(fs::read_to_string(outside.path().join("notes.txt")).unwrap(), "before");
+        assert_eq!(fs::read_to_string(parked.join("notes.txt")).unwrap(), "before");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn it_refuses_a_renamed_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        let moved = dir.path().join("moved-project");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("notes.txt"), "before").unwrap();
+        let mut ctx = write_ctx(&root, &Recorder::new(true));
+        let (from, to) = (root.clone(), moved.clone());
+        ctx.approve = Box::new(move |_, _| {
+            fs::rename(&from, &to).unwrap();
+            fs::create_dir(&from).unwrap();
+            fs::write(from.join("notes.txt"), "before").unwrap();
+            true
+        });
+
+        let result = EditFileTool
+            .execute(&json!({"file": "notes.txt", "edits": [{"old_text": "before", "new_text": "after"}]}), &ctx);
+        assert!(!result.ok);
+        assert!(result.output.contains("project folder changed since the preview"), "{}", result.output);
+        assert_eq!(fs::read_to_string(moved.join("notes.txt")).unwrap(), "before");
+        assert_eq!(fs::read_to_string(root.join("notes.txt")).unwrap(), "before");
+    }
+
+    #[test]
     fn a_landed_write_can_be_undone_to_the_original_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("notes.txt");
@@ -339,6 +467,50 @@ mod tests {
         let undo = result.undo.expect("een gelande write draagt zijn handgreep mee");
         undo();
         assert_eq!(fs::read_to_string(&file).unwrap(), "eerste regel\n");
+    }
+
+    #[test]
+    fn undo_refuses_a_newer_edit_or_a_replacement_file() {
+        for replace_file in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("notes.txt");
+            fs::write(&file, "original content").unwrap();
+            let (result, _) = edit_with(
+                true,
+                dir.path(),
+                json!({"file": "notes.txt", "edits": [{"old_text": "original content", "new_text": "updated"}]}),
+            );
+            assert_eq!(fs::read_to_string(&file).unwrap(), "updated");
+            let undo = result.undo.unwrap();
+            let expected = if replace_file {
+                fs::rename(&file, dir.path().join("original.txt")).unwrap();
+                "updated"
+            } else {
+                "newer user edit"
+            };
+            fs::write(&file, expected).unwrap();
+            undo();
+            assert_eq!(fs::read_to_string(&file).unwrap(), expected);
+            if replace_file {
+                assert_eq!(fs::read_to_string(dir.path().join("original.txt")).unwrap(), "updated");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_absolute_link_to_a_file_inside_the_project_remains_editable() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.txt");
+        fs::write(&file, "before").unwrap();
+        std::os::unix::fs::symlink(&file, dir.path().join("alias.txt")).unwrap();
+        let (result, _) = edit_with(
+            true,
+            dir.path(),
+            json!({"file": "alias.txt", "edits": [{"old_text": "before", "new_text": "after"}]}),
+        );
+        assert!(result.ok, "{}", result.output);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "after");
     }
 
     #[test]

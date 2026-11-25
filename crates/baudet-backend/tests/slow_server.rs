@@ -1,5 +1,5 @@
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
@@ -9,6 +9,23 @@ const GAP: Duration = Duration::from_millis(400);
 const BLOCK_BYTES: usize = 64;
 
 const READ_DEADLINE: Duration = Duration::from_millis(500);
+const POST_BODY: &[u8; 2] = b"{}";
+
+fn read_post(socket: &mut TcpStream) {
+    socket.set_read_timeout(Some(Duration::from_secs(2))).expect("bounded fixture reads");
+    let mut reader = BufReader::new(socket);
+    let mut line = String::new();
+    loop {
+        assert_ne!(reader.read_line(&mut line).expect("request headers"), 0, "request ended before its body");
+        if line == "\r\n" {
+            break;
+        }
+        line.clear();
+    }
+    let mut body = [0; POST_BODY.len()];
+    reader.read_exact(&mut body).expect("complete fixture POST body");
+    assert_eq!(&body, POST_BODY);
+}
 
 fn stream_slowly(mut socket: TcpStream) {
     let _ =
@@ -65,7 +82,11 @@ impl FixtureServer {
             while !server_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((socket, _)) => {
-                        std::thread::spawn(move || serve(socket));
+                        std::thread::spawn(move || {
+                            let mut socket = socket;
+                            read_post(&mut socket);
+                            serve(socket);
+                        });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5));
@@ -94,7 +115,7 @@ impl Drop for FixtureServer {
 }
 
 fn measure_reads(client: &reqwest::blocking::Client, url: &str, stop_at: usize) -> Vec<Result<usize, String>> {
-    let mut response = client.post(url).body("{}").send().expect("headers come back");
+    let mut response = client.post(url).body(POST_BODY.as_slice()).send().expect("headers come back");
     let mut buf = vec![0u8; BLOCK_BYTES * 4];
     let mut reads = Vec::new();
     while reads.iter().filter(|r| matches!(r, Ok(n) if *n > 0)).count() < stop_at {
@@ -123,7 +144,7 @@ fn the_blocking_deadline_rearms_per_read_so_a_slow_stream_survives_it() {
 }
 
 async fn measure_chunks(client: &reqwest::Client, url: &str, stop_at: usize) -> Vec<Result<usize, String>> {
-    let response = client.post(url).body("{}").send().await.expect("headers come back");
+    let response = client.post(url).body(POST_BODY.as_slice()).send().await.expect("headers come back");
     let mut body = response;
     let mut chunks = Vec::new();
     while chunks.iter().filter(|c| matches!(c, Ok(n) if *n > 0)).count() < stop_at {
@@ -176,6 +197,7 @@ fn een_uitgelezen_terminator_is_measured_not_assumed() {
     let addr = listener.local_addr().expect("a bound listener reports its address");
     let server = std::thread::spawn(move || {
         let (mut socket, _) = listener.accept().expect("one client");
+        read_post(&mut socket);
         let _ = socket
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
         let _ = socket.flush();
@@ -187,7 +209,7 @@ fn een_uitgelezen_terminator_is_measured_not_assumed() {
     });
     let url = format!("http://{addr}/responses");
     let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build().unwrap();
-    let mut response = client.post(&url).body("{}").send().expect("headers come back");
+    let mut response = client.post(&url).body(POST_BODY.as_slice()).send().expect("headers come back");
     let mut buf = vec![0u8; BLOCK_BYTES * 4];
     let mut outcome = Vec::new();
     loop {

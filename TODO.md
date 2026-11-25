@@ -39,10 +39,6 @@ For each implementation prompt, check all affected usages first, keep the diff m
       Launch the packaged app on each platform.
       On Windows x64, verify that it loads all required DLLs from the zip.
       **Prompt:** Build one Linux amd64 `.deb` on Debian 13 Trixie for Debian Trixie and Ubuntu 26.04 LTS. Verify a clean build and passing tests, install the same artifact and launch the packaged app on both distributions, and verify Bubblewrap isolation on both before release.
-- [ ] Test a session against a real model server.
-      **Stop** should end the stream and keep the partial reply.
-      **Compact** should report when there is nothing to compact.
-      After saving a different endpoint, send a message and verify that it reaches the new server.
 
 ## Workspace permissions
 
