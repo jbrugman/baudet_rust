@@ -20,6 +20,9 @@ egui = { workspace = true }
 egui_extras = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts"] }
 
+pulldown-cmark = { version = "0.13", default-features = false }
+quick-xml = "0.41"
+resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts"] }
 png = "0.18"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

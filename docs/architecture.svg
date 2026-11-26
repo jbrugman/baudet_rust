@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="775" viewBox="0 0 1240 775" role="img" aria-labelledby="title description">
+  <title id="title">Baudet system architecture</title>
+  <desc id="description">Baudet is a Rust desktop app with nine crates. The egui interface uses the application layer, which owns conversation state and turn orchestration and uses the project, tool and backend crates. The desktop app also contains storage, settings, shared types and translations. The backend connects to an OpenAI-compatible model endpoint, and the tool crate can connect to configured MCP servers outside the app. Arrows show selected dependencies and external connections. The diagram does not show execution order.</desc>
+  <defs>
+    <marker id="dependency" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#52647d"/>
+    </marker>
+    <marker id="external" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#226d74"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; fill: #223148; }
+    .title { font-size: 32px; font-weight: 720; }
+    .section { font-size: 18px; font-weight: 700; }
+    .name { font-size: 17px; font-weight: 700; }
+    .body { font-size: 14px; fill: #43546a; }
+    .label { font-size: 13px; font-weight: 650; fill: #43546a; }
+    .card { fill: #fff; stroke: #c3cfde; }
+    .dependency, .external { fill: none; stroke-width: 2; }
+    .dependency { stroke: #52647d; marker-end: url(#dependency); }
+    .external { stroke: #226d74; stroke-dasharray: 5 4; marker-end: url(#external); }
+  </style>
+
+  <rect width="1240" height="775" fill="#f7f9fc"/>
+  <text x="28" y="51" class="title">Baudet architecture</text>
+  <text x="28" y="78" class="body">Desktop components, responsibilities and system boundaries</text>
+
+  <rect x="28" y="105" width="924" height="601" rx="18" fill="#eef3f9" stroke="#a7b8ce" stroke-width="1.5"/>
+  <text x="52" y="139" class="section">Baudet desktop app</text>
+  <text x="928" y="139" text-anchor="end" class="body">Rust workspace · egui</text>
+  <text x="1000" y="139" class="section">External services</text>
+
+  <g id="application">
+    <rect x="52" y="160" width="876" height="76" rx="10" class="card"/>
+    <text x="70" y="189" class="name">baudet-ui</text>
+    <text x="70" y="213" class="body">Desktop interface</text>
+    <text x="340" y="189" class="body">Chat, project navigation, settings and approvals</text>
+    <text x="340" y="213" class="body">Background worker connects the interface to the application</text>
+
+    <path d="M490 236V266" class="dependency"/>
+
+    <rect x="52" y="268" width="876" height="76" rx="10" fill="#e0ebf9" stroke="#9eb5d1"/>
+    <text x="70" y="297" class="name">baudet-app</text>
+    <text x="70" y="321" class="body">Conversation state and orchestration</text>
+    <text x="340" y="297" class="body">Session lifecycle, context management and compaction</text>
+    <text x="340" y="321" class="body">Runs model and tool turns and reduces events into chat state</text>
+  </g>
+
+  <g id="integrations">
+    <path d="M192 344V382" class="dependency"/>
+    <path d="M490 344V382" class="dependency"/>
+    <path d="M788 344V382" class="dependency"/>
+
+    <rect x="52" y="384" width="280" height="94" rx="10" class="card"/>
+    <text x="70" y="414" class="name">baudet-projects</text>
+    <text x="70" y="439" class="body">Project catalog and session links</text>
+    <text x="70" y="461" class="body">Folder permissions and tool access</text>
+
+    <rect x="350" y="384" width="280" height="94" rx="10" class="card"/>
+    <text x="368" y="414" class="name">baudet-tool</text>
+    <text x="368" y="439" class="body">Tool loop and execution</text>
+    <text x="368" y="461" class="body">Workspace files, Git, shell and MCP</text>
+
+    <rect x="648" y="384" width="280" height="94" rx="10" class="card"/>
+    <text x="666" y="414" class="name">baudet-backend</text>
+    <text x="666" y="439" class="body">Model API and streaming transport</text>
+    <text x="666" y="461" class="body">Responses and Chat Completions</text>
+  </g>
+
+  <g id="external-services">
+    <path d="M928 431H998" class="external"/>
+    <path d="M490 478V533H998" class="external"/>
+    <text x="745" y="521" text-anchor="middle" class="label">MCP connection</text>
+
+    <rect x="1000" y="384" width="212" height="94" rx="10" fill="#edf6f5" stroke="#8db0b2"/>
+    <text x="1017" y="414" class="name">Model server</text>
+    <text x="1017" y="439" class="body">OpenAI-compatible endpoint</text>
+    <text x="1017" y="461" class="body">HTTP with SSE, e.g. oMLX</text>
+
+    <rect x="1000" y="493" width="212" height="80" rx="10" fill="#edf6f5" stroke="#8db0b2"/>
+    <text x="1017" y="523" class="name">MCP servers</text>
+    <text x="1017" y="548" class="body">Optional configured tools</text>
+  </g>
+
+  <g id="supporting-crates">
+    <text x="52" y="573" class="section">Local data and shared services</text>
+
+    <rect x="52" y="590" width="207" height="89" rx="10" class="card"/>
+    <text x="69" y="619" class="name">baudet-store</text>
+    <text x="69" y="642" class="body">Local transcripts, history</text>
+    <text x="69" y="663" class="body">and context budgets</text>
+
+    <rect x="275" y="590" width="207" height="89" rx="10" class="card"/>
+    <text x="292" y="619" class="name">baudet-settings</text>
+    <text x="292" y="642" class="body">Local preferences and</text>
+    <text x="292" y="663" class="body">provider configuration</text>
+
+    <rect x="498" y="590" width="207" height="89" rx="10" class="card"/>
+    <text x="515" y="619" class="name">baudet-core</text>
+    <text x="515" y="642" class="body">Shared messages, events</text>
+    <text x="515" y="663" class="body">and protocol types</text>
+
+    <rect x="721" y="590" width="207" height="89" rx="10" class="card"/>
+    <text x="738" y="619" class="name">baudet-i18n</text>
+    <text x="738" y="642" class="body">Interface translations</text>
+  </g>
+
+  <g id="legend">
+    <path d="M28 740H64" class="dependency"/>
+    <text x="76" y="745" class="label">Selected crate dependency</text>
+    <path d="M295 740H331" class="external"/>
+    <text x="343" y="745" class="label">Connection outside the desktop app</text>
+  </g>
+</svg>

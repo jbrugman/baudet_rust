@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="770" viewBox="0 0 1240 770" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+  <defs>
+    <marker id="arrowD" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#334155"/>
+    </marker>
+    <marker id="arrowDstart" markerWidth="10" markerHeight="10" refX="0" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M8,0 L0,3 L8,6 Z" fill="#334155"/>
+    </marker>
+    <marker id="arrowG" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#9aa0a6"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1240" height="770" fill="#fbfbfd"/>
+
+  <text x="620" y="38" text-anchor="middle" font-size="26" font-weight="700" fill="#1e293b">Baudet codebase-map</text>
+  <text x="620" y="58" text-anchor="middle" font-size="13" fill="#64748b">Rust workspace · egui · local model access over HTTP (Responses / Chat Completions)</text>
+
+  <!-- Model server -->
+  <rect x="420" y="72" width="400" height="60" rx="8" fill="#e9edf2" stroke="#5b6b7f" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="620" y="98" text-anchor="middle" font-size="15" font-weight="700" fill="#334155">Model server · external</text>
+  <text x="620" y="118" text-anchor="middle" font-size="12" fill="#475569">oMLX · OpenAI Responses / Chat Completions · SSE</text>
+
+  <!-- UI -->
+  <rect x="220" y="168" width="800" height="78" rx="8" fill="#ece9fb" stroke="#6d5ef0" stroke-width="2"/>
+  <text x="620" y="192" text-anchor="middle" font-size="15" font-weight="700" fill="#334155">baudet-ui — egui desktop interface</text>
+  <text x="620" y="213" text-anchor="middle" font-size="12" fill="#475569">chat · Markdown · clipboard · reasoning panel · diff viewer</text>
+  <text x="620" y="232" text-anchor="middle" font-size="12" fill="#475569">sidebar · panels · settings · approval dialogs · folder watcher</text>
+
+  <!-- App -->
+  <rect x="220" y="280" width="800" height="78" rx="8" fill="#e6eff8" stroke="#3b82c4" stroke-width="2"/>
+  <text x="620" y="304" text-anchor="middle" font-size="15" font-weight="700" fill="#334155">baudet-app — reducer (Elm architecture)</text>
+  <text x="620" y="325" text-anchor="middle" font-size="12" fill="#475569">sessions · turns · rollouts · client-side compaction</text>
+  <text x="620" y="344" text-anchor="middle" font-size="12" fill="#475569">maintains chat state and compacts older context locally</text>
+
+  <!-- Tools -->
+  <rect x="230" y="392" width="360" height="96" rx="8" fill="#fbf0e0" stroke="#e08a2b" stroke-width="2"/>
+  <text x="410" y="416" text-anchor="middle" font-size="14" font-weight="700" fill="#334155">baudet-tool</text>
+  <text x="410" y="437" text-anchor="middle" font-size="12" fill="#475569">file read/edit · Git · shell</text>
+  <text x="410" y="457" text-anchor="middle" font-size="12" fill="#475569">MCP servers · diff/patch</text>
+  <text x="410" y="477" text-anchor="middle" font-size="12" fill="#475569">tool-loop · process_runner</text>
+
+  <!-- Backend -->
+  <rect x="650" y="392" width="360" height="96" rx="8" fill="#e0f5f1" stroke="#2bb3a3" stroke-width="2"/>
+  <text x="830" y="416" text-anchor="middle" font-size="14" font-weight="700" fill="#334155">baudet-backend</text>
+  <text x="830" y="437" text-anchor="middle" font-size="12" fill="#475569">HTTP transport (reqwest)</text>
+  <text x="830" y="457" text-anchor="middle" font-size="12" fill="#475569">Responses / Chat Completions</text>
+  <text x="830" y="477" text-anchor="middle" font-size="12" fill="#475569">SSE streaming · scripted tests</text>
+
+  <!-- Core -->
+  <rect x="220" y="520" width="800" height="72" rx="8" fill="#e4f3ea" stroke="#4caf72" stroke-width="2"/>
+  <text x="620" y="544" text-anchor="middle" font-size="15" font-weight="700" fill="#334155">baudet-core — shared types</text>
+  <text x="620" y="565" text-anchor="middle" font-size="12" fill="#475569">context · msg · event · item · protocol · usage · mcp · model_windows</text>
+  <text x="620" y="584" text-anchor="middle" font-size="12" fill="#475569">shared definitions for messages, events and protocols</text>
+
+  <!-- Infra row -->
+  <rect x="220" y="640" width="170" height="90" rx="8" fill="#f0e9f7" stroke="#8a5fb0" stroke-width="2"/>
+  <text x="305" y="666" text-anchor="middle" font-size="12" font-weight="700" fill="#334155">baudet-store</text>
+  <text x="305" y="687" text-anchor="middle" font-size="10.5" fill="#475569">repository · transcript</text>
+  <text x="305" y="706" text-anchor="middle" font-size="10.5" fill="#475569">history · session · budget</text>
+  <text x="305" y="722" text-anchor="middle" font-size="10.5" fill="#475569">paging</text>
+
+  <rect x="430" y="640" width="170" height="90" rx="8" fill="#fbe9f1" stroke="#c05b8a" stroke-width="2"/>
+  <text x="515" y="666" text-anchor="middle" font-size="12" font-weight="700" fill="#334155">baudet-settings</text>
+  <text x="515" y="687" text-anchor="middle" font-size="10.5" fill="#475569">config · provider</text>
+  <text x="515" y="706" text-anchor="middle" font-size="10.5" fill="#475569">endpoint · API key</text>
+
+  <rect x="640" y="640" width="170" height="90" rx="8" fill="#fbe9e8" stroke="#d9534f" stroke-width="2"/>
+  <text x="725" y="666" text-anchor="middle" font-size="12" font-weight="700" fill="#334155">baudet-projects</text>
+  <text x="725" y="687" text-anchor="middle" font-size="10.5" fill="#475569">catalog · ids</text>
+  <text x="725" y="706" text-anchor="middle" font-size="10.5" fill="#475569">permissions · tool_gate</text>
+
+  <rect x="850" y="640" width="170" height="90" rx="8" fill="#e8f2fc" stroke="#5b9bd5" stroke-width="2"/>
+  <text x="935" y="672" text-anchor="middle" font-size="12" font-weight="700" fill="#334155">baudet-i18n</text>
+  <text x="935" y="696" text-anchor="middle" font-size="10.5" fill="#475569">internationalization</text>
+
+  <!-- arrows main -->
+  <path d="M 820,132 L 1092,132 L 1092,440 L 1012,440" fill="none" stroke="#334155" stroke-width="2" marker-start="url(#arrowDstart)" marker-end="url(#arrowD)"/>
+  <g transform="translate(1106,290) rotate(-90)">
+    <rect x="-4" y="-30" width="168" height="42" fill="#fbfbfd" opacity="0.92"/>
+    <text x="0" y="0" font-size="11" fill="#334155">HTTP · Responses/Chat · SSE</text>
+  </g>
+
+  <path d="M 620,246 L 620,280" fill="none" stroke="#334155" stroke-width="2" marker-start="url(#arrowDstart)" marker-end="url(#arrowD)"/>
+  <text x="628" y="266" font-size="11" fill="#334155">messages ↔ rendering</text>
+
+  <path d="M 410,358 L 410,392" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrowD)"/>
+  <text x="418" y="379" font-size="11" fill="#334155">tool calls</text>
+
+  <path d="M 830,358 L 830,392" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrowD)"/>
+  <text x="838" y="379" font-size="11" fill="#334155">build request</text>
+
+  <path d="M 410,488 L 410,520" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrowD)"/>
+  <path d="M 830,488 L 830,520" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrowD)"/>
+
+  <!-- support arrows grey -->
+  <path d="M 220,319 L 118,319 L 118,685 L 220,685" fill="none" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#arrowG)"/>
+  <g transform="translate(126,500) rotate(-90)">
+    <rect x="-4" y="-28" width="156" height="36" fill="#fbfbfd" opacity="0.92"/>
+    <text x="0" y="0" font-size="11" fill="#64748b">persist transcripts</text>
+  </g>
+
+  <path d="M 515,640 L 515,358 L 432,358" fill="none" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#arrowG)"/>
+  <text x="508" y="490" font-size="11" fill="#64748b" transform="rotate(-90 508 490)">config / endpoint</text>
+
+  <path d="M 640,640 L 640,440 L 592,440" fill="none" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#arrowG)"/>
+  <text x="648" y="510" font-size="11" fill="#64748b" transform="rotate(-90 648 510)">tool permissions</text>
+
+  <path d="M 1020,640 L 1132,640 L 1132,207 L 1020,207" fill="none" stroke="#9aa0a6" stroke-width="1.5" marker-end="url(#arrowG)"/>
+  <g transform="translate(1140,425) rotate(-90)">
+    <rect x="-4" y="-28" width="120" height="36" fill="#fbfbfd" opacity="0.92"/>
+    <text x="0" y="0" font-size="11" fill="#64748b">translations</text>
+  </g>
+
+  <!-- legend -->
+  <rect x="220" y="748" width="14" height="10" rx="2" fill="#334155"/>
+  <text x="240" y="757" font-size="11" fill="#475569">main data flow</text>
+  <rect x="360" y="748" width="14" height="10" rx="2" fill="#9aa0a6"/>
+  <text x="380" y="757" font-size="11" fill="#475569">support / configuration</text>
+  <rect x="560" y="748" width="14" height="10" rx="2" fill="#e9edf2" stroke="#5b6b7f" stroke-dasharray="4 3"/>
+  <text x="580" y="757" font-size="11" fill="#475569">outside Baudet (model inference)</text>
+</svg>

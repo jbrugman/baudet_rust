@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="635" viewBox="0 0 1240 635" role="img" aria-labelledby="title description">
+  <title id="title">Baudet architecture and chat turn flow</title>
+  <desc id="description">Send starts a turn in the desktop UI. The app prepares context and sends an HTTP request through the backend to an external model server. Server-sent events return through the backend and app to the chat. If the model requests a tool, the tool loop runs it subject to project permissions and approval, then includes its result in the next model request. The lower section lists the supporting Rust crates.</desc>
+  <defs>
+    <marker id="request-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#334155"/>
+    </marker>
+    <marker id="event-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#185d96"/>
+    </marker>
+    <marker id="tool-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#96501e"/>
+    </marker>
+  </defs>
+  <style>
+    text { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; fill: #27364b; }
+    .title { font-size: 32px; font-weight: 730; }
+    .section { font-size: 19px; font-weight: 700; }
+    .name { font-size: 18px; font-weight: 700; }
+    .body { font-size: 14px; fill: #415269; }
+    .label { font-size: 13px; font-weight: 650; }
+    .card { fill: #fff; stroke: #c8d4e2; }
+    .request, .event, .tool { fill: none; stroke-width: 2.5; }
+    .request { stroke: #334155; marker-end: url(#request-arrow); }
+    .event { stroke: #185d96; marker-end: url(#event-arrow); }
+    .tool { stroke: #96501e; marker-end: url(#tool-arrow); }
+    .event-label { fill: #185d96; }
+    .tool-label { fill: #824317; }
+  </style>
+
+  <rect width="1240" height="635" fill="#f7f9fc"/>
+  <text x="34" y="51" class="title">Baudet chat-flow</text>
+  <text x="34" y="78" class="body">How a chat turn moves through the Rust desktop app and the model server</text>
+
+  <g id="chat-turn">
+    <rect x="34" y="112" width="220" height="148" rx="12" class="card"/>
+    <rect x="344" y="112" width="244" height="148" rx="12" class="card"/>
+    <rect x="680" y="112" width="220" height="148" rx="12" class="card"/>
+    <rect x="990" y="112" width="216" height="148" rx="12" fill="#edf1f7" stroke="#8191a8" stroke-dasharray="6 4"/>
+
+    <text x="52" y="145" class="name">baudet-ui</text>
+    <text x="52" y="176" class="section">Send</text>
+    <text x="52" y="201" class="body">egui chat and composer</text>
+    <text x="52" y="226" class="body">Renders text and tool cards</text>
+
+    <text x="362" y="145" class="name">baudet-app</text>
+    <text x="362" y="176" class="body">Prepares context and runs turns</text>
+    <text x="362" y="201" class="body">Applies events to chat state</text>
+    <text x="362" y="226" class="body">Persists the transcript</text>
+
+    <text x="698" y="145" class="name">baudet-backend</text>
+    <text x="698" y="176" class="body">Builds HTTP requests</text>
+    <text x="698" y="201" class="body">Decodes streamed SSE</text>
+    <text x="698" y="226" class="body">into Baudet events</text>
+
+    <text x="1008" y="145" class="name">Model server</text>
+    <text x="1008" y="176" class="body">Outside Baudet, e.g. oMLX</text>
+    <text x="1008" y="201" class="body">Responses API or</text>
+    <text x="1008" y="226" class="body">Chat Completions</text>
+
+    <path d="M254 176H342" class="request"/>
+    <path d="M588 176H678" class="request"/>
+    <path d="M900 176H988" class="request"/>
+    <text x="299" y="166" text-anchor="middle" class="label">Message</text>
+    <text x="634" y="166" text-anchor="middle" class="label">Request</text>
+    <text x="945" y="166" text-anchor="middle" class="label">HTTP</text>
+
+    <path d="M344 226H256" class="event"/>
+    <path d="M680 226H590" class="event"/>
+    <path d="M990 226H902" class="event"/>
+    <text x="299" y="216" text-anchor="middle" class="label event-label">Snapshots</text>
+    <text x="634" y="216" text-anchor="middle" class="label event-label">Events</text>
+    <text x="945" y="216" text-anchor="middle" class="label event-label">SSE</text>
+  </g>
+
+  <g id="tool-loop">
+    <path d="M407 260V327" class="tool"/>
+    <path d="M522 329V262" class="tool"/>
+    <text x="396" y="298" text-anchor="end" class="label tool-label">Tool call</text>
+    <text x="533" y="298" class="label tool-label">Tool result</text>
+
+    <rect x="344" y="329" width="244" height="110" rx="12" fill="#fff6eb" stroke="#d3a477"/>
+    <text x="362" y="361" class="name">baudet-tool</text>
+    <text x="362" y="388" class="body">Tool loop and execution</text>
+    <text x="362" y="413" class="body">Files, Git, shell and MCP</text>
+
+    <text x="626" y="360" class="section">When the model requests a tool</text>
+    <text x="626" y="387" class="body">Baudet checks project permissions and asks for approval where required.</text>
+    <text x="626" y="412" class="body">The tool result becomes context for the next request to the model.</text>
+  </g>
+
+  <g id="supporting-crates">
+    <path d="M34 474H1206" stroke="#c8d4e2"/>
+    <text x="34" y="505" class="section">Supporting crates</text>
+
+    <rect x="34" y="524" width="220" height="80" rx="10" class="card"/>
+    <rect x="272" y="524" width="220" height="80" rx="10" class="card"/>
+    <rect x="510" y="524" width="220" height="80" rx="10" class="card"/>
+    <rect x="748" y="524" width="220" height="80" rx="10" class="card"/>
+    <rect x="986" y="524" width="220" height="80" rx="10" class="card"/>
+
+    <text x="50" y="554" class="name">baudet-core</text>
+    <text x="50" y="581" class="body">Shared messages and events</text>
+    <text x="288" y="554" class="name">baudet-store</text>
+    <text x="288" y="581" class="body">Transcripts and budgets</text>
+    <text x="526" y="554" class="name">baudet-settings</text>
+    <text x="526" y="581" class="body">Settings and provider config</text>
+    <text x="764" y="554" class="name">baudet-projects</text>
+    <text x="764" y="581" class="body">Catalog and permissions</text>
+    <text x="1002" y="554" class="name">baudet-i18n</text>
+    <text x="1002" y="581" class="body">Interface translations</text>
+  </g>
+</svg>

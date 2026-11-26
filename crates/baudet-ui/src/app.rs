@@ -802,8 +802,19 @@ impl TranscriptApp {
                 ui.label(Texts::get(Key::ChooseSession));
             });
         }
+        let wrap = self.settings.transcript_wrap();
+        let right = ui.available_rect_before_wrap().right().min(ui.clip_rect().right());
         for row in self.rows.iter().filter(|row| row.kind != baudet_core::ItemKind::Reasoning) {
-            paint_row(ui, row, self.current_session.as_deref(), self.settings.transcript_wrap());
+            if wrap {
+                // Keep a wide widget in one card from changing the wrap width of later cards.
+                let mut rect = ui.available_rect_before_wrap();
+                rect.max.x = right.max(rect.min.x);
+                ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+                    paint_row(ui, row, self.current_session.as_deref(), wrap);
+                });
+            } else {
+                paint_row(ui, row, self.current_session.as_deref(), wrap);
+            }
         }
     }
 
@@ -1323,6 +1334,140 @@ mod geometry_tests {
         paint(&mut app, 0.0);
         let latest = paint(&mut app, 0.0);
         assert!(has(&latest, "Latest streamed text"), "{latest:?}");
+    }
+
+    #[test]
+    fn given_the_file_panel_and_a_wide_tool_card_when_an_answer_has_a_list_then_each_item_wraps_in_the_chat() {
+        let (_root, mut app) = isolated_app();
+        let (_reports, snapshots) = ampcc::unbounded_channel();
+        app.snapshots = snapshots;
+        app.show_filetree = true;
+        let mut tool = Row::from(&item_tool("wide-tool"));
+        tool.subject = Some(format!("run_command {}", "some/very/long/path/".repeat(30)));
+        let answer = "Mogelijke oorzaken:\n1. De versie die jij hebt geplakt is niet aangekomen. Ik heb alleen de uitvoer van `run_command` gezien, die mijn eigen bestand uitleest.\n2. Of je hebt een wijziging lokaal gemaakt, maar die staat niet in `docs/architecture.svg`. Het kan zijn dat het bestand op een andere plek staat.\n\nWat ik nodig heb om te vergelijken is de aangepaste SVG of het pad waar jouw versie staat.";
+        app.rows = vec![tool, Row::from(&agent("answer-with-list", answer))];
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 720.0))),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.paint(ui));
+        output.textures_delta.clear();
+        let (answer, chat) = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text().starts_with("Mogelijke oorzaken:") => {
+                Some((text, shape.clip_rect))
+            }
+            _ => None,
+        }).expect("the model answer is visible");
+        let rows: Vec<_> = answer.galley.rows.iter().map(|row| row.text()).collect();
+        for prefix in ["1. ", "2. "] {
+            let index = rows.iter().position(|text| text.starts_with(prefix)).expect("the list item starts on its own line");
+            let next = &rows[index + 1];
+            assert!(!next.is_empty() && !next.starts_with("2. "), "the list item has a continuation: {rows:?}");
+        }
+        assert!(answer.visual_bounding_rect().right() <= chat.right(), "the model answer fits within the visible chat");
+    }
+
+    #[test]
+    fn given_a_long_numbered_item_when_wrapping_is_on_then_the_text_fits_the_chat_width() {
+        let item = "1. Concreet detail — sub-modules (tool_gate, previous_response_id, scripted tests, process_runner), en expliciete labels op de pijlen (\"HTTP · Responses/Chat · SSE\", \"verzoek opbouwen\", \"transcript/session opslaan\"). De docs-versies zijn hoger niveau en minder gedetailleerd.";
+        let row = Row::from(&Item::AgentMessage(baudet_core::AgentMessageItem {
+            item_id: "answer".into(),
+            created_at_ms: None,
+            text: item.into(),
+            status: baudet_core::ItemStatus::Completed,
+        }));
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 240.0))),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            ScrollArea::vertical().show(ui, |ui| paint_row(ui, &row, None, true));
+        });
+        output.textures_delta.clear();
+        let (text, clip) = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == item => Some((text, shape.clip_rect)),
+            _ => None,
+        }).expect("the entire numbered item is rendered");
+        assert!(text.galley.rows.len() > 1);
+        assert!(text.visual_bounding_rect().right() <= clip.right());
+    }
+
+    #[test]
+    fn given_a_long_heredoc_when_wrapping_is_on_then_its_details_fit_the_chat_width() {
+        check_heredoc_details_wrapping(true);
+    }
+
+    #[test]
+    fn given_a_long_heredoc_when_wrapping_is_off_then_its_details_keep_the_original_lines() {
+        check_heredoc_details_wrapping(false);
+    }
+
+    fn check_heredoc_details_wrapping(wrap: bool) {
+        let command = concat!(
+            "cat > docs/overview.svg << 'BAUDETSVG'\n",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1240\" height=\"770\" viewBox=\"0 0 1240 770\" ",
+            "font-family=\"system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif\">\n",
+            "</svg>\nBAUDETSVG",
+        );
+        let row = Row::from(&Item::CommandExecution(baudet_core::CommandExecutionItem {
+            item_id: "write-svg".into(),
+            command: command.into(),
+            approval: None,
+            cwd: None,
+            timeout_seconds: None,
+            status: baudet_core::ItemStatus::Completed,
+            exit_code: Some(0),
+            timed_out: false,
+            duration_ms: 0,
+            output: String::new(),
+        }));
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|style| style.animation_time = 0.0);
+        let paint = |events| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 560.0))),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                ScrollArea::new([!wrap, true]).show(ui, |ui| paint_row(ui, &row, None, wrap));
+            });
+            output.textures_delta.clear();
+            output
+        };
+        let initial = paint(Vec::new());
+        assert!(!initial.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Text(text) if text.galley.text().contains("<svg")
+        )));
+        let details = initial.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == "Details" => Some(text.visual_bounding_rect().center()),
+            _ => None,
+        }).expect("the full command is available even with no command output");
+        for pressed in [true, false] {
+            paint(vec![egui::Event::PointerMoved(details), egui::Event::PointerButton {
+                pos: details, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        let open = paint(Vec::new());
+        let (header, source, end) = crate::svg_preview::block(command).unwrap();
+        for label in [header.trim_end(), end.trim_start()] {
+            assert!(open.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.text() == label
+            )));
+        }
+        let rendered = open.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.text() == source => Some((text, shape.clip_rect)),
+            _ => None,
+        }).expect("Details renders the original SVG source");
+        if wrap {
+            assert!(rendered.0.galley.rows.len() > source.lines().count());
+            assert!(rendered.0.visual_bounding_rect().right() <= rendered.1.right());
+        } else {
+            assert_eq!(rendered.0.galley.rows.len(), source.lines().count());
+            assert!(rendered.0.visual_bounding_rect().right() > rendered.1.right());
+        }
     }
 
     #[test]
@@ -2743,6 +2888,16 @@ fn progress_indicator(ui: &mut egui::Ui) {
 
 fn paint_row(ui: &mut egui::Ui, row: &Row, session: Option<&str>, wrap: bool) {
     let label = kind_label(row);
+    let multiline_command = row.subject.as_deref().filter(|subject| {
+        row.kind == baudet_core::ItemKind::CommandExecution && subject.lines().nth(1).is_some()
+    });
+    let bounded_subject = if let Some(command) = multiline_command {
+        command.lines().next()
+    } else if wrap {
+        row.subject.as_deref()
+    } else {
+        None
+    };
     let frame = Frame::new().fill(row_background(ui, row)).corner_radius(6.0).inner_margin(8.0);
     frame.show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -2751,11 +2906,17 @@ fn paint_row(ui: &mut egui::Ui, row: &Row, session: Option<&str>, wrap: bool) {
                 let local = time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string();
                 ui.label(egui::RichText::new(local).weak().size(11.0));
             }
-            if let Some(subject) = &row.subject {
+            if let Some(subject) = row.subject.as_deref().filter(|_| bounded_subject.is_none()) {
                 ui.label(egui::RichText::new(subject).monospace().size(12.0));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(row.status_word()).size(11.0).color(status_color(ui, row)))
+                ui.label(egui::RichText::new(row.status_word()).size(11.0).color(status_color(ui, row)));
+                if let Some(subject) = bounded_subject {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(egui::Label::new(egui::RichText::new(subject).monospace().size(12.0)).truncate())
+                            .on_hover_text(subject);
+                    });
+                }
             });
         });
         if let Some((id, image)) = &row.image {
@@ -2765,7 +2926,7 @@ fn paint_row(ui: &mut egui::Ui, row: &Row, session: Option<&str>, wrap: bool) {
         if let Some(thumbnail) = &row.thumbnail {
             crate::clipboard::show_sent_thumbnail(ui, thumbnail);
         }
-        if row.body.is_empty() {
+        if row.body.is_empty() && multiline_command.is_none() {
             if row.in_progress() {
                 progress_indicator(ui);
             }
@@ -2780,8 +2941,10 @@ fn paint_row(ui: &mut egui::Ui, row: &Row, session: Option<&str>, wrap: bool) {
                 .show_background(true)
                 .icon(panels::compact_chevron)
                 .show(ui, |ui| {
-                    let label = egui::Label::new(egui::RichText::new(&row.body).monospace().size(12.0)).selectable(true);
-                    ui.add(if wrap { label.wrap() } else { label.extend() });
+                    let output = (!row.body.is_empty()).then_some(row.body.as_str());
+                    for text in multiline_command.into_iter().chain(output) {
+                        crate::markdown::show_code(ui, text, wrap);
+                    }
                 })
                 .header_response.on_hover_cursor(egui::CursorIcon::PointingHand);
         } else if row.kind == baudet_core::ItemKind::AgentMessage {

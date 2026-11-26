@@ -5,6 +5,7 @@ mod approval;
 mod diff_view;
 mod folder_watch;
 mod markdown;
+mod svg_preview;
 pub mod clipboard;
 pub mod palette;
 pub mod panels;
