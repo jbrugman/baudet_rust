@@ -79,6 +79,23 @@ try {
         throw "Baudet.exe did not print its command-line help."
     }
     Remove-Item $helpOutput
+
+    $smoke = Join-Path $work "window-test"
+    New-Item -ItemType Directory -Path $smoke | Out-Null
+    $screenshot = Join-Path $smoke "window.png"
+    $errorOutput = Join-Path $smoke "stderr.txt"
+    $arguments = "--demo --home `"$smoke`" --screenshot `"$screenshot`""
+    $process = Start-Process -FilePath $exe -ArgumentList $arguments -RedirectStandardError $errorOutput -PassThru
+    if (-not $process.WaitForExit(60000)) {
+        $process.Kill()
+        $process.WaitForExit()
+        throw "Baudet.exe did not finish its window smoke test: $(Get-Content -Raw $errorOutput)"
+    }
+    if ($process.ExitCode -ne 0 -or -not (Test-Path $screenshot) -or (Get-Item $screenshot).Length -eq 0) {
+        throw "Baudet.exe could not render its demo window (exit $($process.ExitCode)): $(Get-Content -Raw $errorOutput)"
+    }
+    Remove-Item -Recurse -Force $smoke
+
     $zip = Join-Path $OutputDirectory "Baudet-windows-$Architecture.zip"
     Compress-Archive -Path "$work/*" -DestinationPath $zip -Force
     Write-Output $zip

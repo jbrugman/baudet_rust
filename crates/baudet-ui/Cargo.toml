@@ -18,7 +18,7 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 egui = { workspace = true }
 egui_extras = { workspace = true }
-eframe = { workspace = true, features = ["default_fonts", "glow"] }
+eframe = { workspace = true, features = ["default_fonts"] }
 
 png = "0.18"
 base64 = "0.22"
@@ -29,6 +29,13 @@ rfd = { version = "0.18", default-features = false }
 
 arboard = "3.7"
 notify = "6.1.1"
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+eframe = { workspace = true, features = ["glow"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+eframe = { workspace = true, features = ["wgpu_no_default_features"] }
+wgpu = { version = "30.0", default-features = false, features = ["dx12"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 winit = "0.30"

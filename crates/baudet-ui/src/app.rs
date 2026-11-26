@@ -2674,6 +2674,9 @@ pub fn run_from(startup: Startup) -> eframe::Result {
     }
     let options = eframe::NativeOptions {
         viewport: builder,
+        #[cfg(target_os = "windows")]
+        renderer: eframe::Renderer::Wgpu,
+        #[cfg(not(target_os = "windows"))]
         renderer: eframe::Renderer::Glow,
         #[cfg(target_os = "macos")]
         event_loop_builder: if startup.screenshot.is_some() {
