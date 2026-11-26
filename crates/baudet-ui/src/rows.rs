@@ -3,6 +3,7 @@ use baudet_core::{Item, ItemKind, ItemStatus};
 
 pub struct Row {
     pub item_id: String,
+    pub message_timestamp: Option<i64>,
     pub kind: ItemKind,
     pub status: ItemStatus,
     pub body: String,
@@ -16,15 +17,17 @@ impl Row {
         let item_id = item.item_id().to_owned();
         let status = item.status();
         let kind = item.kind();
+        let message_timestamp = item.message_timestamp();
         match item {
-            Item::UserMessage(i) => Row { item_id, kind, status, body: i.text.clone(), subject: None, collapsed: false, image: None },
-            Item::AgentMessage(i) => Row { item_id, kind, status, body: i.text.clone(), subject: None, collapsed: false, image: None },
-            Item::Reasoning(i) => Row { item_id, kind, status, body: i.text.clone(), subject: None, collapsed: true, image: None },
+            Item::UserMessage(i) => Row { item_id, message_timestamp, kind, status, body: i.text.clone(), subject: None, collapsed: false, image: None },
+            Item::AgentMessage(i) => Row { item_id, message_timestamp, kind, status, body: i.text.clone(), subject: None, collapsed: false, image: None },
+            Item::Reasoning(i) => Row { item_id, message_timestamp, kind, status, body: i.text.clone(), subject: None, collapsed: true, image: None },
             Item::CommandExecution(i) => {
-                Row { item_id, kind, status, body: i.output.clone(), subject: Some(i.command.clone()), collapsed: true, image: None }
+                Row { item_id, message_timestamp, kind, status, body: i.output.clone(), subject: Some(i.command.clone()), collapsed: true, image: None }
             }
             Item::FileChange(i) => Row {
                 item_id,
+                message_timestamp,
                 kind,
                 status,
                 body: i.diff.clone().unwrap_or_default(),
@@ -34,6 +37,7 @@ impl Row {
             },
             Item::ToolCall(i) => Row {
                 item_id,
+                message_timestamp,
                 kind,
                 status,
                 body: i.output.clone(),
@@ -43,6 +47,7 @@ impl Row {
             },
             Item::Image(i) => Row {
                 item_id,
+                message_timestamp,
                 kind,
                 status,
                 body: String::new(),
@@ -53,6 +58,7 @@ impl Row {
             },
             Item::Plan(i) => Row {
                 item_id,
+                message_timestamp,
                 kind,
                 status,
                 body: i
@@ -65,7 +71,7 @@ impl Row {
                 collapsed: false,
                 image: None,
             },
-            Item::Error(i) => Row { item_id, kind, status, body: i.message.clone(), subject: None, collapsed: false, image: None },
+            Item::Error(i) => Row { item_id, message_timestamp, kind, status, body: i.message.clone(), subject: None, collapsed: false, image: None },
         }
     }
 

@@ -149,6 +149,7 @@ mod tests {
     #[test]
     fn a_known_kind_still_decodes_beside_an_unknown_field() {
         let item = Record::Item(Item::UserMessage(UserMessageItem {
+            created_at_ms: None,
             item_id: "tu_1/user".into(),
             text: "weetjes".into(),
             status: ItemStatus::Completed,
@@ -156,5 +157,14 @@ mod tests {
         let mut value = serde_json::to_value(&item).unwrap();
         value["payload"]["a_field_from_next_week"] = serde_json::json!(42);
         assert_eq!(serde_json::from_value::<Record>(value).unwrap(), item);
+    }
+
+    #[test]
+    fn given_an_old_chat_record_when_it_is_loaded_then_it_has_no_invented_timestamp() {
+        let json = r#"{"type":"item","payload":{"type":"userMessage","item_id":"old","text":"Question","status":"completed"}}"#;
+        let Record::Item(item) = serde_json::from_str::<Record>(json).unwrap() else {
+            panic!("expected a saved chat item");
+        };
+        assert_eq!(item.message_timestamp(), None);
     }
 }

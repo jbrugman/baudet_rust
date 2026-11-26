@@ -456,6 +456,7 @@ mod tests {
 
     fn user(text: &str) -> Item {
         Item::UserMessage(UserMessageItem {
+            created_at_ms: None,
             item_id: "tu_1/user".into(),
             text: text.into(),
             status: ItemStatus::Completed,
@@ -464,6 +465,7 @@ mod tests {
 
     fn agent(turn: &str, text: &str) -> Item {
         Item::AgentMessage(AgentMessageItem {
+            created_at_ms: None,
             item_id: format!("{turn}/msg"),
             text: text.into(),
             status: ItemStatus::Completed,

@@ -168,6 +168,7 @@ mod tests {
 
     fn user(text: &str) -> Item {
         Item::UserMessage(UserMessageItem {
+            created_at_ms: None,
             item_id: format!("u-{text}"),
             text: text.into(),
             status: ItemStatus::Completed,
@@ -176,6 +177,7 @@ mod tests {
 
     fn agent(id: &str, text: &str) -> Item {
         Item::AgentMessage(AgentMessageItem {
+            created_at_ms: None,
             item_id: id.into(),
             text: text.into(),
             status: ItemStatus::Completed,

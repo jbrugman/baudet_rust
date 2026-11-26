@@ -72,6 +72,7 @@ impl AppState {
             reply: Mutex::new(None),
         };
         sink.completed(Item::UserMessage(UserMessageItem {
+            created_at_ms: None,
             item_id: format!("{turn_id}/user"),
             text: text.to_owned(),
             status: ItemStatus::Completed,
@@ -143,6 +144,7 @@ impl AppState {
         let outcome = tokio::runtime::Builder::new_current_thread().build().expect("local tool runtime").block_on(
             ToolLoop::new(&source, &registry, s.max_tool_iterations)
                 .chain_response_id(previous.is_some())
+                .require_completion(use_tools)
                 .context_ceiling(context_ceiling)
                 .run(&mut LoopRun {
                     history: &history,
@@ -322,8 +324,7 @@ impl Source<'_> {
                 replay.folded += folded;
                 replay.prefix = history[..replay.folded].iter().enumerate()
                     .filter(|(index, msg)| *index < replay.initial_len
-                        || (!msg.content.trim().is_empty()
-                            && !(msg.role == "user" && msg.content == baudet_tool::tool_loop::BLANK_NUDGE)))
+                        || (!msg.content.trim().is_empty() && !baudet_tool::tool_loop::is_retry_nudge(msg)))
                     .map(|(_, msg)| msg.clone())
                     .collect();
                 replay.summary = Some(summary);
@@ -456,6 +457,7 @@ impl ItemSink for Sink<'_> {
         if let Some((id, _)) = self.reply.lock().unwrap().as_ref() {
             if self.app.rows.lock().unwrap().get(id).is_none() {
                 self.started(Item::AgentMessage(AgentMessageItem {
+                    created_at_ms: None,
                     item_id: id.clone(),
                     text: String::new(),
                     status: ItemStatus::InProgress,
@@ -485,7 +487,7 @@ impl ItemSink for Sink<'_> {
                 self.completed(item.with_status(status));
             }
             if !text.is_empty() {
-                self.completed(Item::AgentMessage(AgentMessageItem { item_id: id, text: text.to_owned(), status }));
+                self.completed(Item::AgentMessage(AgentMessageItem { created_at_ms: None, item_id: id, text: text.to_owned(), status }));
             }
         }
     }

@@ -223,6 +223,8 @@ pub struct ImageItem {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentMessageItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_ms: Option<i64>,
     pub item_id: String,
     #[serde(default)]
     pub text: String,
@@ -239,6 +241,8 @@ pub struct ReasoningItem {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserMessageItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_ms: Option<i64>,
     pub item_id: String,
     pub text: String,
     pub status: ItemStatus,
@@ -283,6 +287,22 @@ pub enum Item {
 }
 
 impl Item {
+    pub fn message_timestamp(&self) -> Option<i64> {
+        match self {
+            Item::UserMessage(item) => item.created_at_ms,
+            Item::AgentMessage(item) => item.created_at_ms,
+            _ => None,
+        }
+    }
+
+    pub fn set_message_timestamp(&mut self, timestamp: Option<i64>) {
+        match self {
+            Item::UserMessage(item) => item.created_at_ms = timestamp,
+            Item::AgentMessage(item) => item.created_at_ms = timestamp,
+            _ => {}
+        }
+    }
+
     pub fn item_id(&self) -> &str {
         match self {
             Item::UserMessage(i) => &i.item_id,

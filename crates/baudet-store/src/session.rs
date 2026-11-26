@@ -72,6 +72,7 @@ mod tests {
 
     fn item(id: &str, text: &str) -> Item {
         Item::AgentMessage(AgentMessageItem {
+            created_at_ms: None,
             item_id: id.into(),
             text: text.into(),
             status: ItemStatus::Completed,
@@ -155,6 +156,7 @@ mod tests {
         assert_eq!(tail.len(), 0, "voorzetten is geen write, dus er gaat niets naar de store");
         session.items.push(item("i-3", "drie"));
         session.items.push(Item::UserMessage(UserMessageItem {
+            created_at_ms: None,
             item_id: "i-4".into(),
             text: "vier".into(),
             status: ItemStatus::Completed,

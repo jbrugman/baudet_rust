@@ -26,6 +26,7 @@ fn a_plan_reads_as_a_checklist_in_order() {
 #[test]
 fn prose_reads_inline_and_output_hides() {
     let answer = Item::AgentMessage(baudet_core::AgentMessageItem {
+        created_at_ms: None,
         item_id: "tu_1/msg".into(),
         text: "two facts, one table".into(),
         status: ItemStatus::Completed,

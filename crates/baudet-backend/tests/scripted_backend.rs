@@ -11,6 +11,7 @@ fn ev(deltas: &[&str], thread: &str, turn: &str) -> Vec<ThreadEvent> {
             thread_id: thread.into(),
             turn_id: turn.into(),
             item: Item::AgentMessage(AgentMessageItem {
+                created_at_ms: None,
                 item_id: format!("{turn}/msg"),
                 text: String::new(),
                 status: ItemStatus::InProgress,

@@ -49,6 +49,7 @@ mod tests {
             return None;
         }
         Some(Item::AgentMessage(AgentMessageItem {
+            created_at_ms: None,
             item_id: row.0.to_string(),
             text: row.1.clone(),
             status: ItemStatus::Completed,

@@ -52,6 +52,7 @@ fn started() -> ThreadEvent {
         thread_id: "th_1".into(),
         turn_id: "tu_1".into(),
         item: Item::AgentMessage(AgentMessageItem {
+            created_at_ms: None,
             item_id: "it_1".into(),
             text: String::new(),
             status: ItemStatus::InProgress,

@@ -138,7 +138,7 @@ fn an_observation_reaches_the_model_without_becoming_a_row() {
 }
 
 fn msg(id: &str, text: &str, status: ItemStatus) -> Item {
-    Item::AgentMessage(AgentMessageItem { item_id: id.into(), text: text.into(), status })
+    Item::AgentMessage(AgentMessageItem { created_at_ms: None, item_id: id.into(), text: text.into(), status })
 }
 
 #[test]

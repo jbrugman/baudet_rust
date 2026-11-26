@@ -29,16 +29,28 @@ impl Rows {
         self.items.is_empty()
     }
 
-    fn open(&mut self, item: Item) {
+    fn open(&mut self, mut item: Item) {
         let id = item.item_id().to_string();
-        if !self.items.contains_key(&id) {
+        if let Some(previous) = self.items.get(&id) {
+            item.set_message_timestamp(previous.message_timestamp().or(item.message_timestamp()));
+        } else {
+            if matches!(item.kind(), ItemKind::UserMessage | ItemKind::AgentMessage)
+                && item.message_timestamp().is_none()
+            {
+                let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .ok().and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok());
+                item.set_message_timestamp(timestamp);
+            }
             self.order.push(id.clone());
         }
         self.items.insert(id, item);
     }
 
-    pub fn replace_for_screen(&mut self, item: Item) {
+    pub fn replace_for_screen(&mut self, mut item: Item) {
         let id = item.item_id().to_string();
+        if let Some(previous) = self.items.get(&id) {
+            item.set_message_timestamp(previous.message_timestamp().or(item.message_timestamp()));
+        }
         self.items.insert(id, item);
     }
 

@@ -18,6 +18,7 @@ fn answer(turn: &str, text: &str) -> Vec<ThreadEvent> {
             thread_id: "th_1".into(),
             turn_id: turn.into(),
             item: Item::AgentMessage(AgentMessageItem {
+                created_at_ms: None,
                 item_id: format!("{turn}/msg"),
                 text: String::new(),
                 status: ItemStatus::InProgress,
@@ -34,6 +35,7 @@ fn answer(turn: &str, text: &str) -> Vec<ThreadEvent> {
             thread_id: "th_1".into(),
             turn_id: turn.into(),
             item: Item::AgentMessage(AgentMessageItem {
+                created_at_ms: None,
                 item_id: format!("{turn}/msg"),
                 text: String::new(),
                 status: ItemStatus::Completed,
@@ -71,6 +73,31 @@ fn run_turn(state: &Arc<AppState>, text: &str) {
 
 fn mentions_exact(state: &AppState, tekst: &str) -> usize {
     state.rows().iter().filter(|row| baudet_app::reducer::streamed_text(row) == tekst).count()
+}
+
+#[test]
+fn given_chat_messages_when_an_answer_streams_and_is_reloaded_then_both_timestamps_are_preserved() {
+    let root = scratch("message-timestamps");
+    let (_, state) = persistent(&root, vec![]);
+    run_turn(&state, "Question");
+    let user_at = state.rows().first().unwrap().message_timestamp().expect("new user message gets a timestamp");
+
+    let events = answer("tu_1", "Answer");
+    state.apply(&events[0]);
+    let start_at = state.rows().iter().find(|item| item.kind() == ItemKind::AgentMessage)
+        .and_then(Item::message_timestamp).expect("new answer gets a timestamp");
+    for event in &events[1..] {
+        state.apply(event);
+    }
+    let rows = state.rows();
+    let answer = rows.iter().find(|item| item.kind() == ItemKind::AgentMessage).unwrap();
+    assert_eq!(answer.message_timestamp(), Some(start_at));
+    assert_eq!(baudet_app::reducer::streamed_text(answer), "Answer");
+    assert_eq!(state.persist(), None);
+
+    let reopened = state.build_session().unwrap();
+    assert_eq!(reopened.items.iter().map(Item::message_timestamp).collect::<Vec<_>>(),
+        [Some(user_at), Some(start_at)]);
 }
 
 #[test]
@@ -376,7 +403,7 @@ fn tool_turns_replay_long_history_or_stop_without_losing_the_request() {
     use std::sync::atomic::AtomicBool;
 
     let root = scratch("tool-context");
-    let (backend, state) = persistent(&root, vec![answer("tu_1", "Started"), answer("tu_2", "Reviewed")]);
+    let (backend, state) = persistent(&root, vec![answer("tu_1", "Started"), answer("tu_2", "Reviewed\n[[BAUDET_DONE]]")]);
     let original = format!("Review the project and report findings.\n{}", "original context ".repeat(3_500));
     run_turn(&state, &original);
     let mut project = Project::new("p-1".into(), "Fixture", 0);
@@ -436,7 +463,7 @@ fn auto_compact_keeps_a_running_tool_turn_and_persists_the_checkpoint() {
         completed("tu_1", "Ready"),
         completed("tu_2", r#"{"tool":"read_file","arguments":{"file":"example.txt"}}"#),
         completed("tu_3", "Continue the review and report the findings from the file."),
-        completed("tu_4", "Review complete"),
+        completed("tu_4", "Review complete\n[[BAUDET_DONE]]"),
     ]);
     run_turn(&state, &"previous research ".repeat(600));
     std::fs::write(root.join("example.txt"), "file observation ".repeat(600)).unwrap();
@@ -600,7 +627,7 @@ fn plain_read_edit_and_command_calls_use_the_existing_tool_checks() {
         events
     };
     let (backend, state) = persistent(&root, vec![
-        completed("tu_1", read), completed("tu_2", edit), completed("tu_3", invalid_command), completed("tu_4", "Read it."),
+        completed("tu_1", read), completed("tu_2", edit), completed("tu_3", invalid_command), completed("tu_4", "Read it.\n[[BAUDET_DONE]]"),
     ]);
     std::fs::write(root.join("example.txt"), "known observation").unwrap();
     let mut project = Project::new("p-1".into(), "Fixture", 0);
@@ -669,7 +696,7 @@ fn plain_git_calls_reach_approval_before_staging_and_committing() {
         r#"{"tool": "git", "arguments": {"command": "add", "args": ["README.md"]}}"#);
     let commit = concat!("Ik ga de wijzigingen committen met de interne git tool.\n\n",
         r#"{"tool": "git", "arguments": {"command": "commit", "message": "docs: update README.md"}}"#);
-    let scripts = [add, "Git result", add, "Git result", commit, "Git result", commit, "Git result"]
+    let scripts = [add, "Git result\n[[BAUDET_DONE]]", add, "Git result\n[[BAUDET_DONE]]", commit, "Git result\n[[BAUDET_DONE]]", commit, "Git result\n[[BAUDET_DONE]]"]
         .into_iter().enumerate().map(|(index, text)| {
             let id = format!("tu_{index}");
             let mut events = answer(&id, text);
@@ -770,7 +797,7 @@ fn mcp_is_advertised_and_approved_without_project_write_access() {
         events
     };
     for (name, project) in [("read-only", Some(&project)), ("unassigned", None)] {
-        let (backend, state) = persistent(&root.join(name), vec![completed("tu_1", call), completed("tu_2", "Done.")]);
+        let (backend, state) = persistent(&root.join(name), vec![completed("tu_1", call), completed("tu_2", "Done.\n[[BAUDET_DONE]]")]);
         let approved = Arc::new(AtomicBool::new(false));
         let seen = Arc::clone(&approved);
         assert!(AppState::tools_active(&settings, project));

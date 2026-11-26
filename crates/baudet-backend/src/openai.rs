@@ -415,6 +415,7 @@ pub fn events_for_payload(state: &mut StreamState, turn_id: &str, delta: &Delta)
                         status: baudet_core::ItemStatus::InProgress,
                     }),
                     _ => baudet_core::Item::AgentMessage(baudet_core::AgentMessageItem {
+                        created_at_ms: None,
                         item_id: item_id.clone(),
                         text: String::new(),
                         status: baudet_core::ItemStatus::InProgress,
@@ -476,6 +477,7 @@ impl StreamState {
                         status,
                     }),
                     _ => baudet_core::Item::AgentMessage(baudet_core::AgentMessageItem {
+                        created_at_ms: None,
                         item_id,
                         text: String::new(),
                         status,

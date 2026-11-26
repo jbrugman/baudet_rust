@@ -1120,6 +1120,7 @@ mod geometry_tests {
         app.intents = intents;
         let history = |start, end| {
             (start..end).map(|number| Row::from(&Item::UserMessage(baudet_core::UserMessageItem {
+                created_at_ms: None,
                 item_id: format!("history/{number}"),
                 text: format!("History {number}"),
                 status: ItemStatus::Completed,
@@ -2461,6 +2462,10 @@ fn paint_row(ui: &mut egui::Ui, row: &Row, session: Option<&str>, wrap: bool) {
     frame.show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(label).strong().size(11.0));
+            if let Some(time) = row.message_timestamp.and_then(chrono::DateTime::from_timestamp_millis) {
+                let local = time.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string();
+                ui.label(egui::RichText::new(local).weak().size(11.0));
+            }
             if let Some(subject) = &row.subject {
                 ui.label(egui::RichText::new(subject).monospace().size(12.0));
             }
@@ -2867,6 +2872,7 @@ fn delta(turn: &str, text: &str) -> ThreadEvent {
 
 fn agent(turn: &str, text: &str) -> Item {
     Item::AgentMessage(AgentMessageItem {
+        created_at_ms: None,
         item_id: format!("{turn}/msg"),
         text: text.into(),
         status: ItemStatus::InProgress,
@@ -2875,6 +2881,7 @@ fn agent(turn: &str, text: &str) -> Item {
 
 fn finish(turn: &str, text: &str) -> Item {
     Item::AgentMessage(AgentMessageItem {
+        created_at_ms: None,
         item_id: format!("{turn}/msg"),
         text: text.into(),
         status: ItemStatus::Completed,

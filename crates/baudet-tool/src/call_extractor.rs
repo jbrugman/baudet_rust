@@ -153,6 +153,14 @@ pub fn protocol_for(enabled: &[&str], extra: &[ExtraTool], git_writes: bool) -> 
     if !(can_read || can_edit) {
         out.push_str(" Otherwise either answer or make the next call you still need.");
     }
+    if !named.is_empty() {
+        out.push_str("\nIf you need a tool, emit the call now. An announcement is not a tool call. ");
+        out.push_str("When your answer is complete, write it normally and put ");
+        out.push_str(crate::tool_loop::FINAL_DONE);
+        out.push_str(" on its own final line. If you cannot complete the request, explain why and put ");
+        out.push_str(crate::tool_loop::FINAL_BLOCKED);
+        out.push_str(" on its own final line. Do not use a final marker when making a tool call.");
+    }
     out
 }
 
@@ -370,24 +378,25 @@ mod tests {
         for absent in ["edit_file", "run_command", "git"] {
             assert!(!only_read.contains(absent), "een tool die er niet is, mag niet aangeboden worden: {absent}");
         }
-        assert!(only_read.ends_with("On ok true from read_file, choose old_text from the text it returned."));
+        assert!(only_read.contains("On ok true from read_file, choose old_text from the text it returned."));
 
         let editing = protocol_for(&["read_file", "edit_file"], &[], false);
         assert!(editing.contains("\"edit_file\""));
         assert!(editing.contains("\"old_text\""));
-        assert!(editing.ends_with("On ok true from edit_file, either answer or make the next call you still need."));
+        assert!(editing.contains("On ok true from edit_file, either answer or make the next call you still need."));
         assert!(!editing.contains("run_command"), "uitgeschreven rechten blijven weg uit de prompt");
 
         let edit_without_read = protocol_for(&["edit_file"], &[], false);
         assert!(edit_without_read.contains("\"edit_file\""), "aanwezig blijft aangeboden: {edit_without_read}");
         assert!(!edit_without_read.contains("\"read_file\""), "afwezig blijft verzwegen: {edit_without_read}");
         assert!(!edit_without_read.contains("old_text from the text it returned"), "geen advies over een afwezige tool");
-        assert!(edit_without_read.ends_with("On ok true from edit_file, either answer or make the next call you still need."));
+        assert!(edit_without_read.contains("On ok true from edit_file, either answer or make the next call you still need."));
 
         let empty = protocol_for(&[], &[], false);
         for tool in ["read_file", "edit_file", "run_command", "git"] {
             assert!(!empty.contains(&format!("\"{tool}\"")), "ledige registry adverteert niets: {tool}");
         }
+        assert!(!empty.contains(crate::tool_loop::FINAL_DONE));
         assert!(empty.contains(FENCE_TAG), "de vorm blijft, ook zonder tools");
 
         let full = protocol_for(&["read_file", "edit_file", "run_command", "git"], &[], false);

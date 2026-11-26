@@ -23,6 +23,46 @@ const TRUNCATION_SKELETON: &str = "\n\n[... output truncated: keeping the first 
 const MAX_ITERATIONS_REASON: &str = "max_tool_iterations";
 
 pub const BLANK_NUDGE: &str = "Your previous turn returned neither an answer nor a tool call. If you intend to use a tool, emit the call now; otherwise reply with your final answer.";
+const ACTION_NUDGE: &str = "Use a tool now if an action is still needed. Otherwise provide the answer or explain what blocked you, and end with the prescribed final marker.";
+const MISSING_COMPLETION: &str = "The model did not provide a tool call or mark its final answer.";
+pub const FINAL_DONE: &str = "[[BAUDET_DONE]]";
+pub const FINAL_BLOCKED: &str = "[[BAUDET_BLOCKED]]";
+const FINAL_MARKERS: [&str; 2] = [FINAL_DONE, FINAL_BLOCKED];
+
+pub fn is_retry_nudge(message: &Msg) -> bool {
+    message.role == "user" && matches!(message.content.as_str(), BLANK_NUDGE | ACTION_NUDGE)
+}
+
+fn strip_final_marker(text: &mut String) -> bool {
+    let Some((answer, marker)) = text.trim_end().rsplit_once('\n') else {
+        if FINAL_MARKERS.contains(&text.trim()) {
+            text.clear();
+        }
+        return false;
+    };
+    if !FINAL_MARKERS.contains(&marker.trim()) {
+        return false;
+    }
+    let answer = answer.trim_end();
+    let valid = !is_blankish(answer);
+    text.truncate(answer.len());
+    valid
+}
+
+// A marker can cross stream chunks. Hold only the suffix that could start one.
+fn visible_delta(chunk: &str, pending: &mut String) -> String {
+    pending.push_str(chunk);
+    for marker in FINAL_MARKERS {
+        if pending.contains(marker) {
+            *pending = pending.replace(marker, "");
+        }
+    }
+    let keep = FINAL_MARKERS.iter().map(|marker| {
+        (1..marker.len()).rev().find(|&length| pending.ends_with(&marker[..length])).unwrap_or(0)
+    }).max().unwrap_or(0);
+    let rest = pending.split_off(pending.len() - keep);
+    std::mem::replace(pending, rest)
+}
 
 fn is_blankish(text: &str) -> bool {
     text.chars().all(|c| c.is_whitespace() || c == '.' || c == '\u{2026}')
@@ -298,6 +338,7 @@ pub struct ToolLoop<'a> {
     pub max_iterations: u32,
     pub chain_response_id: bool,
     pub context_ceiling: u64,
+    require_completion: bool,
 }
 
 impl<'a> ToolLoop<'a> {
@@ -319,6 +360,7 @@ impl<'a> ToolLoop<'a> {
             max_iterations: max_iterations.max(1),
             chain_response_id: false,
             context_ceiling: 0,
+            require_completion: false,
         }
     }
 
@@ -332,6 +374,11 @@ impl<'a> ToolLoop<'a> {
         self
     }
 
+    pub fn require_completion(mut self, enabled: bool) -> Self {
+        self.require_completion = enabled;
+        self
+    }
+
     pub async fn run(&self, run: &mut LoopRun<'_>) -> LoopOutcome {
         let mut msgs: Vec<Msg> = run.history.to_vec();
         let mut added: Vec<Msg> = Vec::new();
@@ -342,8 +389,10 @@ impl<'a> ToolLoop<'a> {
         let mut pending_image = run.image;
         let mut call_steps = 0u32;
         let mut blanks = 0u32;
+        let explicit_completion = self.require_completion && tools.is_some();
+        let mut retried_completion = false;
 
-        for iteration in 0..=self.max_iterations {
+        for iteration in 0..=self.max_iterations.saturating_add(u32::from(explicit_completion)) {
             if self.context_ceiling > 0 && estimate_tokens_of(&msgs) > self.context_ceiling {
                 return LoopOutcome::CapReached {
                     response_id: prev,
@@ -353,11 +402,12 @@ impl<'a> ToolLoop<'a> {
                     incomplete_reason: CONTEXT_LIMIT_REASON.to_string(),
                 };
             }
-            if iteration == self.max_iterations {
+            if iteration - u32::from(retried_completion) == self.max_iterations {
                 break;
             }
             run.sink.reply_started();
-            let turn = self.ask(run, &mut prev, &msgs, tools.as_ref(), &mut pending_image).await;
+            let mut turn = self.ask(run, &mut prev, &msgs, tools.as_ref(), &mut pending_image).await;
+            let final_answer = explicit_completion && strip_final_marker(&mut turn.text);
             run.sink.reply_completed(&turn.text);
             if self.chain_response_id && turn.response_id.is_some() {
                 prev = turn.response_id.clone();
@@ -365,7 +415,20 @@ impl<'a> ToolLoop<'a> {
             let calls = if turn.incomplete_reason.is_none() { self.extractor.extract(&turn, self.registry) } else { Vec::new() };
 
             if calls.is_empty() {
-                if turn.incomplete_reason.is_none() && is_blankish(&turn.text) && blanks < MAX_BLANK_TURNS {
+                if explicit_completion && !final_answer && turn.incomplete_reason.is_none() {
+                    if !retried_completion {
+                        retried_completion = true;
+                        if !is_blankish(&turn.text) {
+                            self.add_assistant(run, &mut msgs, &mut added, &turn);
+                        }
+                        msgs.push(Msg::user(ACTION_NUDGE));
+                        continue;
+                    }
+                    turn.incomplete_reason = Some(MISSING_COMPLETION.to_owned());
+                }
+                if !explicit_completion && turn.incomplete_reason.is_none() && is_blankish(&turn.text)
+                    && blanks < MAX_BLANK_TURNS
+                {
                     blanks += 1;
                     msgs.push(Msg::user(BLANK_NUDGE));
                     continue;
@@ -390,13 +453,17 @@ impl<'a> ToolLoop<'a> {
         }
 
         run.sink.reply_started();
-        let settle = self.ask(run, &mut prev, &msgs, tools.as_ref(), &mut pending_image).await;
+        let mut settle = self.ask(run, &mut prev, &msgs, tools.as_ref(), &mut pending_image).await;
+        let final_answer = explicit_completion && strip_final_marker(&mut settle.text);
         run.sink.reply_completed(&settle.text);
         if self.chain_response_id && settle.response_id.is_some() {
             prev = settle.response_id.clone();
         }
         self.add_assistant(run, &mut msgs, &mut added, &settle);
         if settle.incomplete_reason.is_some() || self.extractor.extract(&settle, self.registry).is_empty() {
+            if explicit_completion && !final_answer && settle.incomplete_reason.is_none() {
+                settle.incomplete_reason = Some(MISSING_COMPLETION.to_owned());
+            }
             steps.push(ToolStep { assistant_text: settle.text.clone(), calls: Vec::new(), results: Vec::new() });
             return LoopOutcome::Completed {
                 final_text: settle.text.clone(),
@@ -428,13 +495,23 @@ impl<'a> ToolLoop<'a> {
         let sink = run.sink;
         let on_delta = &mut *run.on_delta;
         let on_reasoning = &mut *run.on_reasoning;
+        let explicit_completion = self.require_completion && tools.is_some();
+        let mut pending_marker = String::new();
         let request = TurnRequest {
             history: msgs,
             previous_response_id: prev.as_deref(),
             tools,
             on_delta: boxed(move |chunk: &str| {
-                sink.text_delta(chunk);
-                on_delta(chunk);
+                if explicit_completion {
+                    let visible = visible_delta(chunk, &mut pending_marker);
+                    if !visible.is_empty() {
+                        sink.text_delta(&visible);
+                        on_delta(&visible);
+                    }
+                } else {
+                    sink.text_delta(chunk);
+                    on_delta(chunk);
+                }
             }),
             on_reasoning: boxed(move |chunk: &str| {
                 sink.reasoning_delta(chunk);
@@ -1160,6 +1237,79 @@ mod tests {
                 "reply-completed klaar",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn given_a_news_fetch_announcement_when_the_model_continues_then_the_edit_requires_approval() {
+        // Given a model that announces the action before eventually sending a tool call.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("news.txt");
+        std::fs::write(&file, "old").unwrap();
+        let registry = ToolRegistry::new(vec![Box::new(crate::edit_file::EditFileTool)]);
+        let source = source(vec![
+            StubSource::prose("Ik haal het nieuws opnieuw op."),
+            StubSource::calls_for(format!("Proceeding.\n{FINAL_DONE}"), &[("edit_file", json!({
+                "file": "news.txt", "edits": [{"old_text": "old", "new_text": "updated"}]
+            }))]),
+            StubSource::prose(format!("De wijziging is geweigerd.\n{FINAL_BLOCKED}")),
+        ]);
+        let approvals = std::sync::Arc::new(AtomicUsize::new(0));
+        let observed = approvals.clone();
+        let mut context = ToolContext::for_folder(dir.path(), true, true, false);
+        context.approve = Box::new(move |path, _| {
+            assert_eq!(path, "news.txt");
+            observed.fetch_add(1, Ordering::SeqCst);
+            false
+        });
+
+        // When the user requests the news.
+        let (outcome, _) = drive(&registry, &source, &[Msg::user("Haal het nieuws op")], &context, 4, |loop_| loop_.require_completion(true)).await;
+
+        // Then the turn continues once and the declined edit never reaches disk.
+        assert_eq!(turns(&source), 3);
+        assert_eq!(approvals.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "old");
+        assert!(!outcome.messages().iter().any(is_retry_nudge));
+        assert!(matches!(outcome, LoopOutcome::Completed { final_text, .. } if final_text == "De wijziging is geweigerd."));
+    }
+
+    #[test]
+    fn given_a_final_marker_split_across_chunks_when_streamed_then_only_answer_text_is_visible() {
+        let mut pending = String::new();
+        let visible: String = ["Reported.\n[", "[BAUDET_", "DONE", "]]"]
+            .iter()
+            .map(|chunk| visible_delta(chunk, &mut pending))
+            .collect();
+
+        assert_eq!(visible, "Reported.\n");
+        assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn given_tools_when_the_model_returns_news_then_the_answer_completes_without_retry() {
+        let registry = two_readers();
+        let answer = "Ik heb het nieuws opgehaald. Het belangrijkste bericht staat bovenaan.";
+        let source = source(vec![StubSource::prose(format!("{answer}\n{FINAL_DONE}"))]);
+
+        let (outcome, _) = drive(&registry, &source, &[Msg::user("Haal het nieuws op")], &ctx(), 4, |loop_| loop_.require_completion(true)).await;
+
+        assert_eq!(turns(&source), 1);
+        assert!(matches!(outcome, LoopOutcome::Completed { final_text, .. } if final_text == answer));
+    }
+
+    #[tokio::test]
+    async fn given_an_announcement_retry_when_the_model_only_promises_again_then_the_turn_reports_missing_completion() {
+        let registry = two_readers();
+        let source = source(vec![
+            StubSource::prose("Ik haal het nieuws opnieuw op."),
+            StubSource::prose("Ik haal 'm opnieuw op — nu de volledige feed, zodat ik de nieuwste items (die vooraan staan) goed kan zien."),
+        ]);
+
+        let (outcome, _) = drive(&registry, &source, &[Msg::user("Haal het nieuws op")], &ctx(), 4, |loop_| loop_.require_completion(true)).await;
+
+        assert_eq!(turns(&source), 2);
+        assert!(matches!(outcome, LoopOutcome::Completed { final_turn, .. }
+            if final_turn.incomplete_reason.as_deref() == Some(MISSING_COMPLETION)));
     }
 
     #[tokio::test]

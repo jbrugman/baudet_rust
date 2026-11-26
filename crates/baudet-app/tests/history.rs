@@ -15,6 +15,7 @@ fn answer(thread: &str, turn: &str, text: &str) -> Vec<ThreadEvent> {
             thread_id: thread.into(),
             turn_id: turn.into(),
             item: Item::AgentMessage(AgentMessageItem {
+                created_at_ms: None,
                 item_id: format!("{turn}/msg"),
                 text: String::new(),
                 status: ItemStatus::InProgress,
@@ -31,6 +32,7 @@ fn answer(thread: &str, turn: &str, text: &str) -> Vec<ThreadEvent> {
             thread_id: thread.into(),
             turn_id: turn.into(),
             item: Item::AgentMessage(AgentMessageItem {
+                created_at_ms: None,
                 item_id: format!("{turn}/msg"),
                 text: String::new(),
                 status: ItemStatus::Completed,
@@ -108,6 +110,7 @@ fn een_half_antwoord_blijft_erbuiten() {
             thread_id: "th_1".into(),
             turn_id: "tu_1".into(),
             item: Item::AgentMessage(AgentMessageItem {
+                created_at_ms: None,
                 item_id: "tu_1/msg".into(),
                 text: String::new(),
                 status: ItemStatus::InProgress,

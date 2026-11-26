@@ -153,12 +153,14 @@ fn history_events(messages: &[Msg]) -> Vec<ThreadEvent> {
         .map(|msg| {
             let item: Item = if msg.role == "user" {
                 Item::UserMessage(baudet_core::UserMessageItem {
+                    created_at_ms: None,
                     item_id: "history/user".to_string(),
                     text: msg.content.clone(),
                     status: ItemStatus::Completed,
                 })
             } else {
                 Item::AgentMessage(baudet_core::AgentMessageItem {
+                    created_at_ms: None,
                     item_id: "history/agent".to_string(),
                     text: msg.content.clone(),
                     status: ItemStatus::Completed,
@@ -371,6 +373,7 @@ impl AppState {
             };
             let turn_id = format!("tu_{}", self.turn_counter.fetch_add(1, Ordering::SeqCst) + 1);
             let question = Item::UserMessage(baudet_core::UserMessageItem {
+                created_at_ms: None,
                 item_id: format!("{turn_id}/user"),
                 text: user_text.to_string(),
                 status: ItemStatus::Completed,
