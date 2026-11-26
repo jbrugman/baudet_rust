@@ -153,6 +153,7 @@ fn history_events(messages: &[Msg]) -> Vec<ThreadEvent> {
         .map(|msg| {
             let item: Item = if msg.role == "user" {
                 Item::UserMessage(baudet_core::UserMessageItem {
+                    thumbnail: None,
                     created_at_ms: None,
                     item_id: "history/user".to_string(),
                     text: msg.content.clone(),
@@ -271,7 +272,7 @@ impl AppState {
     }
 
     pub fn send_with_image(&self, user_text: &str, image: Option<String>) -> Result<Sent, TurnBusy> {
-        self.send_inner(user_text, image, None).map_err(|_| TurnBusy)
+        self.send_inner(user_text, image, None, None).map_err(|_| TurnBusy)
     }
 
     pub fn send_with_context(
@@ -280,7 +281,17 @@ impl AppState {
         image: Option<String>,
         settings: &baudet_settings::Settings,
     ) -> Result<Sent, SendError> {
-        self.send_inner(user_text, image, Some(settings))
+        self.send_with_context_and_thumbnail(user_text, image, None, settings)
+    }
+
+    pub fn send_with_context_and_thumbnail(
+        &self,
+        user_text: &str,
+        image: Option<String>,
+        thumbnail: Option<String>,
+        settings: &baudet_settings::Settings,
+    ) -> Result<Sent, SendError> {
+        self.send_inner(user_text, image, thumbnail, Some(settings))
     }
 
     pub fn context_key(&self) -> Option<String> {
@@ -347,6 +358,7 @@ impl AppState {
         &self,
         user_text: &str,
         image: Option<String>,
+        thumbnail: Option<String>,
         settings: Option<&baudet_settings::Settings>,
     ) -> Result<Sent, SendError> {
         self.live_turns.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).map_err(|_| TurnBusy)?;
@@ -373,6 +385,7 @@ impl AppState {
             };
             let turn_id = format!("tu_{}", self.turn_counter.fetch_add(1, Ordering::SeqCst) + 1);
             let question = Item::UserMessage(baudet_core::UserMessageItem {
+                thumbnail,
                 created_at_ms: None,
                 item_id: format!("{turn_id}/user"),
                 text: user_text.to_string(),

@@ -35,7 +35,7 @@ use tokio::sync::mpsc as ampcc;
 mod live_tests;
 
 enum Intent {
-    Submit(String, Option<String>),
+    Submit(String, Option<crate::clipboard::SubmittedImage>),
     UseCatalog(baudet_projects::Catalog),
     Compact,
     Stop,
@@ -61,7 +61,7 @@ struct Snapshot {
     context: Option<ContextStatus>,
     has_more_older: bool,
     reason: Option<String>,
-    rejected_draft: Option<(String, Option<String>)>,
+    rejected_draft: Option<(String, Option<crate::clipboard::SubmittedImage>)>,
     compaction: Option<String>,
 }
 
@@ -83,7 +83,7 @@ impl Tab {
 }
 
 pub struct TranscriptApp {
-    attachment: Option<String>,
+    attachment: Option<crate::clipboard::Attachment>,
     thinking_hidden: bool,
     help: Option<bool>,
     input: String,
@@ -337,6 +337,14 @@ impl TranscriptApp {
         });
     }
 
+    fn remember_zoom_factor(&mut self, ctx: &egui::Context) {
+        let zoom_factor = ctx.zoom_factor();
+        if zoom_factor != self.settings.zoom_factor() {
+            self.settings.set_zoom_factor(zoom_factor);
+            let _ = self.settings_tx.send(SettingsCommand::SaveZoomFactor(zoom_factor));
+        }
+    }
+
     fn paint_layout(&mut self, ui: &mut egui::Ui) {
         let mut menu_frame = egui::Frame::side_top_panel(ui.style());
         if ui.visuals().dark_mode {
@@ -369,6 +377,15 @@ impl TranscriptApp {
                             }
                             ui.close();
                         }
+                    }
+                    ui.separator();
+                    if ui.button(Texts::get(Key::ZoomIn)).clicked() {
+                        egui::gui_zoom::zoom_in(ui.ctx());
+                        ui.close();
+                    }
+                    if ui.button(Texts::get(Key::ZoomOut)).clicked() {
+                        egui::gui_zoom::zoom_out(ui.ctx());
+                        ui.close();
                     }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -444,7 +461,7 @@ impl TranscriptApp {
                 text.push_str(&self.input);
                 self.input = text;
                 if self.attachment.is_none() {
-                    self.attachment = image;
+                    self.attachment = image.map(|image| crate::clipboard::Attachment::restore(ui.ctx(), image));
                 }
             }
             newest = Some(snapshot);
@@ -457,6 +474,9 @@ impl TranscriptApp {
                 self.rows = report.rows;
             }
             self.status = match (&report.reason, &self.fell_back, report.busy, report.loading) {
+                (Some(reason), _, _, _) if reason == baudet_tool::tool_loop::MISSING_COMPLETION => {
+                    Texts::get(Key::ModelTurnUnfinished).to_owned()
+                }
                 (Some(reason), _, _, _) => reason.clone(),
                 (None, Some(reason), false, false) if !reason.is_empty() => reason.clone(),
                 (None, _, true, _) => Texts::get(Key::Streaming).to_owned(),
@@ -953,13 +973,15 @@ impl TranscriptApp {
             self.remember_chat_layout();
             ui.request_repaint();
         }
-        if self.attachment.is_some() {
-            ui.horizontal_wrapped(|ui| {
+        if let Some(attachment) = &self.attachment {
+            let remove = ui.horizontal_wrapped(|ui| {
+                attachment.show_thumbnail(ui);
                 ui.label(Texts::get(Key::ImageAttached));
-                if ui.small_button(Texts::get(Key::ImageRemoveButton)).clicked() {
-                    self.attachment = None;
-                }
-            });
+                ui.small_button(Texts::get(Key::ImageRemoveButton)).clicked()
+            }).inner;
+            if remove {
+                self.attachment = None;
+            }
         }
         let can_start = self.server_beurt && !self.busy && !self.loading && self.deletion.is_none();
         let (send_clicked, compact_clicked, stop_clicked) = ui.horizontal_top(|ui| {
@@ -1013,13 +1035,10 @@ impl TranscriptApp {
             }).inner;
         if self.server_beurt
             && response.has_focus()
-            && ui.input(|i| {
-                ((i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(egui::Key::V))
-                    || i.events.iter().any(|event| matches!(event, egui::Event::Paste(_)))
-            })
+            && ui.input(|input| crate::clipboard::image_paste_requested(&input.events))
         {
             if let Some(image) = crate::clipboard::image_data_url() {
-                self.attachment = Some(image);
+                self.attachment = Some(crate::clipboard::Attachment::new(ui.ctx(), image));
                 ui.request_repaint();
             }
         }
@@ -1030,7 +1049,8 @@ impl TranscriptApp {
         {
             self.compaction = None;
             let text = std::mem::take(&mut self.input);
-            let _ = self.intents.send(Intent::Submit(text, self.attachment.take()));
+            let image = self.attachment.take().map(|attachment| attachment.image);
+            let _ = self.intents.send(Intent::Submit(text, image));
             self.busy = true;
             self.status = "starting".to_string();
         }
@@ -1086,6 +1106,7 @@ fn theme_preference(appearance: Appearance) -> egui::ThemePreference {
 impl eframe::App for TranscriptApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.remember_zoom_factor(&ctx);
         if self.shot.is_some() {
             ctx.request_repaint();
             if self.frames == 0 {
@@ -1188,6 +1209,24 @@ mod geometry_tests {
     }
 
     #[test]
+    fn given_an_increased_zoom_when_baudet_restarts_then_it_restores_the_zoom() {
+        let (root, mut app) = isolated_app();
+        let ctx = egui::Context::default();
+        egui::gui_zoom::zoom_in(&ctx);
+        ctx.run_ui(egui::RawInput::default(), |ui| app.remember_zoom_factor(ui.ctx())).drop_without_applying_deltas();
+        assert_eq!(ctx.zoom_factor(), 1.1);
+        drop(app);
+
+        let file = baudet_settings::SettingsFile::at(root.path().join("settings.json"));
+        let mut reopened = SettingsView::new();
+        reopened.load(&file);
+        let ctx = egui::Context::default();
+        ctx.set_zoom_factor(reopened.zoom_factor());
+        ctx.run_ui(egui::RawInput::default(), |_| {}).drop_without_applying_deltas();
+        assert_eq!(ctx.zoom_factor(), 1.1);
+    }
+
+    #[test]
     fn streaming_follows_the_bottom_again_after_loading_older_messages() {
         let mut app = TranscriptApp::new(TranscriptApp::demo_backend());
         let (_reports, snapshots) = ampcc::unbounded_channel();
@@ -1197,6 +1236,7 @@ mod geometry_tests {
         app.intents = intents;
         let history = |start, end| {
             (start..end).map(|number| Row::from(&Item::UserMessage(baudet_core::UserMessageItem {
+                thumbnail: None,
                 created_at_ms: None,
                 item_id: format!("history/{number}"),
                 text: format!("History {number}"),
@@ -1375,6 +1415,71 @@ mod geometry_tests {
         assert!(matches!(intents.try_recv(), Err(mpsc::TryRecvError::Empty)));
         assert!(app.input.is_empty());
         assert!(app.thinking_hidden);
+    }
+
+    #[test]
+    fn given_an_image_attachment_when_sending_without_text_then_the_image_is_submitted() {
+        let (_root, mut app) = isolated_app();
+        let (tx, intents) = mpsc::channel();
+        app.intents = tx;
+        app.server_beurt = true;
+        let ctx = egui::Context::default();
+        let url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+XU1sAAAAASUVORK5CYII=";
+        app.attachment = Some(crate::clipboard::Attachment::new(&ctx, url.to_owned()));
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let id = ui.make_persistent_id(COMPOSER_FIELD);
+            ui.memory_mut(|memory| memory.request_focus(id));
+            app.composer(ui, 700.0);
+        }).drop_without_applying_deltas();
+        let raw = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::CTRL,
+            }],
+            ..Default::default()
+        };
+
+        ctx.run_ui(raw, |ui| app.composer(ui, 700.0)).drop_without_applying_deltas();
+        assert!(matches!(intents.try_recv(), Ok(Intent::Submit(text, Some(image))) if text.is_empty() && image.url == url));
+    }
+
+    #[test]
+    fn given_an_image_only_message_when_the_session_reopens_then_it_still_shows_the_thumbnail() {
+        let root = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn Backend> = TranscriptApp::demo_backend();
+        let state = AppState::new(Arc::clone(&backend), "")
+            .with_persistence(root.path(), "demo").unwrap();
+        let ctx = egui::Context::default();
+        let url = concat!(
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAKAAAABQCAIAAAARP+ljAAAA1ElEQVR4nO3RAQkAIBDA",
+            "wK9iJ6vZ1xQijIMLMNisfQib7wU8ZXCcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEGxxkcZ3",
+            "CcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEG",
+            "xxkcZ3CcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEGxxkcZ3CcwXEX42j2/m",
+            "0i9AQAAAAASUVORK5CYII=",
+        );
+        let attachment = crate::clipboard::Attachment::new(&ctx, url.to_owned()).image;
+        let thumbnail = attachment.thumbnail.expect("the draft has a thumbnail");
+        assert_ne!(thumbnail, url);
+        let _sent = state.send_with_context_and_thumbnail(
+            "", Some(attachment.url), Some(thumbnail.clone()), &baudet_settings::Settings::default(),
+        ).unwrap();
+        state.finish();
+        assert_eq!(state.persist(), None);
+
+        let reopened = AppState::new(backend, "").on_session(root.path(), &state.session_id(), "demo", None).unwrap();
+        let rows = reopened.rows();
+        let row = Row::from(&rows[0]);
+        assert!(row.body.is_empty());
+        assert_eq!(row.thumbnail.as_deref(), Some(thumbnail.as_str()));
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| paint_row(ui, &row, None, true));
+        let primitives = ctx.tessellate(output.shapes.clone(), output.pixels_per_point);
+        output.drop_without_applying_deltas();
+        assert!(primitives.iter().any(|primitive| matches!(&primitive.primitive,
+            egui::epaint::Primitive::Mesh(mesh) if mesh.texture_id != egui::TextureId::default()
+        )), "the reopened message paints the image");
     }
 
     #[test]
@@ -1993,7 +2098,12 @@ fn worker_loop(
                 let auto_compact = settings.context_strategy == baudet_settings::config::ContextStrategy::AutoCompact;
                 let handle = if !tools_active && !auto_compact {
                     use baudet_app::session::SendError;
-                    let sent = match state.send_with_context(&text, image.clone(), &settings) {
+                    let sent = match state.send_with_context_and_thumbnail(
+                        &text,
+                        image.as_ref().map(|image| image.url.clone()),
+                        image.as_ref().and_then(|image| image.thumbnail.clone()),
+                        &settings,
+                    ) {
                         Ok(sent) => sent,
                         Err(SendError::ContextLimit) => {
                             publish(&state, false, &catalog, Some(Texts::get(Key::ContextTooLong).to_owned()), Some((text, image)));
@@ -2026,11 +2136,11 @@ fn worker_loop(
                             approval: Arc::new(move |request| approvals.request(request, &approval_cancelled)),
                             cancelled: tool_cancelled,
                         };
-                        if tools_active {
-                            folder.run_tools(&text, image.as_deref(), run)
-                        } else {
-                            folder.run_auto_chat(&text, image.as_deref(), run)
-                        }.ok().flatten()
+                        let (url, thumbnail) = match &image {
+                            Some(image) => (Some(image.url.as_str()), image.thumbnail.clone()),
+                            None => (None, None),
+                        };
+                        folder.run_context_turn(&text, url, thumbnail, run, tools_active).ok().flatten()
                     } else if let Some(handle) = handle {
                         let mut failure = None;
                         let (tx, _rx) = ampcc::unbounded_channel();
@@ -2263,6 +2373,13 @@ fn settings_worker_loop(
                     let _ = report.send(SettingsEvent::Saved(Err(error)));
                 }
             }
+            SettingsCommand::SaveZoomFactor(zoom_factor) => {
+                let mut settings = file.read().settings().clone();
+                settings.zoom_factor = zoom_factor;
+                if let Err(error) = file.write(&settings) {
+                    let _ = report.send(SettingsEvent::Saved(Err(error)));
+                }
+            }
             SettingsCommand::SaveAppearance(appearance) => {
                 let mut settings = file.read().settings().clone();
                 settings.appearance = appearance;
@@ -2287,6 +2404,7 @@ fn settings_worker_loop(
                 settings.auto_allow_commands = current.settings().auto_allow_commands.clone();
                 settings.show_reasoning = current.settings().show_reasoning;
                 settings.appearance = current.settings().appearance;
+                settings.zoom_factor = current.settings().zoom_factor;
                 settings.learned_context_windows = current.settings().learned_context_windows.clone();
                 let outcome = file.write(&settings);
                 if outcome.is_ok() {
@@ -2562,6 +2680,9 @@ fn paint_row(ui: &mut egui::Ui, row: &Row, session: Option<&str>, wrap: bool) {
             crate::clipboard::show_image(ui, *id, image);
             return;
         }
+        if let Some(thumbnail) = &row.thumbnail {
+            crate::clipboard::show_sent_thumbnail(ui, thumbnail);
+        }
         if row.body.is_empty() {
             if row.in_progress() {
                 progress_indicator(ui);
@@ -2789,6 +2910,7 @@ pub fn run_from(startup: Startup) -> eframe::Result {
             palette::install(&cc.egui_ctx);
             let mut app = TranscriptApp::new_inner(backend, !demo, screenshot.is_some());
             cc.egui_ctx.set_theme(theme_preference(app.settings.appearance()));
+            cc.egui_ctx.set_zoom_factor(app.settings.zoom_factor());
             let balk = status_balk(
                 startup.demo,
                 fell_back.as_deref(),

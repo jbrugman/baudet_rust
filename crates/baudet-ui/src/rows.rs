@@ -9,6 +9,7 @@ pub struct Row {
     pub body: String,
     pub subject: Option<String>,
     pub collapsed: bool,
+    pub thumbnail: Option<String>,
     pub image: Option<(eframe::egui::Id, baudet_core::ImageItem)>,
 }
 
@@ -19,11 +20,11 @@ impl Row {
         let kind = item.kind();
         let message_timestamp = item.message_timestamp();
         match item {
-            Item::UserMessage(i) => Row { item_id, message_timestamp, kind, status, body: i.text.clone(), subject: None, collapsed: false, image: None },
-            Item::AgentMessage(i) => Row { item_id, message_timestamp, kind, status, body: i.text.clone(), subject: None, collapsed: false, image: None },
-            Item::Reasoning(i) => Row { item_id, message_timestamp, kind, status, body: i.text.clone(), subject: None, collapsed: true, image: None },
+            Item::UserMessage(i) => Row { item_id, message_timestamp, kind, status, body: i.text.clone(), subject: None, collapsed: false, thumbnail: i.thumbnail.clone(), image: None },
+            Item::AgentMessage(i) => Row { item_id, message_timestamp, kind, status, body: i.text.clone(), subject: None, collapsed: false, thumbnail: None, image: None },
+            Item::Reasoning(i) => Row { item_id, message_timestamp, kind, status, body: i.text.clone(), subject: None, collapsed: true, thumbnail: None, image: None },
             Item::CommandExecution(i) => {
-                Row { item_id, message_timestamp, kind, status, body: i.output.clone(), subject: Some(i.command.clone()), collapsed: true, image: None }
+                Row { item_id, message_timestamp, kind, status, body: i.output.clone(), subject: Some(i.command.clone()), collapsed: true, thumbnail: None, image: None }
             }
             Item::FileChange(i) => Row {
                 item_id,
@@ -33,6 +34,7 @@ impl Row {
                 body: i.diff.clone().unwrap_or_default(),
                 subject: Some(format!("{}  +{} -{}", i.path, i.additions, i.deletions)),
                 collapsed: true,
+                thumbnail: None,
                 image: None,
             },
             Item::ToolCall(i) => Row {
@@ -43,6 +45,7 @@ impl Row {
                 body: i.output.clone(),
                 subject: Some(format!("{} {}", i.tool, i.detail)),
                 collapsed: true,
+                thumbnail: None,
                 image: None,
             },
             Item::Image(i) => Row {
@@ -53,6 +56,7 @@ impl Row {
                 body: String::new(),
                 subject: Some(i.tool.clone()),
                 collapsed: false,
+                thumbnail: None,
                 // Item IDs are local to a conversation. Include image content in the texture key.
                 image: Some((eframe::egui::Id::new((&i.item_id, &i.mime_type, &i.base64)), i.clone())),
             },
@@ -69,9 +73,10 @@ impl Row {
                     .join("\n"),
                 subject: None,
                 collapsed: false,
+                thumbnail: None,
                 image: None,
             },
-            Item::Error(i) => Row { item_id, message_timestamp, kind, status, body: i.message.clone(), subject: None, collapsed: false, image: None },
+            Item::Error(i) => Row { item_id, message_timestamp, kind, status, body: i.message.clone(), subject: None, collapsed: false, thumbnail: None, image: None },
         }
     }
 

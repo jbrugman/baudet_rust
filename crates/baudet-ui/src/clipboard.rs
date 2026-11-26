@@ -1,4 +1,6 @@
 
+use eframe::egui;
+
 pub fn display_path(root: Option<&std::path::Path>, path: Option<&std::path::Path>) -> String {
     let Some(path) = path else {
         return String::new();
@@ -49,6 +51,30 @@ mod tests {
     }
 
     #[test]
+    fn given_image_only_clipboard_when_paste_key_is_released_then_an_image_read_is_requested() {
+        let events = [egui::Event::Key {
+            key: egui::Key::V,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }];
+        assert!(image_paste_requested(&events));
+    }
+
+    #[test]
+    fn given_a_regular_v_release_when_editing_then_no_image_read_is_requested() {
+        let events = [egui::Event::Key {
+            key: egui::Key::V,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }];
+        assert!(!image_paste_requested(&events));
+    }
+
+    #[test]
     fn het_woord_staat_in_key_dot_kt() {
         assert_eq!(COPY_PATH, "Copy path");
         assert_eq!(COPY_PATH_NL, "Kopieer pad");
@@ -57,6 +83,88 @@ mod tests {
 
 const MAX_EDGE: u32 = 4096;
 const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
+
+pub(crate) fn image_paste_requested(events: &[egui::Event]) -> bool {
+    // egui-winit consumes the shortcut press for text paste, even for an
+    // image-only clipboard. It still forwards the corresponding release.
+    events.iter().any(|event| match event {
+        egui::Event::Paste(_) => true,
+        egui::Event::Key { key: egui::Key::V, modifiers, .. } => modifiers.command,
+        egui::Event::Key { key: egui::Key::Paste, pressed: false, .. } => true,
+        _ => false,
+    })
+}
+
+pub(crate) struct SubmittedImage {
+    pub(crate) url: String,
+    pub(crate) thumbnail: Option<String>,
+}
+
+pub(crate) struct Attachment {
+    pub(crate) image: SubmittedImage,
+    thumbnail: Option<egui::TextureHandle>,
+}
+
+impl Attachment {
+    pub(crate) fn new(ctx: &egui::Context, url: String) -> Self {
+        let rgba = decode_png_url(&url, MAX_EDGE).map(|image| image.thumbnail(96, 48).into_rgba8());
+        let image = SubmittedImage { url, thumbnail: rgba.as_ref().and_then(png_data_url) };
+        let thumbnail = rgba.map(|rgba| thumbnail_texture(ctx, &rgba));
+        Self { image, thumbnail }
+    }
+
+    pub(crate) fn restore(ctx: &egui::Context, image: SubmittedImage) -> Self {
+        let thumbnail = image.thumbnail.as_deref().and_then(|url| decode_png_url(url, 96))
+            .map(|rgba| thumbnail_texture(ctx, &rgba.into_rgba8()));
+        Self { image, thumbnail }
+    }
+
+    pub(crate) fn show_thumbnail(&self, ui: &mut egui::Ui) {
+        if let Some(thumbnail) = &self.thumbnail {
+            paint_thumbnail(ui, thumbnail);
+        }
+    }
+}
+
+pub(crate) fn show_sent_thumbnail(ui: &mut egui::Ui, url: &str) {
+    let key = egui::Id::new(("sent-thumbnail", url));
+    let cached = ui.ctx().data_mut(|data| data.get_temp::<Option<egui::TextureHandle>>(key));
+    let thumbnail = cached.unwrap_or_else(|| {
+        let thumbnail = decode_png_url(url, 96).map(|rgba| thumbnail_texture(ui.ctx(), &rgba.into_rgba8()));
+        ui.ctx().data_mut(|data| data.insert_temp(key, thumbnail.clone()));
+        thumbnail
+    });
+    if let Some(thumbnail) = thumbnail {
+        paint_thumbnail(ui, &thumbnail);
+    }
+}
+
+fn decode_png_url(url: &str, max_edge: u32) -> Option<image::DynamicImage> {
+    use base64::Engine;
+    let encoded = url.strip_prefix("data:image/png;base64,")?;
+    if encoded.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(max_edge);
+    limits.max_image_height = Some(max_edge);
+    reader.limits(limits);
+    reader.decode().ok()
+}
+
+fn thumbnail_texture(ctx: &egui::Context, rgba: &image::RgbaImage) -> egui::TextureHandle {
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    let image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+    ctx.load_texture("clipboard-thumbnail", image, egui::TextureOptions::LINEAR)
+}
+
+fn paint_thumbnail(ui: &mut egui::Ui, thumbnail: &egui::TextureHandle) {
+    let size = thumbnail.size_vec2();
+    let scale = (ui.available_width().max(1.0) / size.x).min(1.0);
+    ui.image((thumbnail.id(), size * scale));
+}
 
 pub(crate) fn image_data_url() -> Option<String> {
     let pixels = arboard::Clipboard::new().ok()?.get_image().ok()?;
@@ -97,10 +205,9 @@ fn clipboard_encoding_preserves_rgba_pixels_in_a_png_data_url() {
 pub(crate) fn show_image(ui: &mut eframe::egui::Ui, image_id: eframe::egui::Id, item: &baudet_core::ImageItem) {
     use baudet_i18n::{Key, Texts};
     use base64::Engine;
-    use eframe::egui::{self, TextureHandle};
     use std::sync::Arc;
 
-    type Loaded = Option<(TextureHandle, Arc<Vec<u8>>, &'static str)>;
+    type Loaded = Option<(egui::TextureHandle, Arc<Vec<u8>>, &'static str)>;
     let key = ui.id().with(("tool-image", image_id));
     let cached: Option<Loaded> = ui.ctx().data_mut(|data| data.get_temp(key));
     let decoded = cached.unwrap_or_else(|| {

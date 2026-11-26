@@ -194,6 +194,7 @@ mod tests {
             thinking_height: 82,
             language: Language::Nl,
             appearance: crate::config::Appearance::Dark,
+            zoom_factor: 1.2,
         };
         file.write(&settings).unwrap();
         assert_eq!(file.read().settings(), &settings);

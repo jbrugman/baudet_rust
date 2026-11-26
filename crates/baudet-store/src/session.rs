@@ -156,6 +156,7 @@ mod tests {
         assert_eq!(tail.len(), 0, "voorzetten is geen write, dus er gaat niets naar de store");
         session.items.push(item("i-3", "drie"));
         session.items.push(Item::UserMessage(UserMessageItem {
+            thumbnail: None,
             created_at_ms: None,
             item_id: "i-4".into(),
             text: "vier".into(),

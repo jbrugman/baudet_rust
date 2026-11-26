@@ -226,7 +226,9 @@ pub fn reduce(rows: &mut Rows, event: &ThreadEvent) -> bool {
             None => false,
         },
         ThreadEvent::TurnCompleted { turn_id, incomplete_reason, .. } => {
-            if let Some(reason) = incomplete_reason {
+            if let Some(reason) = incomplete_reason.as_deref()
+                .filter(|reason| *reason != baudet_tool::tool_loop::MISSING_COMPLETION)
+            {
                 rows.open(Item::Error(ErrorRow::build(turn_id, reason)));
             }
             true

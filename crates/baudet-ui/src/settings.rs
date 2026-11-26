@@ -18,6 +18,7 @@ pub enum SettingsCommand {
     Probe { endpoint: String, api_key: Option<String> },
     Save(Settings),
     SaveAppearance(Appearance),
+    SaveZoomFactor(f32),
     SaveChatLayout { composer: i32, thinking: i32 },
     SaveReasoningVisibility(bool),
     LearnContext { key: String, tokens: u32 },
@@ -196,6 +197,7 @@ impl SettingsView {
         self.auto_approve_safe_commands = settings.auto_approve_safe_commands;
         self.stored_context.show_reasoning = settings.show_reasoning;
         self.stored_context.appearance = settings.appearance;
+        self.stored_context.zoom_factor = settings.zoom_factor.clamp(0.2, 5.0);
         self.transcript_wrap = settings.transcript_wrap;
         self.honesty_footer = settings.honesty_footer;
         self.system_prompt = settings.system_prompt.clone();
@@ -282,7 +284,16 @@ impl SettingsView {
             thinking_height: self.stored_context.thinking_height,
             language: self.language,
             appearance: self.appearance(),
+            zoom_factor: self.zoom_factor(),
         })
+    }
+
+    pub(crate) fn zoom_factor(&self) -> f32 {
+        self.stored_context.zoom_factor
+    }
+
+    pub(crate) fn set_zoom_factor(&mut self, zoom_factor: f32) {
+        self.stored_context.zoom_factor = zoom_factor;
     }
 
     pub(crate) fn appearance(&self) -> Appearance {

@@ -443,6 +443,43 @@ fn tool_turns_replay_long_history_or_stop_without_losing_the_request() {
 }
 
 #[test]
+fn given_an_unfinished_model_reply_when_the_retry_stalls_then_status_reports_it_without_a_chat_error() {
+    use baudet_app::session::tool_turn::ToolTurn;
+    use baudet_projects::{FolderPermission, Permissions, Project};
+    use baudet_tool::mcp::McpServers;
+
+    let root = scratch("unfinished-tool-turn");
+    let completed_reply = |turn, text| {
+        let mut events = answer(turn, text);
+        events.push(ThreadEvent::TurnCompleted {
+            thread_id: "th_1".into(), turn_id: turn.into(), response_id: None,
+            usage: None, final_event: Some("response.completed".into()), incomplete_reason: None,
+        });
+        events
+    };
+    let (_, state) = persistent(&root, vec![
+        completed_reply("tu_1", "Ik lees het bestand."),
+        completed_reply("tu_2", "Ik ga het bestand zo lezen."),
+    ]);
+    let mut project = Project::new("p-1".into(), "Fixture", 0);
+    project.folder_path = Some(root.to_string_lossy().into_owned());
+    project.permissions = Permissions::encode([FolderPermission::Read]);
+
+    let status = state.run_tools("Lees het bestand", None, ToolTurn {
+        project: Some(&project), settings: &baudet_settings::Settings::default(),
+        servers: &mut McpServers::default(),
+        approval: Arc::new(|_| ApprovalDecision::Decline),
+        cancelled: Arc::default(),
+    }).unwrap();
+
+    assert_eq!(status.as_deref(), Some(baudet_tool::tool_loop::MISSING_COMPLETION));
+    assert_eq!(mentions_exact(&state, "Ik lees het bestand."), 1);
+    assert_eq!(mentions_exact(&state, "Ik ga het bestand zo lezen."), 0);
+    assert!(!state.rows().iter().any(|item| matches!(item, Item::Error(_))));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn auto_compact_keeps_a_running_tool_turn_and_persists_the_checkpoint() {
     use baudet_app::session::tool_turn::ToolTurn;
     use baudet_projects::{FolderPermission, Permissions, Project};

@@ -67,6 +67,7 @@ pub enum Key {
     CompactButton,
     StopButton,
     TurnStopped,
+    ModelTurnUnfinished,
     None,
     FailedPrefix,
     ErrorPrefix,
@@ -290,6 +291,8 @@ pub enum Key {
     AppearanceSystem,
     AppearanceLight,
     AppearanceDark,
+    ZoomIn,
+    ZoomOut,
     AboutTitle,
     AboutBody,
     AboutVersion,
@@ -384,6 +387,7 @@ fn en(k: Key) -> &'static str {
         Key::CompactButton => r"Compact",
         Key::StopButton => r"Stop",
         Key::TurnStopped => r"stopped",
+        Key::ModelTurnUnfinished => r"The model stopped before finishing.",
         Key::None => r"none",
         Key::FailedPrefix => r"FAILED: {0}",
         Key::ErrorPrefix => r"ERROR: {0}",
@@ -607,6 +611,8 @@ fn en(k: Key) -> &'static str {
         Key::AppearanceSystem => r"System",
         Key::AppearanceLight => r"Light",
         Key::AppearanceDark => r"Dark",
+        Key::ZoomIn => r"Larger text (+)",
+        Key::ZoomOut => r"Smaller text (−)",
         Key::AboutTitle => r"About Baudet",
         Key::AboutBody => r"**Baudet** is a local-first desktop assistant built to talk to local Large Language Models (served through APIs like [oMLX](https://github.com/jundot/omlx)) without the sugarcoating.
 
@@ -710,6 +716,7 @@ fn nl(k: Key) -> &'static str {
         Key::CompactButton => r"Compacten",
         Key::StopButton => r"Stop",
         Key::TurnStopped => r"gestopt",
+        Key::ModelTurnUnfinished => r"Het model stopte voordat het klaar was.",
         Key::None => r"geen",
         Key::FailedPrefix => r"FAALDE: {0}",
         Key::ErrorPrefix => r"FOUT: {0}",
@@ -933,6 +940,8 @@ fn nl(k: Key) -> &'static str {
         Key::AppearanceSystem => r"Systeem",
         Key::AppearanceLight => r"Licht",
         Key::AppearanceDark => r"Donker",
+        Key::ZoomIn => r"Tekst groter (+)",
+        Key::ZoomOut => r"Tekst kleiner (−)",
         Key::AboutTitle => r"Over Baudet",
         Key::AboutBody => r"**Baudet** is een local-first desktop-assistent, gebouwd om te praten met lokale grote taalmodellen (aangeboden via API's zoals [oMLX](https://github.com/jundot/omlx)), zonder suikerlaag.
 
@@ -1036,6 +1045,7 @@ fn fr(k: Key) -> &'static str {
         Key::CompactButton => r"Compresser",
         Key::StopButton => r"Arrêter",
         Key::TurnStopped => r"arrêté",
+        Key::ModelTurnUnfinished => r"Le modèle a interrompu sa réponse.",
         Key::None => r"aucun",
         Key::FailedPrefix => r"ÉCHEC : {0}",
         Key::ErrorPrefix => r"ERREUR : {0}",
@@ -1259,6 +1269,8 @@ fn fr(k: Key) -> &'static str {
         Key::AppearanceSystem => r"Système",
         Key::AppearanceLight => r"Clair",
         Key::AppearanceDark => r"Sombre",
+        Key::ZoomIn => r"Agrandir le texte (+)",
+        Key::ZoomOut => r"Réduire le texte (−)",
         Key::AboutTitle => r"À propos de Baudet",
         Key::AboutBody => r"**Baudet** est un assistant de bureau local-first, conçu pour discuter avec de grands modèles de langage locaux (servis via des API comme [oMLX](https://github.com/jundot/omlx)), sans langue de bois.
 
@@ -1362,6 +1374,7 @@ fn de(k: Key) -> &'static str {
         Key::CompactButton => r"Kompaktieren",
         Key::StopButton => r"Stopp",
         Key::TurnStopped => r"gestoppt",
+        Key::ModelTurnUnfinished => r"Das Modell hat die Antwort vorzeitig beendet.",
         Key::None => r"keine",
         Key::FailedPrefix => r"FEHLGESCHLAGEN : {0}",
         Key::ErrorPrefix => r"FEHLER : {0}",
@@ -1585,6 +1598,8 @@ fn de(k: Key) -> &'static str {
         Key::AppearanceSystem => r"System",
         Key::AppearanceLight => r"Hell",
         Key::AppearanceDark => r"Dunkel",
+        Key::ZoomIn => r"Größerer Text (+)",
+        Key::ZoomOut => r"Kleinerer Text (−)",
         Key::AboutTitle => r"Über Baudet",
         Key::AboutBody => r"**Baudet** ist ein local-first Desktop-Assistent, entwickelt, um mit lokalen großen Sprachmodellen zu sprechen (bereitgestellt über APIs wie [oMLX](https://github.com/jundot/omlx)), ohne Schönfärberei.
 

@@ -147,6 +147,7 @@ pub struct Settings {
     #[serde(deserialize_with = "parse_language")]
     pub language: Language,
     pub appearance: Appearance,
+    pub zoom_factor: f32,
 }
 
 fn parse_language<'de, D>(deserializer: D) -> Result<Language, D::Error>
@@ -200,6 +201,7 @@ impl Default for Settings {
             thinking_height: 0,
             language: Language::default(),
             appearance: Appearance::default(),
+            zoom_factor: 1.0,
         }
     }
 }

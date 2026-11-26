@@ -42,27 +42,32 @@ impl AppState {
     }
 
     pub fn run_tools(&self, text: &str, image: Option<&str>, run: ToolTurn<'_>) -> Result<Option<String>, TurnBusy> {
-        if !Self::tools_active(run.settings, run.project) {
-            return Err(TurnBusy);
-        }
-        self.run_context_turn(text, image, run, true)
+        self.run_context_turn(text, image, None, run, true)
     }
 
     pub fn run_auto_chat(&self, text: &str, image: Option<&str>, run: ToolTurn<'_>) -> Result<Option<String>, TurnBusy> {
-        if run.settings.context_strategy != baudet_settings::config::ContextStrategy::AutoCompact {
-            return Err(TurnBusy);
-        }
-        self.run_context_turn(text, image, run, false)
+        self.run_context_turn(text, image, None, run, false)
     }
 
-    fn run_context_turn(&self, text: &str, image: Option<&str>, run: ToolTurn<'_>, use_tools: bool) -> Result<Option<String>, TurnBusy> {
+    pub fn run_context_turn(
+        &self, text: &str, image: Option<&str>, thumbnail: Option<String>, run: ToolTurn<'_>, use_tools: bool,
+    ) -> Result<Option<String>, TurnBusy> {
+        if use_tools {
+            if !Self::tools_active(run.settings, run.project) {
+                return Err(TurnBusy);
+            }
+        } else if run.settings.context_strategy != baudet_settings::config::ContextStrategy::AutoCompact {
+            return Err(TurnBusy);
+        }
         self.live_turns.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).map_err(|_| TurnBusy)?;
-        let result = self.tool_turn(text, image, run, use_tools);
+        let result = self.tool_turn(text, image, thumbnail, run, use_tools);
         self.finish();
         result
     }
 
-    fn tool_turn(&self, text: &str, image: Option<&str>, run: ToolTurn<'_>, use_tools: bool) -> Result<Option<String>, TurnBusy> {
+    fn tool_turn(
+        &self, text: &str, image: Option<&str>, thumbnail: Option<String>, run: ToolTurn<'_>, use_tools: bool,
+    ) -> Result<Option<String>, TurnBusy> {
         let turn_id = format!("tu_{}", self.turn_counter.fetch_add(1, Ordering::SeqCst) + 1);
         let sink = Sink {
             app: self,
@@ -72,6 +77,7 @@ impl AppState {
             reply: Mutex::new(None),
         };
         sink.completed(Item::UserMessage(UserMessageItem {
+            thumbnail,
             created_at_ms: None,
             item_id: format!("{turn_id}/user"),
             text: text.to_owned(),

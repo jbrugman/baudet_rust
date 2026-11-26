@@ -168,6 +168,7 @@ mod tests {
 
     fn user(text: &str) -> Item {
         Item::UserMessage(UserMessageItem {
+            thumbnail: None,
             created_at_ms: None,
             item_id: format!("u-{text}"),
             text: text.into(),

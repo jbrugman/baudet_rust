@@ -24,7 +24,7 @@ const MAX_ITERATIONS_REASON: &str = "max_tool_iterations";
 
 pub const BLANK_NUDGE: &str = "Your previous turn returned neither an answer nor a tool call. If you intend to use a tool, emit the call now; otherwise reply with your final answer.";
 const ACTION_NUDGE: &str = "Use a tool now if an action is still needed. Otherwise provide the answer or explain what blocked you, and end with the prescribed final marker.";
-const MISSING_COMPLETION: &str = "The model did not provide a tool call or mark its final answer.";
+pub const MISSING_COMPLETION: &str = "The model did not provide a tool call or mark its final answer.";
 pub const FINAL_DONE: &str = "[[BAUDET_DONE]]";
 pub const FINAL_BLOCKED: &str = "[[BAUDET_BLOCKED]]";
 const FINAL_MARKERS: [&str; 2] = [FINAL_DONE, FINAL_BLOCKED];
@@ -390,9 +390,9 @@ impl<'a> ToolLoop<'a> {
         let mut call_steps = 0u32;
         let mut blanks = 0u32;
         let explicit_completion = self.require_completion && tools.is_some();
-        let mut retried_completion = false;
+        let mut answer_before_retry = None;
 
-        for iteration in 0..=self.max_iterations.saturating_add(u32::from(explicit_completion)) {
+        loop {
             if self.context_ceiling > 0 && estimate_tokens_of(&msgs) > self.context_ceiling {
                 return LoopOutcome::CapReached {
                     response_id: prev,
@@ -402,13 +402,21 @@ impl<'a> ToolLoop<'a> {
                     incomplete_reason: CONTEXT_LIMIT_REASON.to_string(),
                 };
             }
-            if iteration - u32::from(retried_completion) == self.max_iterations {
+            if call_steps + blanks >= self.max_iterations {
                 break;
             }
-            run.sink.reply_started();
-            let mut turn = self.ask(run, &mut prev, &msgs, tools.as_ref(), &mut pending_image).await;
+            // Publish the retry only after it produces a tool call.
+            let original_answer = answer_before_retry.take();
+            if original_answer.is_none() {
+                run.sink.reply_started();
+            }
+            let mut turn = self
+                .ask(run, &mut prev, &msgs, tools.as_ref(), &mut pending_image, original_answer.is_none())
+                .await;
             let final_answer = explicit_completion && strip_final_marker(&mut turn.text);
-            run.sink.reply_completed(&turn.text);
+            if original_answer.is_none() {
+                run.sink.reply_completed(&turn.text);
+            }
             if self.chain_response_id && turn.response_id.is_some() {
                 prev = turn.response_id.clone();
             }
@@ -416,11 +424,11 @@ impl<'a> ToolLoop<'a> {
 
             if calls.is_empty() {
                 if explicit_completion && !final_answer && turn.incomplete_reason.is_none() {
-                    if !retried_completion {
-                        retried_completion = true;
+                    if original_answer.is_none() {
                         if !is_blankish(&turn.text) {
                             self.add_assistant(run, &mut msgs, &mut added, &turn);
                         }
+                        answer_before_retry = Some(turn.text);
                         msgs.push(Msg::user(ACTION_NUDGE));
                         continue;
                     }
@@ -433,7 +441,12 @@ impl<'a> ToolLoop<'a> {
                     msgs.push(Msg::user(BLANK_NUDGE));
                     continue;
                 }
-                self.add_assistant(run, &mut msgs, &mut added, &turn);
+                if let Some(answer) = original_answer {
+                    turn.text = answer;
+                    turn.reasoning.clear();
+                } else {
+                    self.add_assistant(run, &mut msgs, &mut added, &turn);
+                }
                 steps.push(ToolStep { assistant_text: turn.text.clone(), calls: Vec::new(), results: Vec::new() });
                 return LoopOutcome::Completed {
                     final_text: turn.text.clone(),
@@ -446,6 +459,18 @@ impl<'a> ToolLoop<'a> {
                 };
             }
 
+            if original_answer.is_some() {
+                run.sink.reply_started();
+                if !turn.reasoning.is_empty() {
+                    run.sink.reasoning_delta(&turn.reasoning);
+                    (run.on_reasoning)(&turn.reasoning);
+                }
+                if !turn.text.is_empty() {
+                    run.sink.text_delta(&turn.text);
+                    (run.on_delta)(&turn.text);
+                }
+                run.sink.reply_completed(&turn.text);
+            }
             self.add_assistant(run, &mut msgs, &mut added, &turn);
             let results = self.run_calls(run, &calls, &mut msgs, &mut added, &mut undos).await;
             steps.push(ToolStep { assistant_text: turn.text, calls, results });
@@ -453,7 +478,7 @@ impl<'a> ToolLoop<'a> {
         }
 
         run.sink.reply_started();
-        let mut settle = self.ask(run, &mut prev, &msgs, tools.as_ref(), &mut pending_image).await;
+        let mut settle = self.ask(run, &mut prev, &msgs, tools.as_ref(), &mut pending_image, true).await;
         let final_answer = explicit_completion && strip_final_marker(&mut settle.text);
         run.sink.reply_completed(&settle.text);
         if self.chain_response_id && settle.response_id.is_some() {
@@ -491,6 +516,7 @@ impl<'a> ToolLoop<'a> {
         msgs: &'r [Msg],
         tools: Option<&'r Value>,
         pending_image: &'r mut Option<&'a str>,
+        publish_reply: bool,
     ) -> Turn {
         let sink = run.sink;
         let on_delta = &mut *run.on_delta;
@@ -502,6 +528,9 @@ impl<'a> ToolLoop<'a> {
             previous_response_id: prev.as_deref(),
             tools,
             on_delta: boxed(move |chunk: &str| {
+                if !publish_reply {
+                    return;
+                }
                 if explicit_completion {
                     let visible = visible_delta(chunk, &mut pending_marker);
                     if !visible.is_empty() {
@@ -514,8 +543,10 @@ impl<'a> ToolLoop<'a> {
                 }
             }),
             on_reasoning: boxed(move |chunk: &str| {
-                sink.reasoning_delta(chunk);
-                on_reasoning(chunk);
+                if publish_reply {
+                    sink.reasoning_delta(chunk);
+                    on_reasoning(chunk);
+                }
             }),
             image: pending_image.take(),
         };
@@ -1295,6 +1326,62 @@ mod tests {
 
         assert_eq!(turns(&source), 1);
         assert!(matches!(outcome, LoopOutcome::Completed { final_text, .. } if final_text == answer));
+    }
+
+    #[tokio::test]
+    async fn given_a_completion_retry_when_it_returns_a_recap_without_a_tool_call_then_only_the_first_answer_is_kept() {
+        let registry = two_readers();
+        let answer = "Het gevraagde overzicht staat hieronder.";
+        let recap = "Geen tool-actie nodig. Alles is al beantwoord.";
+        let source = source(vec![
+            StubSource::prose(answer),
+            StubSource::prose(format!("{recap}\n{FINAL_DONE}")),
+        ]);
+
+        let (outcome, sink) = drive(
+            &registry, &source, &[Msg::user("Geef het overzicht")], &ctx(), 4,
+            |loop_| loop_.require_completion(true),
+        ).await;
+
+        assert_eq!(turns(&source), 2);
+        assert_eq!(sink.lines(), vec![
+            "reply-started",
+            "delta Geef het overzicht",
+            "reasoning denk",
+            "reply-completed Het gevraagde overzicht staat hieronder.",
+        ]);
+        let LoopOutcome::Completed { final_text, final_turn, messages, .. } = outcome else {
+            panic!("the marked retry should complete the turn");
+        };
+        assert_eq!(final_text, answer);
+        assert_eq!(final_turn.incomplete_reason, None);
+        assert_eq!(messages.iter().map(|msg| msg.content.as_str()).collect::<Vec<_>>(), [answer]);
+    }
+
+    #[tokio::test]
+    async fn given_a_tool_call_after_a_retry_when_the_model_stalls_again_then_one_more_retry_can_use_a_tool() {
+        let registry = two_readers();
+        let source = source(vec![
+            StubSource::prose("Ik lees de eerste bron."),
+            StubSource::calls_for("", &[("read_file", json!({"file": "first.txt"}))]),
+            StubSource::prose("Ik lees ook de tweede bron."),
+            StubSource::calls_for("", &[("read_file", json!({"file": "second.txt"}))]),
+            StubSource::prose(format!("Beide bronnen gelezen.\n{FINAL_DONE}")),
+        ]);
+
+        let (outcome, _) = drive(
+            &registry, &source, &[Msg::user("Vergelijk beide bronnen")], &ctx(), 2,
+            |loop_| loop_.require_completion(true),
+        ).await;
+
+        let LoopOutcome::Completed { final_text, final_turn, steps, .. } = outcome else {
+            panic!("both calls fit within the two tool rounds");
+        };
+        assert_eq!(turns(&source), 5);
+        assert_eq!(final_turn.incomplete_reason, None);
+        assert_eq!(final_text, "Beide bronnen gelezen.");
+        assert_eq!(steps.iter().flat_map(|step| &step.results).map(|result| result.output.as_str())
+            .collect::<Vec<_>>(), ["(read_file first.txt)", "(read_file second.txt)"]);
     }
 
     #[tokio::test]

@@ -242,6 +242,8 @@ pub struct ReasoningItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserMessageItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at_ms: Option<i64>,
     pub item_id: String,
     pub text: String,
