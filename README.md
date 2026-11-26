@@ -51,6 +51,7 @@ Download a package under **Artifacts** from a successful run of
 |---|---|---|
 | macOS | `Baudet-macOS-universal.dmg` for Apple Silicon and Intel | Open the DMG and drag `Baudet.app` to Applications. See [Signing on macOS](#signing-on-macos) for Gatekeeper distribution. |
 | Windows x64 | `Baudet-windows-x64.zip` | Extract the archive and open `Baudet.exe`. |
+| Windows ARM64 | `Baudet-windows-arm64.zip` | Extract the archive and open `Baudet.exe`. |
 | Ubuntu 26.04 LTS and Debian 13 Trixie (x64) | `baudet_<version>_amd64.deb` | In your download directory, run `sudo apt install` followed by the downloaded filename prefixed with `./`. Install Bubblewrap for workspace shell commands if it is missing. |
 
 With Rust and the [build prerequisites](#build-from-source), you can also open the demo.
@@ -104,6 +105,7 @@ Build artifacts go to `target/dist` by default.
 |---|---|---|
 | macOS | Xcode Command Line Tools | `bash packaging/build-macos.sh` |
 | Windows x64 | PowerShell 7 and Visual Studio Build Tools with **Desktop development with C++** | `pwsh -NoProfile -File packaging/build-windows.ps1` |
+| Windows ARM64 | Windows on ARM, PowerShell 7, and Visual Studio Build Tools with the C++ ARM64 build tools | `pwsh -NoProfile -File packaging/build-windows.ps1 -Architecture arm64` |
 | Debian 13 Trixie x64 | The build packages listed below | `bash packaging/build-linux.sh` |
 
 ```sh
@@ -122,7 +124,7 @@ GitHub Actions runs these scripts on pull requests, pushes to `main`, tags start
 
 The first release is `v0.1.0`.
 Eligible pushes to `main` increase the patch version after the first release.
-All three packages must build and the Linux release checks must pass before the workflow updates the workspace version and publishes a GitHub release.
+All packages must build and the Linux release checks must pass before the workflow updates the workspace version and publishes a GitHub release.
 Merges from `norelease`, `norelease/*`, and Dependabot still run CI and do not trigger a release or version bump.
 
 ### Signing on macOS

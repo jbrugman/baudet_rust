@@ -65,7 +65,15 @@ jobs:
 
   windows:
     needs: version
-    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            runner: windows-2022
+          - architecture: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -74,11 +82,11 @@ jobs:
         if: needs.version.outputs.release != ''
         with:
           name: release-manifests
-      - run: pwsh -NoProfile -File packaging/build-windows.ps1
+      - run: pwsh -NoProfile -File packaging/build-windows.ps1 -Architecture ${{ matrix.architecture }}
       - uses: actions/upload-artifact@v7.0.2
         with:
-          name: Baudet-windows-x64
-          path: target/dist/Baudet-windows-x64.zip
+          name: Baudet-windows-${{ matrix.architecture }}
+          path: target/dist/Baudet-windows-${{ matrix.architecture }}.zip
           if-no-files-found: error
           overwrite: true
 

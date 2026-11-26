@@ -7,6 +7,7 @@ subject="Baudet release source $source_sha"
 assets=(
     release-assets/Baudet-macOS-universal.dmg
     release-assets/Baudet-windows-x64.zip
+    release-assets/Baudet-windows-arm64.zip
     "release-assets/baudet_${VERSION}_amd64.deb"
 )
 for asset in "${assets[@]}"; do
@@ -18,7 +19,7 @@ git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 git fetch origin refs/heads/main:refs/remotes/origin/main --tags
 
 if ! git show-ref --verify --quiet "refs/tags/$tag"; then
-    # The tag must contain the exact source and manifests used for all three packages.
+    # The tag must contain the exact source and manifests used for all packages.
     if ! git diff --quiet HEAD -- Cargo.toml Cargo.lock; then
         git add -- Cargo.toml Cargo.lock
         git commit -m "Release $tag"

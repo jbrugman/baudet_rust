@@ -1,21 +1,31 @@
-param([string]$OutputDirectory = "target/dist")
+param(
+    [string]$OutputDirectory = "target/dist",
+    [ValidateSet("x64", "arm64")][string]$Architecture = "x64"
+)
 
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
 
-if (-not (Get-Command dumpbin.exe -ErrorAction SilentlyContinue) -or
+$target, $vsArch, $vsComponent, $machine = if ($Architecture -eq "arm64") {
+    "aarch64-pc-windows-msvc", "arm64", "Microsoft.VisualStudio.Component.VC.Tools.ARM64", "AA64"
+} else {
+    "x86_64-pc-windows-msvc", "amd64", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "8664"
+}
+if ($env:VSCMD_ARG_TGT_ARCH -ne $vsArch -or
+    -not (Get-Command dumpbin.exe -ErrorAction SilentlyContinue) -or
     -not (Get-Command rc.exe -ErrorAction SilentlyContinue)) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
-    $visualStudio = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    $visualStudio = & $vswhere -latest -products '*' -requires $vsComponent -property installationPath
     if ($LASTEXITCODE -ne 0 -or -not $visualStudio) {
-        throw "Install Visual Studio Build Tools with the Desktop development with C++ workload."
+        throw "Install Visual Studio Build Tools with the Desktop development with C++ workload and $Architecture tools."
     }
-    & (Join-Path $visualStudio "Common7/Tools/Launch-VsDevShell.ps1") -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+    $hostArch = if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq "Arm64") { "arm64" } else { "amd64" }
+    & (Join-Path $visualStudio "Common7/Tools/Launch-VsDevShell.ps1") -Arch $vsArch -HostArch $hostArch -SkipAutomaticLocation
 }
 
-$target = "x86_64-pc-windows-msvc"
 $targetDirectory = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target" }
-$env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = "-C target-feature=+crt-static"
+$flagVariable = "CARGO_TARGET_$($target.ToUpperInvariant().Replace('-', '_'))_RUSTFLAGS"
+[Environment]::SetEnvironmentVariable($flagVariable, "-C target-feature=+crt-static")
 rustup target add $target
 if ($LASTEXITCODE -ne 0) { throw "Could not install the Windows Rust target." }
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
@@ -41,6 +51,11 @@ try {
     Copy-Item LICENSE (Join-Path $work "LICENSE.txt")
     Copy-Item packaging/FONT-LICENSES.txt $work
 
+    $headers = & dumpbin.exe /HEADERS $exe
+    if ($LASTEXITCODE -ne 0 -or -not ($headers -match "^\s*$machine\s+machine\b")) {
+        throw "Baudet.exe does not have the expected $Architecture PE machine type."
+    }
+
     $imports = & dumpbin.exe /DEPENDENTS $exe
     if ($LASTEXITCODE -ne 0) { throw "Could not inspect the executable's DLL imports." }
     $dlls = @($imports | ForEach-Object {
@@ -64,7 +79,7 @@ try {
         throw "Baudet.exe did not print its command-line help."
     }
     Remove-Item $helpOutput
-    $zip = Join-Path $OutputDirectory "Baudet-windows-x64.zip"
+    $zip = Join-Path $OutputDirectory "Baudet-windows-$Architecture.zip"
     Compress-Archive -Path "$work/*" -DestinationPath $zip -Force
     Write-Output $zip
 } finally {
