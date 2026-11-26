@@ -2,7 +2,7 @@
 use crate::palette;
 use baudet_backend::protocol::Protocol;
 use baudet_i18n::{Key, Language, Texts};
-use baudet_settings::config::{ContextStrategy, ToolMode};
+use baudet_settings::config::{Appearance, ContextStrategy, ToolMode};
 use baudet_settings::{ListingError, Model, ReadOutcome, Settings, SettingsFile, WriteError};
 use egui::Ui;
 
@@ -17,6 +17,7 @@ pub enum SettingsCommand {
     },
     Probe { endpoint: String, api_key: Option<String> },
     Save(Settings),
+    SaveAppearance(Appearance),
     SaveChatLayout { composer: i32, thinking: i32 },
     SaveReasoningVisibility(bool),
     LearnContext { key: String, tokens: u32 },
@@ -194,6 +195,7 @@ impl SettingsView {
         self.use_server_session = settings.use_server_session;
         self.auto_approve_safe_commands = settings.auto_approve_safe_commands;
         self.stored_context.show_reasoning = settings.show_reasoning;
+        self.stored_context.appearance = settings.appearance;
         self.transcript_wrap = settings.transcript_wrap;
         self.honesty_footer = settings.honesty_footer;
         self.system_prompt = settings.system_prompt.clone();
@@ -279,7 +281,16 @@ impl SettingsView {
             composer_height: self.stored_context.composer_height,
             thinking_height: self.stored_context.thinking_height,
             language: self.language,
+            appearance: self.appearance(),
         })
+    }
+
+    pub(crate) fn appearance(&self) -> Appearance {
+        self.stored_context.appearance
+    }
+
+    pub(crate) fn set_appearance(&mut self, appearance: Appearance) {
+        self.stored_context.appearance = appearance;
     }
 
     pub(crate) fn show_reasoning(&self) -> bool {

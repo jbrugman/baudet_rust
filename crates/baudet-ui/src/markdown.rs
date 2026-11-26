@@ -1,10 +1,9 @@
-use crate::palette;
 use eframe::egui::{self, text::LayoutJob, Label, TextFormat, TextStyle, Ui};
 
 pub fn show(ui: &mut Ui, text: &str, wrap: bool) {
     let (body, mono) = (TextStyle::Body.resolve(ui.style()), TextStyle::Monospace.resolve(ui.style()));
     let format = TextFormat { font_id: body, color: ui.visuals().text_color(), ..Default::default() };
-    let code = TextFormat { font_id: mono, background: palette::CARD, ..format.clone() };
+    let code = TextFormat { font_id: mono, background: ui.visuals().code_bg_color, ..format.clone() };
     let job = layout(text, &format, &code, ui.visuals().strong_text_color());
     let label = Label::new(job).selectable(true);
     ui.add(if wrap { label.wrap() } else { label.extend() });

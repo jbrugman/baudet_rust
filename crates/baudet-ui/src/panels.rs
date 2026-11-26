@@ -397,7 +397,12 @@ fn session_row(
             let button = egui::Button::new(&session.title).truncate().frame(false)
                 .min_size(egui::vec2(ui.available_width(), 0.0));
             let button = if selected {
-                button.fill(palette::ACTIVE_SESSION).stroke(egui::Stroke::NONE)
+                let fill = if ui.visuals().dark_mode {
+                    palette::ACTIVE_SESSION
+                } else {
+                    ui.visuals().selection.bg_fill
+                };
+                button.frame(true).fill(fill).stroke(egui::Stroke::NONE)
             } else {
                 button
             };

@@ -87,9 +87,10 @@ pub fn install(ctx: &Context) {
     v.widgets.inactive.bg_stroke = Stroke::new(1.0, BUTTON_BORDER);
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT);
     v.widgets.active.bg_stroke = Stroke::new(1.0, ACCENT);
-    ctx.set_visuals(v);
+    v.code_bg_color = CARD;
+    ctx.set_visuals_of(egui::Theme::Dark, v);
 
-    ctx.global_style_mut(|style| {
+    ctx.style_mut_of(egui::Theme::Dark, |style| {
         for widget in [
             &mut style.visuals.widgets.noninteractive,
             &mut style.visuals.widgets.inactive,
@@ -101,7 +102,7 @@ pub fn install(ctx: &Context) {
         }
     });
 
-    ctx.global_style_mut(|style| style.interaction.resize_grab_radius_side = EDGE_GRAB);
+    ctx.all_styles_mut(|style| style.interaction.resize_grab_radius_side = EDGE_GRAB);
 }
 
 pub fn diff_ink(kind: DiffLine) -> Color32 {

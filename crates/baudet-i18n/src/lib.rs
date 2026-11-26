@@ -286,6 +286,10 @@ pub enum Key {
     SmokeModelsFailed,
     SmokeModels,
     MenuHelp,
+    MenuAppearance,
+    AppearanceSystem,
+    AppearanceLight,
+    AppearanceDark,
     AboutTitle,
     AboutBody,
     AboutVersion,
@@ -599,6 +603,10 @@ fn en(k: Key) -> &'static str {
         Key::SmokeModelsFailed => r"models    = FAILED: {0}",
         Key::SmokeModels => r"models    = {0}",
         Key::MenuHelp => r"Help",
+        Key::MenuAppearance => r"View",
+        Key::AppearanceSystem => r"System",
+        Key::AppearanceLight => r"Light",
+        Key::AppearanceDark => r"Dark",
         Key::AboutTitle => r"About Baudet",
         Key::AboutBody => r"**Baudet** is a local-first desktop assistant built to talk to local Large Language Models (served through APIs like [oMLX](https://github.com/jundot/omlx)) without the sugarcoating.
 
@@ -921,6 +929,10 @@ fn nl(k: Key) -> &'static str {
         Key::SmokeModelsFailed => r"models    = FAALDE: {0}",
         Key::SmokeModels => r"modellen  = {0}",
         Key::MenuHelp => r"Help",
+        Key::MenuAppearance => r"Weergave",
+        Key::AppearanceSystem => r"Systeem",
+        Key::AppearanceLight => r"Licht",
+        Key::AppearanceDark => r"Donker",
         Key::AboutTitle => r"Over Baudet",
         Key::AboutBody => r"**Baudet** is een local-first desktop-assistent, gebouwd om te praten met lokale grote taalmodellen (aangeboden via API's zoals [oMLX](https://github.com/jundot/omlx)), zonder suikerlaag.
 
@@ -1243,6 +1255,10 @@ fn fr(k: Key) -> &'static str {
         Key::SmokeModelsFailed => r"modèles   = ÉCHEC : {0}",
         Key::SmokeModels => r"modèles   = {0}",
         Key::MenuHelp => r"Aide",
+        Key::MenuAppearance => r"Affichage",
+        Key::AppearanceSystem => r"Système",
+        Key::AppearanceLight => r"Clair",
+        Key::AppearanceDark => r"Sombre",
         Key::AboutTitle => r"À propos de Baudet",
         Key::AboutBody => r"**Baudet** est un assistant de bureau local-first, conçu pour discuter avec de grands modèles de langage locaux (servis via des API comme [oMLX](https://github.com/jundot/omlx)), sans langue de bois.
 
@@ -1565,6 +1581,10 @@ fn de(k: Key) -> &'static str {
         Key::SmokeModelsFailed => r"Modelle   = FEHLGESCHLAGEN: {0}",
         Key::SmokeModels => r"Modelle   = {0}",
         Key::MenuHelp => r"Hilfe",
+        Key::MenuAppearance => r"Ansicht",
+        Key::AppearanceSystem => r"System",
+        Key::AppearanceLight => r"Hell",
+        Key::AppearanceDark => r"Dunkel",
         Key::AboutTitle => r"Über Baudet",
         Key::AboutBody => r"**Baudet** ist ein local-first Desktop-Assistent, entwickelt, um mit lokalen großen Sprachmodellen zu sprechen (bereitgestellt über APIs wie [oMLX](https://github.com/jundot/omlx)), ohne Schönfärberei.
 

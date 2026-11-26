@@ -90,6 +90,15 @@ impl ContextStrategy {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 // Missing fields use defaults so settings from earlier builds still load.
@@ -137,6 +146,7 @@ pub struct Settings {
     pub thinking_height: i32,
     #[serde(deserialize_with = "parse_language")]
     pub language: Language,
+    pub appearance: Appearance,
 }
 
 fn parse_language<'de, D>(deserializer: D) -> Result<Language, D::Error>
@@ -189,6 +199,7 @@ impl Default for Settings {
             composer_height: 0,
             thinking_height: 0,
             language: Language::default(),
+            appearance: Appearance::default(),
         }
     }
 }

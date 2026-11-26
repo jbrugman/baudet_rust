@@ -22,6 +22,7 @@ use baudet_backend::Backend;
 use baudet_core::{AgentMessageItem, Item, ItemStatus, ThreadEvent};
 use baudet_i18n::{Key, Texts};
 use baudet_settings::Provider;
+use baudet_settings::config::Appearance;
 use eframe::egui;
 use egui::{CentralPanel, ColorImage, Frame, Id, Panel, ScrollArea, UiBuilder};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -337,7 +338,10 @@ impl TranscriptApp {
     }
 
     fn paint_layout(&mut self, ui: &mut egui::Ui) {
-        let menu_frame = egui::Frame::side_top_panel(ui.style()).fill(palette::FIELD_ALT);
+        let mut menu_frame = egui::Frame::side_top_panel(ui.style());
+        if ui.visuals().dark_mode {
+            menu_frame = menu_frame.fill(palette::FIELD_ALT);
+        }
         Panel::top("menu-bar").frame(menu_frame).show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button(Texts::get(Key::MenuHelp), |ui| {
@@ -348,6 +352,23 @@ impl TranscriptApp {
                     if ui.button(Texts::get(Key::AboutTitle)).clicked() {
                         self.help = Some(true);
                         ui.close();
+                    }
+                });
+                ui.menu_button(Texts::get(Key::MenuAppearance), |ui| {
+                    for (appearance, label) in [
+                        (Appearance::System, Key::AppearanceSystem),
+                        (Appearance::Light, Key::AppearanceLight),
+                        (Appearance::Dark, Key::AppearanceDark),
+                    ] {
+                        let selected = self.settings.appearance() == appearance;
+                        if ui.selectable_label(selected, Texts::get(label)).clicked() {
+                            if !selected {
+                                self.settings.set_appearance(appearance);
+                                ui.ctx().set_theme(theme_preference(appearance));
+                                let _ = self.settings_tx.send(SettingsCommand::SaveAppearance(appearance));
+                            }
+                            ui.close();
+                        }
                     }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -894,11 +915,12 @@ impl TranscriptApp {
             let font = egui::FontId::proportional(15.0);
             let frame = egui::Frame::side_top_panel(ui.style());
             let width = (ui.available_width() - frame.total_margin().sum().x).max(1.0);
-            let galley = ui.painter().layout(text.to_owned(), font, palette::TEXT, width);
+            let ink = ui.visuals().text_color();
+            let galley = ui.painter().layout(text.to_owned(), font, ink, width);
             Panel::bottom("honesty-footer").frame(frame).show_separator_line(false)
                 .exact_size(galley.size().y + frame.total_margin().sum().y)
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new(text).size(15.0).color(palette::TEXT));
+                    ui.label(egui::RichText::new(text).size(15.0).color(ink));
                 });
         }
     }
@@ -1053,6 +1075,14 @@ impl TranscriptApp {
     }
 }
 
+fn theme_preference(appearance: Appearance) -> egui::ThemePreference {
+    match appearance {
+        Appearance::System => egui::ThemePreference::System,
+        Appearance::Light => egui::ThemePreference::Light,
+        Appearance::Dark => egui::ThemePreference::Dark,
+    }
+}
+
 impl eframe::App for TranscriptApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -1108,6 +1138,53 @@ mod geometry_tests {
             TranscriptApp::demo_backend(), false, false, root.path().to_owned(), SidebarModel::new(catalog),
         );
         (root, app)
+    }
+
+    #[test]
+    fn given_light_system_theme_when_dark_is_selected_then_it_applies_and_survives_restart() {
+        let (root, mut app) = isolated_app();
+        let ctx = egui::Context::default();
+        palette::install(&ctx);
+        ctx.set_theme(theme_preference(app.settings.appearance()));
+        let paint = |app: &mut TranscriptApp, events| {
+            let input = egui::RawInput { system_theme: Some(egui::Theme::Light), events, ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| app.paint(ui));
+            output.textures_delta.clear();
+            output
+        };
+        let label_position = |output: &egui::FullOutput, key| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == Texts::get(key) => {
+                    Some(text.visual_bounding_rect().center())
+                }
+                _ => None,
+            }).expect("the appearance option is visible")
+        };
+        let click = |app: &mut TranscriptApp, pos| {
+            for pressed in [true, false] {
+                paint(app, vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+                    },
+                ]).drop_without_applying_deltas();
+            }
+            paint(app, Vec::new())
+        };
+
+        let initial = paint(&mut app, Vec::new());
+        assert_eq!(ctx.theme(), egui::Theme::Light);
+        let menu = label_position(&initial, Key::MenuAppearance);
+        let open_menu = click(&mut app, menu);
+        let dark = label_position(&open_menu, Key::AppearanceDark);
+        click(&mut app, dark).drop_without_applying_deltas();
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        drop(app);
+
+        let file = baudet_settings::SettingsFile::at(root.path().join("settings.json"));
+        let mut reopened = SettingsView::new();
+        reopened.load(&file);
+        assert_eq!(reopened.appearance(), Appearance::Dark);
     }
 
     #[test]
@@ -2186,6 +2263,13 @@ fn settings_worker_loop(
                     let _ = report.send(SettingsEvent::Saved(Err(error)));
                 }
             }
+            SettingsCommand::SaveAppearance(appearance) => {
+                let mut settings = file.read().settings().clone();
+                settings.appearance = appearance;
+                if let Err(error) = file.write(&settings) {
+                    let _ = report.send(SettingsEvent::Saved(Err(error)));
+                }
+            }
             SettingsCommand::SaveChatLayout { composer, thinking } => {
                 let current = file.read();
                 let mut settings = current.settings().clone();
@@ -2202,6 +2286,7 @@ fn settings_worker_loop(
                 settings.mcp_allow_servers = current.settings().mcp_allow_servers.clone();
                 settings.auto_allow_commands = current.settings().auto_allow_commands.clone();
                 settings.show_reasoning = current.settings().show_reasoning;
+                settings.appearance = current.settings().appearance;
                 settings.learned_context_windows = current.settings().learned_context_windows.clone();
                 let outcome = file.write(&settings);
                 if outcome.is_ok() {
@@ -2703,6 +2788,7 @@ pub fn run_from(startup: Startup) -> eframe::Result {
         Box::new(move |cc| {
             palette::install(&cc.egui_ctx);
             let mut app = TranscriptApp::new_inner(backend, !demo, screenshot.is_some());
+            cc.egui_ctx.set_theme(theme_preference(app.settings.appearance()));
             let balk = status_balk(
                 startup.demo,
                 fell_back.as_deref(),

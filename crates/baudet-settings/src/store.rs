@@ -193,6 +193,7 @@ mod tests {
             composer_height: 166,
             thinking_height: 82,
             language: Language::Nl,
+            appearance: crate::config::Appearance::Dark,
         };
         file.write(&settings).unwrap();
         assert_eq!(file.read().settings(), &settings);
