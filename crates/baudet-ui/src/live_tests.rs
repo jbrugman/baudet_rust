@@ -352,3 +352,77 @@ fn stop_releases_a_silent_stream_and_the_next_turn_uses_the_saved_connection() {
     first_server.join().unwrap();
     second_server.join().unwrap();
 }
+
+#[test]
+fn given_a_stream_without_tools_when_steering_then_the_followup_waits_for_the_stream_to_finish() {
+    check_plain_stream_steering(true);
+}
+
+#[test]
+fn given_a_stream_that_just_ended_when_a_steer_arrives_then_it_becomes_a_followup() {
+    check_plain_stream_steering(false);
+}
+
+fn check_plain_stream_steering(while_streaming: bool) {
+    use baudet_backend::scripted::Step;
+    use baudet_core::ItemKind;
+
+    let (release, finish_stream) = mpsc::channel();
+    let finish_stream = std::sync::Mutex::new(finish_stream);
+    let request = Script::new().step(Step::RawSse {
+        lines: vec!["data: first".into(), "".into(), "data: finish".into(), "".into()],
+        to_event: Arc::new(move |data| {
+            if data == "first" {
+                Some(ThreadEvent::ItemStarted {
+                    thread_id: "th_1".into(),
+                    turn_id: "tu_1".into(),
+                    item: baudet_core::Item::AgentMessage(baudet_core::AgentMessageItem {
+                        item_id: "tu_1/response".into(), created_at_ms: None,
+                        text: "first answer".into(), status: baudet_core::ItemStatus::InProgress,
+                    }),
+                })
+            } else {
+                finish_stream.lock().unwrap().recv_timeout(WAIT).unwrap();
+                Some(ThreadEvent::TurnCompleted {
+                    thread_id: "th_1".into(), turn_id: "tu_1".into(), response_id: None,
+                    usage: None, final_event: Some("response.completed".into()), incomplete_reason: None,
+                })
+            }
+        }),
+    });
+    let backend = Arc::new(ScriptedBackend::new(vec![request, Script::new()]));
+    let state = Arc::new(AppState::new(backend.clone(), "test"));
+    let directory = tempfile::tempdir().unwrap();
+    let catalog = baudet_projects::Catalog::open(directory.path()).unwrap();
+    let session = SidebarModel::new(catalog.clone()).add_session(None).unwrap();
+    let root = directory.path().to_owned();
+    let (intents, commands) = mpsc::channel();
+    let (snapshots, mut frames) = ampcc::unbounded_channel();
+    let (settings, _edits) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        worker_loop(state, Some(root), commands, snapshots, Arc::default(), catalog, settings);
+    });
+
+    intents.send(Intent::LoadSession(session.id.clone())).unwrap();
+    intents.send(Intent::Submit("Start".into(), None)).unwrap();
+    wait_for_snapshot(&mut frames, |frame| frame.busy && frame.rows.iter().any(|row| row.body == "first answer"));
+    let steer = || Intent::Steer { session: Some(session.id.clone()), text: "Be concise".into() };
+    if while_streaming {
+        intents.send(steer()).unwrap();
+        wait_for_snapshot(&mut frames, |frame| frame.busy && frame.reason.as_deref() == Some(Texts::get(Key::SteerQueued)));
+        assert_eq!(backend.turns_started(), 1);
+        assert!(!backend.cancelled());
+    }
+    release.send(()).unwrap();
+    if !while_streaming {
+        wait_for_snapshot(&mut frames, |frame| !frame.busy);
+        intents.send(steer()).unwrap();
+    }
+    wait_for_snapshot(&mut frames, |frame| !frame.busy && frame.rows.iter().any(|row| {
+        row.kind == ItemKind::UserMessage && row.body == "Be concise"
+    }));
+    assert_eq!(backend.turns_started(), 2);
+    assert_eq!(backend.last_request().unwrap().0.user_text, "Be concise");
+    intents.send(Intent::Quit).unwrap();
+    worker.join().unwrap();
+}

@@ -9,7 +9,8 @@ use baudet_core::item::{
 use baudet_core::msg::Msg;
 use baudet_core::protocol::Turn;
 use serde_json::Value;
-use std::sync::mpsc;
+use std::collections::VecDeque;
+use std::sync::{mpsc, Mutex};
 use std::thread;
 
 const MAX_PARALLEL_TOOL_CALLS: usize = 2;
@@ -130,6 +131,7 @@ pub trait ItemSink: Send + Sync {
     // Images are display data. Only their text description enters model history.
     fn image_completed(&self, _item: baudet_core::ImageItem) {}
     fn next_item_id(&self) -> String;
+    fn steering_applied(&self, _text: &str) {}
     fn reply_started(&self) {}
     fn reply_completed(&self, _text: &str) {}
     fn text_delta(&self, _chunk: &str) {}
@@ -339,6 +341,7 @@ pub struct ToolLoop<'a> {
     pub chain_response_id: bool,
     pub context_ceiling: u64,
     require_completion: bool,
+    steering: Option<&'a Mutex<VecDeque<String>>>,
 }
 
 impl<'a> ToolLoop<'a> {
@@ -361,6 +364,7 @@ impl<'a> ToolLoop<'a> {
             chain_response_id: false,
             context_ceiling: 0,
             require_completion: false,
+            steering: None,
         }
     }
 
@@ -379,6 +383,35 @@ impl<'a> ToolLoop<'a> {
         self
     }
 
+    pub fn with_steering(mut self, steering: Option<&'a Mutex<VecDeque<String>>>) -> Self {
+        self.steering = steering;
+        self
+    }
+
+    fn apply_steering(&self, run: &mut LoopRun<'_>, msgs: &mut Vec<Msg>, added: &mut Vec<Msg>) -> bool {
+        let Some(queue) = self.steering else { return false };
+        let mut queue = queue.lock().unwrap();
+        if queue.is_empty() {
+            return false;
+        }
+        let message = Msg::user(queue.iter().map(String::as_str).collect::<Vec<_>>().join("\n\n"));
+        let retry = msgs.last().is_some_and(is_retry_nudge).then(|| msgs.pop().unwrap());
+        msgs.push(message);
+        if self.context_ceiling > 0 && estimate_tokens_of(msgs) > self.context_ceiling {
+            msgs.pop();
+            msgs.extend(retry);
+            return false;
+        }
+        queue.clear();
+        drop(queue);
+
+        let message = msgs.last().unwrap();
+        run.sink.steering_applied(&message.content);
+        (run.on_message)(message);
+        added.push(message.clone());
+        true
+    }
+
     pub async fn run(&self, run: &mut LoopRun<'_>) -> LoopOutcome {
         let mut msgs: Vec<Msg> = run.history.to_vec();
         let mut added: Vec<Msg> = Vec::new();
@@ -391,6 +424,7 @@ impl<'a> ToolLoop<'a> {
         let mut blanks = 0u32;
         let explicit_completion = self.require_completion && tools.is_some();
         let mut answer_before_retry = None;
+        let mut started = false;
 
         loop {
             if self.context_ceiling > 0 && estimate_tokens_of(&msgs) > self.context_ceiling {
@@ -405,6 +439,10 @@ impl<'a> ToolLoop<'a> {
             if call_steps + blanks >= self.max_iterations {
                 break;
             }
+            if started && self.apply_steering(run, &mut msgs, &mut added) {
+                answer_before_retry = None;
+            }
+            started = true;
             // Publish the retry only after it produces a tool call.
             let original_answer = answer_before_retry.take();
             if original_answer.is_none() {
@@ -477,6 +515,9 @@ impl<'a> ToolLoop<'a> {
             call_steps += 1;
         }
 
+        if started {
+            self.apply_steering(run, &mut msgs, &mut added);
+        }
         run.sink.reply_started();
         let mut settle = self.ask(run, &mut prev, &msgs, tools.as_ref(), &mut pending_image, true).await;
         let final_answer = explicit_completion && strip_final_marker(&mut settle.text);
@@ -1326,6 +1367,38 @@ mod tests {
 
         assert_eq!(turns(&source), 1);
         assert!(matches!(outcome, LoopOutcome::Completed { final_text, .. } if final_text == answer));
+    }
+
+    #[tokio::test]
+    async fn given_a_steer_during_a_tool_turn_when_the_next_model_request_starts_then_it_receives_the_steer() {
+        let registry = two_readers();
+        let source = source(vec![
+            StubSource::calls_for("", &[("read_file", json!({"file": "first.txt"}))]),
+            StubSource::prose(format!("Alleen de samenvatting.\n{FINAL_DONE}")),
+        ]);
+        let queue = Mutex::new(VecDeque::from(["Geef alleen een samenvatting.".to_owned()]));
+
+        let sink = RecordingSink::default();
+        let outcome = ToolLoop::new(&source, &registry, 3)
+            .require_completion(true)
+            .with_steering(Some(&queue))
+            .run(&mut LoopRun {
+                history: &[Msg::user("Lees het bestand")],
+                ctx: &ctx(),
+                previous_response_id: None,
+                image: None,
+                on_delta: Box::new(|_| {}),
+                on_reasoning: Box::new(|_| {}),
+                on_message: Box::new(|_| {}),
+                sink: &sink,
+            }).await;
+
+        assert_eq!(turns(&source), 2);
+        assert!(queue.lock().unwrap().is_empty());
+        assert_eq!(sink.count("delta Lees het bestand"), 1);
+        assert_eq!(sink.count("delta Geef alleen een samenvatting."), 1);
+        assert_eq!(outcome.messages().iter()
+            .filter(|msg| msg.role == "user" && msg.content == "Geef alleen een samenvatting.").count(), 1);
     }
 
     #[tokio::test]

@@ -19,6 +19,7 @@ use baudet_tool::{
     tool_loop::{ItemSink, LoopOutcome, LoopRun, ToolLoop},
     turn_source::{TurnFuture, TurnRequest, TurnSource},
 };
+use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex,
@@ -52,6 +53,13 @@ impl AppState {
     pub fn run_context_turn(
         &self, text: &str, image: Option<&str>, thumbnail: Option<String>, run: ToolTurn<'_>, use_tools: bool,
     ) -> Result<Option<String>, TurnBusy> {
+        self.run_steerable_context_turn(text, image, thumbnail, run, use_tools, None)
+    }
+
+    pub fn run_steerable_context_turn(
+        &self, text: &str, image: Option<&str>, thumbnail: Option<String>, run: ToolTurn<'_>, use_tools: bool,
+        steering: Option<&Mutex<VecDeque<String>>>,
+    ) -> Result<Option<String>, TurnBusy> {
         if use_tools {
             if !Self::tools_active(run.settings, run.project) {
                 return Err(TurnBusy);
@@ -60,13 +68,14 @@ impl AppState {
             return Err(TurnBusy);
         }
         self.live_turns.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).map_err(|_| TurnBusy)?;
-        let result = self.tool_turn(text, image, thumbnail, run, use_tools);
+        let result = self.tool_turn(text, image, thumbnail, run, use_tools, steering);
         self.finish();
         result
     }
 
     fn tool_turn(
         &self, text: &str, image: Option<&str>, thumbnail: Option<String>, run: ToolTurn<'_>, use_tools: bool,
+        steering: Option<&Mutex<VecDeque<String>>>,
     ) -> Result<Option<String>, TurnBusy> {
         let turn_id = format!("tu_{}", self.turn_counter.fetch_add(1, Ordering::SeqCst) + 1);
         let sink = Sink {
@@ -151,6 +160,7 @@ impl AppState {
             ToolLoop::new(&source, &registry, s.max_tool_iterations)
                 .chain_response_id(previous.is_some())
                 .require_completion(use_tools)
+                .with_steering(steering)
                 .context_ceiling(context_ceiling)
                 .run(&mut LoopRun {
                     history: &history,
@@ -453,6 +463,15 @@ impl Sink<'_> {
 impl ItemSink for Sink<'_> {
     fn next_item_id(&self) -> String {
         format!("{}/tool/{}", self.turn, self.counter.fetch_add(1, Ordering::Relaxed))
+    }
+    fn steering_applied(&self, text: &str) {
+        self.completed(Item::UserMessage(UserMessageItem {
+            thumbnail: None,
+            created_at_ms: None,
+            item_id: self.next_item_id(),
+            text: text.to_owned(),
+            status: ItemStatus::Completed,
+        }));
     }
     fn reply_started(&self) {
         let reply = self.next_item_id();

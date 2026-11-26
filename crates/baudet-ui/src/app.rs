@@ -36,6 +36,7 @@ mod live_tests;
 
 enum Intent {
     Submit(String, Option<crate::clipboard::SubmittedImage>),
+    Steer { session: Option<String>, text: String },
     UseCatalog(baudet_projects::Catalog),
     Compact,
     Stop,
@@ -983,7 +984,10 @@ impl TranscriptApp {
                 self.attachment = None;
             }
         }
-        let can_start = self.server_beurt && !self.busy && !self.loading && self.deletion.is_none();
+        let can_submit = self.server_beurt && !self.loading && !self.compacting && self.deletion.is_none();
+        let can_start = can_submit && !self.busy;
+        let can_steer = can_submit && self.busy && !self.input.trim().is_empty();
+        let send_label = if self.busy { Key::SteerButton } else { Key::SendButton };
         let (send_clicked, compact_clicked, stop_clicked) = ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(9.0, 8.0);
             let stop_text = Texts::get(Key::StopButton);
@@ -998,7 +1002,7 @@ impl TranscriptApp {
                 |ui| {
                     ui.set_width(left_width);
                     ui.horizontal_wrapped(|ui| {
-                        let send = ui.add_enabled(can_start, egui::Button::new(Texts::get(Key::SendButton))).clicked();
+                        let send = ui.add_enabled(can_start || can_steer, egui::Button::new(Texts::get(send_label))).clicked();
                         let compact = ui.add_enabled(can_start, egui::Button::new(Texts::get(Key::CompactButton))).clicked();
                         self.reasoning_toggle(ui);
                         (send, compact)
@@ -1016,8 +1020,7 @@ impl TranscriptApp {
         self.thinking_dock(ui);
         let input_height = ui.available_height().max(1.0);
         let composer_id = ui.make_persistent_id(COMPOSER_FIELD);
-        let send_requested = can_start
-            && !self.loading
+        let send_requested = (can_start || can_steer)
             && ui.memory(|memory| memory.has_focus(composer_id))
             && ui.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Enter));
         let response = ScrollArea::vertical().id_salt("composer-scroll")
@@ -1040,6 +1043,17 @@ impl TranscriptApp {
             if let Some(image) = crate::clipboard::image_data_url() {
                 self.attachment = Some(crate::clipboard::Attachment::new(ui.ctx(), image));
                 ui.request_repaint();
+            }
+        }
+        if (send_clicked || send_requested) && can_steer {
+            self.compaction = None;
+            let text = std::mem::take(&mut self.input);
+            if let Err(mpsc::SendError(Intent::Steer { text, .. })) =
+                self.intents.send(Intent::Steer { session: self.current_session.clone(), text })
+            {
+                self.input = text;
+            } else {
+                self.status = Texts::get(Key::SteerQueued).to_owned();
             }
         }
         if (send_clicked || send_requested)
@@ -1415,6 +1429,40 @@ mod geometry_tests {
         assert!(matches!(intents.try_recv(), Err(mpsc::TryRecvError::Empty)));
         assert!(app.input.is_empty());
         assert!(app.thinking_hidden);
+    }
+
+    #[test]
+    fn given_a_running_turn_when_ctrl_enter_is_pressed_then_the_composer_sends_a_steer() {
+        let (_root, mut app) = isolated_app();
+        app.server_beurt = true;
+        app.busy = true;
+        app.current_session = Some("active-session".into());
+        app.input = "Gebruik alleen de eerste bron.".into();
+        let (tx, intents) = mpsc::channel();
+        app.intents = tx;
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let id = ui.make_persistent_id(COMPOSER_FIELD);
+            ui.memory_mut(|memory| memory.request_focus(id));
+            app.composer(ui, 700.0);
+        }).drop_without_applying_deltas();
+
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::CTRL,
+            }],
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| app.composer(ui, 700.0)).drop_without_applying_deltas();
+
+        assert!(matches!(intents.try_recv(), Ok(Intent::Steer { session: Some(id), text })
+            if id == "active-session" && text == "Gebruik alleen de eerste bron."));
+        assert!(app.input.is_empty());
+        assert!(app.busy);
     }
 
     #[test]
@@ -2045,6 +2093,14 @@ fn worker_loop(
         }
         match intent {
             Intent::Quit => break,
+            Intent::Steer { session, text } => {
+                if session.as_deref().is_none_or(|id| id == state.session_id()) {
+                    deferred.push_front(Intent::Submit(text, None));
+                } else {
+                    publish(&state, false, &catalog, None, Some((text, None)));
+                }
+                continue;
+            }
             Intent::UseCatalog(replacement) => catalog = Some(replacement),
             Intent::Compact => {
                 use baudet_app::compaction::{CompactionOutcome, CompactionPlan};
@@ -2126,6 +2182,8 @@ fn worker_loop(
                 let tool_cancelled = Arc::clone(&cancelled);
                 let approvals = Arc::clone(&approvals);
                 let servers = Arc::clone(&servers);
+                let steering = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+                let tool_steering = Arc::clone(&steering);
                 let drain = std::thread::spawn(move || {
                     let failure = if tools_active || auto_compact {
                         let approval_cancelled = Arc::clone(&tool_cancelled);
@@ -2140,7 +2198,9 @@ fn worker_loop(
                             Some(image) => (Some(image.url.as_str()), image.thumbnail.clone()),
                             None => (None, None),
                         };
-                        folder.run_context_turn(&text, url, thumbnail, run, tools_active).ok().flatten()
+                        folder.run_steerable_context_turn(
+                            &text, url, thumbnail, run, tools_active, Some(&tool_steering),
+                        ).ok().flatten()
                     } else if let Some(handle) = handle {
                         let mut failure = None;
                         let (tx, _rx) = ampcc::unbounded_channel();
@@ -2160,15 +2220,26 @@ fn worker_loop(
                 });
                 let mut pending_configuration = None;
                 while watched.load(Ordering::SeqCst) {
-                    publish(&state, true, &catalog, None, None);
+                    let steer_status = (!steering.lock().unwrap().is_empty())
+                        .then(|| Texts::get(Key::SteerQueued).to_owned());
+                    publish(&state, true, &catalog, steer_status, None);
                     match intents.recv_timeout(std::time::Duration::from_millis(32)) {
                         Ok(Intent::UseCatalog(replacement)) => catalog = Some(replacement),
                         Ok(Intent::Stop) => {
                             cancelled.store(true, Ordering::Relaxed);
                             state.cancel_turn();
                         }
-                        Ok(Intent::Submit(..) | Intent::Compact) => {
+                        Ok(Intent::Steer { session, text }) => {
+                            if session.as_deref().is_none_or(|id| id == state.session_id()) {
+                                steering.lock().unwrap().push_back(text);
+                            } else {
+                                publish(&state, true, &catalog, None, Some((text, None)));
+                            }
                         }
+                        Ok(Intent::Submit(text, image)) => {
+                            publish(&state, true, &catalog, None, Some((text, image)));
+                        }
+                        Ok(Intent::Compact) => {}
                         Ok(Intent::Quit) => {
                             cancelled.store(true, Ordering::Relaxed);
                             state.cancel_turn();
@@ -2187,6 +2258,17 @@ fn worker_loop(
                     }
                 }
                 let failure = drain.join().ok().flatten();
+                let mut rejected_draft = None;
+                let mut pending = steering.lock().unwrap();
+                if !pending.is_empty() {
+                    let text = pending.drain(..).collect::<Vec<_>>().join("\n\n");
+                    if cancelled.load(Ordering::Relaxed) {
+                        rejected_draft = Some((text, None));
+                    } else {
+                        deferred.push_front(Intent::Steer { session: Some(state.session_id()), text });
+                    }
+                }
+                drop(pending);
                 after_turn(&state, &catalog, &snapshots);
                 if let Some((backend, settings)) = pending_configuration {
                     apply_configuration(&state, backend, *settings, &mut connection_problem);
@@ -2198,10 +2280,10 @@ fn worker_loop(
                         learned_windows.insert(key.clone(), tokens);
                         let _ = settings_tx.send(SettingsCommand::LearnContext { key, tokens });
                     }
-                    publish(&state, false, &catalog, Some(Texts::get(Key::ContextOverflow).to_owned()), None);
+                    publish(&state, false, &catalog, Some(Texts::get(Key::ContextOverflow).to_owned()), rejected_draft);
                     continue;
                 }
-                publish(&state, false, &catalog, failure, None);
+                publish(&state, false, &catalog, failure, rejected_draft);
                 continue;
             }
             Intent::Stop => state.cancel_turn(),
@@ -2739,7 +2821,7 @@ fn status_color(ui: &egui::Ui, row: &Row) -> egui::Color32 {
 fn row_background(ui: &egui::Ui, row: &Row) -> egui::Color32 {
     use baudet_core::ItemKind as K;
     match row.kind {
-        K::UserMessage => ui.visuals().selection.bg_fill.gamma_multiply(0.25),
+        K::UserMessage => ui.visuals().faint_bg_color.lerp_to_gamma(palette::ACCENT, 0.18),
         K::Error => ui.visuals().error_fg_color.gamma_multiply(0.18),
         _ => ui.visuals().faint_bg_color,
     }
