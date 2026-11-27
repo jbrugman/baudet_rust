@@ -367,8 +367,15 @@ fn execute_network(command: &str, arguments: &[String], writes: GitWrites, ctx: 
         if same_file::Handle::from_path(&root)? != identity {
             return Err("the project folder changed after approval".into());
         }
-        let workspace = crate::windows_workspace::Workspace::stage(&root)?;
-        if git_network_destination(workspace.path(), remote, push)? != destination {
+        let (push_copy, pull_workspace) = if push {
+            (Some(crate::windows_workspace::stage_git_directory(&root)?), None)
+        } else {
+            (None, Some(crate::windows_workspace::Workspace::stage(&root)?))
+        };
+        let staging_path = push_copy.as_ref().map(tempfile::TempDir::path)
+            .or_else(|| pull_workspace.as_ref().map(crate::windows_workspace::Workspace::path))
+            .ok_or("missing Git staging directory")?;
+        if git_network_destination(staging_path, remote, push)? != destination {
             return Err("the Git destination changed after approval".into());
         }
         let mut credentials = match std::env::var_os("BAUDET_GIT_AUTH_FILE") {
@@ -394,8 +401,8 @@ fn execute_network(command: &str, arguments: &[String], writes: GitWrites, ctx: 
             }
             *private_key = resolved;
         }
-        run_staged(workspace.path(), &destination, credentials, remote, branch, push)?;
-        if !push {
+        run_staged(staging_path, &destination, credentials, remote, branch, push)?;
+        if let Some(workspace) = pull_workspace {
             workspace.commit()?;
         }
         Ok(ToolResult {

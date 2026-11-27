@@ -20,14 +20,7 @@ fn given_approved_https_and_ssh_remotes_when_pushing_and_pulling_then_each_remot
         let client = fixture.join(format!("{transport}-client"));
         let server = fixture.join(format!("{transport}-server"));
         let remote = fixture.join(format!("{transport}.git"));
-        let context = ToolContext {
-            root: Some(client.clone()),
-            read_granted: true,
-            write_granted: true,
-            exec_granted: true,
-            approve_command: Box::new(|_, _, _, _| true),
-            ..Default::default()
-        };
+        let context = network_context(&client);
         let tool = GitTool::with_writes();
 
         std::fs::write(client.join("client.txt"), "pushed by Baudet\n").unwrap();
@@ -47,5 +40,40 @@ fn given_approved_https_and_ssh_remotes_when_pushing_and_pulling_then_each_remot
         assert_eq!(std::fs::read_to_string(client.join("server.txt")).unwrap(), "pulled by Baudet\n");
         assert_eq!(git(&client, &["rev-parse", "HEAD"]), git(&server, &["rev-parse", "HEAD"]));
         assert_eq!(git(&client, &["rev-parse", "refs/remotes/origin/main"]), git(&server, &["rev-parse", "HEAD"]));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires fresh HTTPS and SSH Git servers with the fixture credentials"]
+fn given_a_worktree_symlink_when_pushing_then_each_remote_receives_the_current_branch() {
+    let fixture = PathBuf::from(std::env::var_os("BAUDET_GIT_FIXTURE_DIR").unwrap());
+    for transport in ["https", "ssh"] {
+        let client = fixture.join(format!("{transport}-client"));
+        let remote = fixture.join(format!("{transport}.git"));
+        let external = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(external.path(), client.join("target")).unwrap();
+        std::fs::write(client.join("client.txt"), "pushed by Baudet\n").unwrap();
+        git(&client, &["add", "client.txt"]);
+        git(&client, &["commit", "-m", "Client commit"]);
+
+        let push = GitTool::with_writes().execute(
+            &json!({"command": "push", "args": ["origin", "main"]}),
+            &network_context(&client),
+        );
+
+        assert!(push.ok, "{transport}: {}", push.output);
+        assert_eq!(git(&remote, &["rev-parse", "main"]), git(&client, &["rev-parse", "HEAD"]));
+    }
+}
+
+fn network_context(client: &Path) -> ToolContext {
+    ToolContext {
+        root: Some(client.to_path_buf()),
+        read_granted: true,
+        write_granted: true,
+        exec_granted: true,
+        approve_command: Box::new(|_, _, _, _| true),
+        ..Default::default()
     }
 }

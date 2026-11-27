@@ -37,16 +37,7 @@ impl Workspace {
         let baseline = snapshot(&original)?;
         let copy = tempfile::Builder::new().prefix("baudet-project-").tempdir_in(parent)?;
         let destination = Dir::open_ambient_dir(copy.path(), ambient_authority())?;
-        for (path, entry) in &baseline {
-            match entry {
-                Entry::Directory => destination.create_dir(path)?,
-                Entry::File { bytes, mode } => {
-                    let mut file = destination.open_with(path, OpenOptions::new().write(true).create_new(true))?;
-                    file.write_all(bytes)?;
-                    set_file_mode(&file, *mode)?;
-                }
-            }
-        }
+        write_snapshot(&destination, &baseline)?;
         Ok(Self { root, original, copy, baseline })
     }
 
@@ -121,8 +112,9 @@ impl Workspace {
             drop(manifest);
             #[cfg(unix)]
             {
-                scratch.try_clone()?.into_std_file().sync_all()?;
-                self.original.try_clone()?.into_std_file().sync_all()?;
+                // Directory capabilities may use O_PATH, which fsync rejects.
+                scratch.open(".")?.sync_all()?;
+                self.original.open(".")?.sync_all()?;
             }
 
             // Remove children before parents. Preserve the original file itself,
@@ -264,6 +256,50 @@ enum Undo<'a> {
     RestoreDirectory(&'a Path),
     RemoveFile(&'a Path),
     RemoveDirectory(&'a Path),
+}
+
+pub(crate) fn stage_git_directory(root: &Path) -> io::Result<tempfile::TempDir> {
+    let source = Dir::open_ambient_dir(root, ambient_authority())?;
+    let metadata = source.symlink_metadata(".git")?;
+    if !metadata.is_dir() || is_link(&metadata) {
+        return Err(io::Error::other("network Git requires a standalone .git directory"));
+    }
+    let entries = snapshot(&source.open_dir(".git")?)?;
+    let copy = tempfile::Builder::new().prefix("baudet-push-").tempdir()?;
+    let destination = Dir::open_ambient_dir(copy.path(), ambient_authority())?;
+    destination.create_dir(".git")?;
+    write_snapshot(&destination.open_dir(".git")?, &entries)?;
+    Ok(copy)
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn given_a_worktree_link_when_staging_a_push_then_only_git_metadata_is_copied() {
+    let project = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let git = project.path().join(".git");
+    std::fs::create_dir(&git).unwrap();
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::os::unix::fs::symlink(external.path(), project.path().join("target")).unwrap();
+
+    let copy = stage_git_directory(project.path()).unwrap();
+
+    assert_eq!(std::fs::read_to_string(copy.path().join(".git/HEAD")).unwrap(), "ref: refs/heads/main\n");
+    assert!(std::fs::symlink_metadata(copy.path().join("target")).is_err());
+}
+
+fn write_snapshot(destination: &Dir, entries: &BTreeMap<PathBuf, Entry>) -> io::Result<()> {
+    for (path, entry) in entries {
+        match entry {
+            Entry::Directory => destination.create_dir(path)?,
+            Entry::File { bytes, mode } => {
+                let mut file = destination.open_with(path, OpenOptions::new().write(true).create_new(true))?;
+                file.write_all(bytes)?;
+                set_file_mode(&file, *mode)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn snapshot(dir: &Dir) -> io::Result<BTreeMap<PathBuf, Entry>> {
