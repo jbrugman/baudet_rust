@@ -3,7 +3,7 @@ use git2::{
     AutotagOption, Config, Cred, CredentialType, Error, FetchOptions, ProxyOptions, PushOptions, Reference, Remote,
     RemoteCallbacks, RemoteRedirect, Repository,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 #[derive(Clone, serde::Deserialize)]
@@ -13,10 +13,77 @@ pub enum CredentialConfig {
     Ssh { username: String, private_key: std::path::PathBuf, passphrase_env: Option<String> },
 }
 
+pub struct SshConfig {
+    pub destination: GitNetworkDestination,
+    keys: Vec<PathBuf>,
+    identities_only: bool,
+}
+
+pub fn resolve_ssh_config(destination: &GitNetworkDestination, project: &Path) -> Result<SshConfig, Box<dyn std::error::Error>> {
+    let home = std::env::home_dir().ok_or("could not locate the SSH user's home directory")?;
+    let host = destination.url.host_str().ok_or("missing SSH host")?;
+    if host.starts_with('-') || !host.bytes().all(|ch| ch.is_ascii_alphanumeric() || b".-_:[]".contains(&ch)) {
+        return Err("invalid SSH host name".into());
+    }
+    #[cfg(unix)]
+    let executable = PathBuf::from("/usr/bin/ssh");
+    #[cfg(windows)]
+    let executable = PathBuf::from(std::env::var_os("SystemRoot").ok_or("missing Windows system root")?)
+        .join("System32/OpenSSH/ssh.exe");
+    #[cfg(not(any(unix, windows)))]
+    let executable = PathBuf::from("ssh");
+
+    let user = destination.url.username();
+    let mut command = std::process::Command::new(executable);
+    command.current_dir(&home).args(["-G", "-l", user]);
+    if let Some(port) = destination.url.port() {
+        command.args(["-p", &port.to_string()]);
+    }
+    let output = command.args(["--", host]).output()?;
+    if !output.status.success() {
+        return Err("OpenSSH could not resolve the remote's user configuration".into());
+    }
+    let config = String::from_utf8(output.stdout)?;
+    let value = |key| config.lines().filter_map(|line| line.split_once(' '))
+        .find_map(|(name, value)| (name == key).then_some(value));
+    if ["proxycommand", "proxyjump"].iter().any(|key| value(*key).is_some_and(|v| v != "none")) {
+        return Err("the isolated Git transport does not support SSH proxies".into());
+    }
+    let hostname = value("hostname").ok_or("OpenSSH did not report a hostname")?;
+    let port: u16 = value("port").ok_or("OpenSSH did not report a port")?.parse()?;
+    let mut resolved = destination.clone();
+    resolved.url.set_host(Some(hostname))?;
+    resolved.url.set_port((port != 22).then_some(port)).map_err(|()| "invalid SSH port")?;
+    resolved.address = if destination.address.starts_with("ssh://") {
+        resolved.url.to_string()
+    } else {
+        if port != 22 {
+            return Err("SSH aliases with a custom port require an ssh:// remote URL".into());
+        }
+        format!("{user}@{}:{}", resolved.url.host_str().ok_or("missing resolved SSH host")?,
+            resolved.url.path().trim_start_matches('/'))
+    };
+    let mut keys = Vec::new();
+    for key in config.lines().filter_map(|line| line.strip_prefix("identityfile ")) {
+        let path = if let Some(relative) = key.strip_prefix("~/") {
+            home.join(relative)
+        } else {
+            home.join(key)
+        };
+        if let Ok(path) = path.canonicalize() {
+            if path.is_file() && !path.starts_with(project) && !keys.contains(&path) {
+                keys.push(path);
+            }
+        }
+    }
+    Ok(SshConfig { destination: resolved, keys, identities_only: value("identitiesonly") == Some("yes") })
+}
+
 pub fn run_staged(
     workspace: &Path,
     destination: &GitNetworkDestination,
     credentials: Option<CredentialConfig>,
+    ssh_config: Option<&SshConfig>,
     remote_name: &str,
     branch: &str,
     push: bool,
@@ -64,7 +131,7 @@ pub fn run_staged(
             _ => None,
         };
         let authentication = match &credentials {
-            None => Authentication::None,
+            None => ssh_config.map_or(Authentication::None, Authentication::SshConfig),
             Some(CredentialConfig::Https { username, .. }) => {
                 Authentication::Https { username, token: token.as_deref().ok_or("missing HTTPS token")? }
             }
@@ -134,6 +201,7 @@ pub enum Authentication<'a> {
     None,
     Https { username: &'a str, token: &'a str },
     Ssh { username: &'a str, private_key: &'a Path, passphrase: Option<&'a str> },
+    SshConfig(&'a SshConfig),
 }
 
 const FETCHED_REF: &str = "refs/baudet/remote";
@@ -210,7 +278,7 @@ fn callbacks<'a>(
     if !matches!(
         (destination.url.scheme(), &authentication),
         ("https", Authentication::None | Authentication::Https { .. })
-            | ("ssh", Authentication::None | Authentication::Ssh { .. })
+            | ("ssh", Authentication::None | Authentication::Ssh { .. } | Authentication::SshConfig(_))
     ) {
         return Err(Error::from_str("the approved destination needs matching authentication"));
     }
@@ -218,7 +286,10 @@ fn callbacks<'a>(
     let mut issued = false;
     let mut try_agent = cfg!(windows)
         || std::env::var_os("SSH_AUTH_SOCK").is_some_and(|socket| !socket.is_empty());
-    let mut default_keys = ["id_ed25519", "id_ecdsa", "id_rsa"].into_iter();
+    let mut keys = match &authentication {
+        Authentication::SshConfig(config) => config.keys.iter(),
+        _ => [].iter(),
+    };
     let mut callbacks = RemoteCallbacks::new();
     // Keep libgit2's TLS certificate and SSH known_hosts checks in force.
     callbacks.credentials(move |url, user, allowed| {
@@ -233,26 +304,20 @@ fn callbacks<'a>(
                 // Use the user's Git configuration, without repository-local helpers.
                 Cred::credential_helper(&Config::open_default()?, destination.url.as_str(), user)
             }
-            Authentication::None if destination.url.scheme() == "ssh"
-                && allowed.contains(CredentialType::SSH_KEY)
+            Authentication::SshConfig(config)
+                if allowed.contains(CredentialType::SSH_KEY)
                 && user == Some(destination.url.username()) =>
             {
                 let username = destination.url.username();
-                if std::mem::take(&mut try_agent) {
+                if let Some(private_key) = keys.next() {
+                    return Cred::ssh_key(username, None, private_key, None);
+                }
+                if !config.identities_only && std::mem::take(&mut try_agent) {
                     if let Ok(credential) = Cred::ssh_key_from_agent(username) {
                         return Ok(credential);
                     }
                 }
-                if let Some(home) = std::env::home_dir() {
-                    let ssh = home.join(".ssh");
-                    for name in default_keys.by_ref() {
-                        let private_key = ssh.join(name);
-                        if private_key.is_file() {
-                            return Cred::ssh_key(username, None, &private_key, None);
-                        }
-                    }
-                }
-                Err(Error::from_str("no usable SSH agent identity or default SSH private key was found"))
+                Err(Error::from_str("no remaining SSH identity from the user's SSH configuration"))
             }
             Authentication::Https { username, token } if allowed.contains(CredentialType::USER_PASS_PLAINTEXT) => {
                 issued = true;

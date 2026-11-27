@@ -338,7 +338,7 @@ impl Tool for GitTool {
 
 fn execute_network(command: &str, arguments: &[String], writes: GitWrites, ctx: &ToolContext) -> ToolResult {
     use baudet_core::context::git_network_destination;
-    use baudet_core::git_network_transport::{CredentialConfig, run_staged, validate_branch};
+    use baudet_core::git_network_transport::{CredentialConfig, resolve_ssh_config, run_staged, validate_branch};
 
     if !ctx.read_granted || !ctx.write_granted || !ctx.exec_granted {
         return fail("pull and push require project Read, Write and Execute rights");
@@ -358,7 +358,10 @@ fn execute_network(command: &str, arguments: &[String], writes: GitWrites, ctx: 
         validate_branch(branch)?;
         let push = command == "push";
         let destination = git_network_destination(&root, remote, push)?;
-        let summary = format!("git {command} {branch} via {}", destination.address);
+        let ssh_config = (destination.url.scheme() == "ssh")
+            .then(|| resolve_ssh_config(&destination, &root)).transpose()?;
+        let resolved = ssh_config.as_ref().map_or(&destination, |config| &config.destination);
+        let summary = format!("git {command} {branch} via {}", resolved.address);
         let root_label = root.to_string_lossy();
         let pin = command_signature::workspace_pin("git-network", &root_label, &summary);
         if !(ctx.approve_command)(&summary, &root_label, TIMEOUT_SECONDS as u32, &pin) {
@@ -401,13 +404,13 @@ fn execute_network(command: &str, arguments: &[String], writes: GitWrites, ctx: 
             }
             *private_key = resolved;
         }
-        run_staged(staging_path, &destination, credentials, remote, branch, push)?;
+        run_staged(staging_path, resolved, credentials, ssh_config.as_ref(), remote, branch, push)?;
         if let Some(workspace) = pull_workspace {
             workspace.commit()?;
         }
         Ok(ToolResult {
             ok: true,
-            output: format!("git {command} completed for {branch} via {}", destination.address),
+            output: format!("git {command} completed for {branch} via {}", resolved.address),
             exit_code: Some(0),
             cwd: Some(root_label.into_owned()),
             ..Default::default()
