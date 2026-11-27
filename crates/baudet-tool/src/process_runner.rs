@@ -58,6 +58,34 @@ pub struct StartError {
     source: std::io::Error,
 }
 
+// Inherit only platform settings needed to find programs, user configuration and temp files.
+pub(crate) fn restrict_environment(command: &mut Command) {
+    const INHERITED: &[&str] = &[
+        "PATH", "HOME", "USERPROFILE", "SystemRoot", "WINDIR", "ComSpec", "PATHEXT",
+        "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+        "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "LC_CTYPE",
+    ];
+    command.env_clear();
+    for name in INHERITED {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn given_a_child_environment_with_an_app_secret_when_restricted_then_only_explicit_settings_can_restore_it() {
+    let mut command = Command::new("fixture");
+    command.env("BAUDET_TEST_SECRET", "ambient");
+    restrict_environment(&mut command);
+    assert!(!command.get_envs().any(|(key, _)| key == "BAUDET_TEST_SECRET"));
+    command.env("BAUDET_TEST_SECRET", "explicit");
+    assert!(command.get_envs().any(|(key, value)| {
+        key == "BAUDET_TEST_SECRET" && value.is_some_and(|value| value == "explicit")
+    }));
+}
+
 pub struct ProcessRunner;
 
 impl ProcessRunner {
@@ -75,6 +103,7 @@ impl ProcessRunner {
         let program = argv.first().copied().unwrap_or_default();
         let mut command = Command::new(program);
         command.args(&argv[1..]).current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        restrict_environment(&mut command);
         configure(&mut command);
         #[cfg(unix)]
         {
@@ -145,14 +174,14 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout_ms: u64) -> Option
     }
 }
 
-fn drain_thread<R: Read + Send + 'static>(reader: Option<R>, _label: &str) -> thread::JoinHandle<Captured> {
+pub(crate) fn drain_thread<R: Read + Send + 'static>(reader: Option<R>, _label: &str) -> thread::JoinHandle<Captured> {
     thread::spawn(move || match reader {
         Some(reader) => read_capped(Box::new(reader)),
         None => Captured::default(),
     })
 }
 
-fn collect_drain(handle: thread::JoinHandle<Captured>) -> Captured {
+pub(crate) fn collect_drain(handle: thread::JoinHandle<Captured>) -> Captured {
     // A descendant may still hold the pipe after the direct child exits.
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {

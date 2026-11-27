@@ -24,7 +24,7 @@ const TRUNCATION_SKELETON: &str = "\n\n[... output truncated: keeping the first 
 const MAX_ITERATIONS_REASON: &str = "max_tool_iterations";
 
 pub const BLANK_NUDGE: &str = "Your previous turn returned neither an answer nor a tool call. If you intend to use a tool, emit the call now; otherwise reply with your final answer.";
-const ACTION_NUDGE: &str = "Use a tool now if an action is still needed. Otherwise provide the answer or explain what blocked you, and end with the prescribed final marker.";
+const ACTION_NUDGE: &str = "Your previous response contained no executable tool call. If you announced an action that still needs to run, emit the actual tool call with its arguments now, without another announcement. If no action is needed or you are blocked, give your final answer and end with the prescribed final marker.";
 pub const MISSING_COMPLETION: &str = "The model did not provide a tool call or mark its final answer.";
 pub const FINAL_DONE: &str = "[[BAUDET_DONE]]";
 pub const FINAL_BLOCKED: &str = "[[BAUDET_BLOCKED]]";
@@ -1455,6 +1455,30 @@ mod tests {
         assert_eq!(final_text, "Beide bronnen gelezen.");
         assert_eq!(steps.iter().flat_map(|step| &step.results).map(|result| result.output.as_str())
             .collect::<Vec<_>>(), ["(read_file first.txt)", "(read_file second.txt)"]);
+    }
+
+    #[tokio::test]
+    async fn given_an_announced_commit_when_the_retry_calls_git_then_the_commit_call_runs() {
+        let registry = ToolRegistry::new(vec![Box::new(StubTool::new("git"))]);
+        let announcement = "Ik commit de gestagede bestanden.";
+        let arguments = json!({"command": "commit", "message": "Document workspace approval"});
+        let source = source(vec![
+            StubSource::prose(announcement),
+            StubSource::calls_for("", &[("git", arguments.clone())]),
+            StubSource::prose(format!("De commit is gemaakt.\n{FINAL_DONE}")),
+        ]);
+
+        let (outcome, _) = drive(
+            &registry, &source, &[Msg::user("Commit de gestagede bestanden")], &ctx(), 4,
+            |loop_| loop_.require_completion(true),
+        ).await;
+
+        let LoopOutcome::Completed { final_turn, steps, .. } = outcome else {
+            panic!("the commit should complete");
+        };
+        assert_eq!(final_turn.incomplete_reason, None);
+        assert_eq!(steps[0].calls[0].arguments, arguments);
+        assert_eq!(steps[0].results[0].output, "(git -)");
     }
 
     #[tokio::test]

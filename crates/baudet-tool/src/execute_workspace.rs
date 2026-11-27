@@ -22,6 +22,9 @@ impl ExecuteWorkspace {
     }
 
     pub fn temp_dir() -> Option<PathBuf> {
+        #[cfg(windows)]
+        let claimed = std::env::temp_dir();
+        #[cfg(not(windows))]
         let claimed = std::env::var_os("TMPDIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
         let real = fs::canonicalize(claimed).ok()?;
         if !real.is_dir() || !is_writable(&real) {
@@ -56,6 +59,7 @@ fn is_writable(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     #[test]
@@ -73,6 +77,7 @@ mod tests {
         assert_eq!(ExecuteWorkspace::project_dir(&dir.path().join("er-niet")), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlinked_project_resolves_to_the_real_folder() {
         let echt = tempfile::tempdir().unwrap();
@@ -106,6 +111,7 @@ mod tests {
         fs::remove_file(&script).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_check_compares_the_real_path_so_a_link_out_of_the_temp_is_visible_as_such() {
         let temp = ExecuteWorkspace::temp_dir().unwrap();

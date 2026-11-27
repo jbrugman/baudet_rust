@@ -19,3 +19,10 @@ pub mod tool;
 pub mod tool_loop;
 pub mod transcript;
 pub mod turn_source;
+
+#[cfg(windows)]
+#[doc(hidden)]
+pub mod windows_appcontainer;
+
+#[cfg_attr(windows, doc(hidden))]
+pub mod windows_workspace;

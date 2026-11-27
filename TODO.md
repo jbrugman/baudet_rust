@@ -9,13 +9,18 @@ For each implementation prompt, check all affected usages first, keep the diff m
 
 ## P2 — Workspace security
 
-- [ ] Enforce project permissions in the Git and file tools.
-      Keep writes inside the project folder even when a path changes during an operation.
-      **Prompt:** In `edit_file`, bind project containment, the preview content check, and the write to the same securely opened file. Apply the same containment guarantees to undo. Verify that changes to the target or its parent path cannot redirect a write outside the project.
-- [ ] Review which environment variables Git, MCP, and other command runners inherit.
+- [x] Enforce project permissions in the Git and file tools.
+      Project access levels are Read, Read + Write, and Read + Write + Execute.
+      File tools enforce the required grants and use project-relative handles. Edit and Undo check the target identity and content before writing. The Git tool checks repository containment and runs available local commands in the macOS, Linux, or Windows workspace sandbox, with read-only access for Git reads.
+- [x] Review which environment variables Git, MCP, and other command runners inherit.
       Pass app secrets only when explicitly configured for that integration.
       **Prompt:** Inventory the environment inherited by shell, Git, and MCP child processes. Limit secret forwarding to integrations explicitly configured to receive those secrets. Verify that normal command and server startup still work.
-- [ ] Implement and verify Windows workspace isolation before enabling shell commands without individual approval.
+- [x] Implement and verify Windows workspace isolation.
+      Windows project shell and local Git commands run in an AppContainer with a temporary project copy. Successful writable commands write back after conflict and junction checks. Verified end to end in Wintest on Windows 11 ARM64, including x64 test binaries under emulation.
+- [x] Add and verify an isolated network route for Git pull and push.
+      Require Read + Write + Execute, explicit approval of the resolved remote, and credentials scoped to its URL. SSH remotes require an explicit username in both URL and SCP notation. HTTPS token and SSH key authentication were verified end to end against temporary Linux test remotes for both pull and push.
+- [ ] Recover interrupted project writeback automatically.
+      A backup manifest records the original paths before writeback. Restore interrupted updates without overwriting independent edits or trusting a manifest supplied by the project. Verify recovery after forced termination.
 
 ## P3 — Reliability and storage
 

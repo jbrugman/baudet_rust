@@ -40,9 +40,6 @@ jobs:
             libdbus-1-dev libegl-dev libgles-dev libseccomp-dev libinput-dev
 
       # rustup/darwin staat al op de runner; rust-toolchain.toml selects 1.95.0 + clippy + rustfmt.
-      - name: Workspace-tests
-        run: cargo test --workspace --locked --no-fail-fast
-
       - name: Prepare Bubblewrap for Linux workspace isolation
         run: |
           profile=/etc/apparmor.d/bwrap-userns-restrict
@@ -53,7 +50,26 @@ jobs:
           /usr/bin/bwrap --unshare-user --disable-userns --unshare-pid --unshare-net \
             --unshare-ipc --unshare-uts --ro-bind / / -- /bin/true
 
+      - name: Workspace-tests
+        run: cargo test --workspace --locked --no-fail-fast
+
       - name: Linux workspace isolation
         env:
           BAUDET_WORKSPACE_TEST_SECRET: fixture
         run: cargo test --workspace --locked workspace_enforces_project_permissions_without_command_approval -- --ignored
+
+  windows-isolation:
+    strategy:
+      matrix:
+        runner: [windows-2022, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Windows workspace commands require project rights
+        run: cargo test --locked -p baudet-tool given_windows_without_write_access
+      - name: Windows AppContainer process
+        run: cargo test --locked -p baudet-tool --test windows_appcontainer
+      - name: Windows workspace snapshot
+        run: cargo test --locked -p baudet-tool --lib windows_workspace::tests
+      - name: Windows isolated Git
+        run: cargo test --locked -p baudet-tool --lib given_windows_git_write_rights

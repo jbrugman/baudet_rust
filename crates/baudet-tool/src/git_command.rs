@@ -5,7 +5,8 @@ use std::path::Path;
 const READ_ONLY: [&str; 9] =
     ["status", "diff", "diff_staged", "log", "show", "branch", "ls_files", "rev_parse", "blame"];
 
-const WRITE: [&str; 5] = ["add", "commit", "checkout", "stash", "push"];
+const WRITE: [&str; 4] = ["add", "commit", "checkout", "stash"];
+const NETWORK: [&str; 2] = ["pull", "push"];
 
 const STASH_SUBS: [&str; 5] = ["push", "pop", "apply", "save", "list"];
 
@@ -16,13 +17,13 @@ pub enum GitWrites {
 }
 
 pub fn is_write(command: &str) -> bool {
-    WRITE.contains(&command)
+    WRITE.contains(&command) || NETWORK.contains(&command)
 }
 
 pub fn advertised(writes: GitWrites) -> Vec<&'static str> {
     match writes {
         GitWrites::Disabled => READ_ONLY.to_vec(),
-        GitWrites::Enabled => READ_ONLY.into_iter().chain(WRITE).collect(),
+        GitWrites::Enabled => READ_ONLY.into_iter().chain(WRITE).chain(NETWORK).collect(),
     }
 }
 
@@ -32,6 +33,14 @@ pub fn check_allowed(command: &str, args: &[String], writes: GitWrites, message:
     }
     if READ_ONLY.contains(&command) {
         return check_read_only(command, args);
+    }
+    if NETWORK.contains(&command) {
+        return match (writes, args) {
+            (GitWrites::Enabled, [remote, branch])
+                if !remote.is_empty() && !remote.starts_with('-') && !branch.is_empty() && !branch.starts_with('-') => None,
+            (GitWrites::Disabled, _) => Some("git: pull and push require project Read, Write and Execute rights".into()),
+            _ => Some("git: supply exactly one configured remote name and one branch".into()),
+        };
     }
     if WRITE.contains(&command) {
         if writes == GitWrites::Disabled {
@@ -110,18 +119,6 @@ fn check_write(command: &str, args: &[String], message: Option<&str>) -> Option<
                 None
             }
         }
-        "push" => {
-            if !flags.is_empty() {
-                Some(
-                    "git: push takes no flags here, so it cannot force; pass only an optional remote and branch."
-                        .to_owned(),
-                )
-            } else if positional.len() > 2 {
-                Some("git: push takes at most a remote and a branch.".to_owned())
-            } else {
-                None
-            }
-        }
         _ => Some(format!("git: '{command}' is not an offered write.")),
     }
 }
@@ -168,7 +165,6 @@ fn base(command: &str, message: Option<&str>) -> Vec<String> {
         "commit" => &["commit", "-m"],
         "checkout" => &["checkout"],
         "stash" => &["stash"],
-        "push" => &["push"],
         _ => &[],
     };
     let mut out: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
@@ -204,10 +200,8 @@ mod tests {
     fn every_advertised_verb_is_read_only_until_writes_are_on() {
         assert_eq!(advertised(GitWrites::Disabled).len(), 9);
         assert_eq!(advertised(GitWrites::Disabled).last().copied(), Some("blame"));
-        assert_eq!(advertised(GitWrites::Enabled).len(), 14);
-        assert_eq!(advertised(GitWrites::Enabled).last().copied(), Some("push"));
         for verb in advertised(GitWrites::Enabled) {
-            assert_eq!(is_write(verb), WRITE.contains(&verb), "{verb}");
+            assert_eq!(is_write(verb), !advertised(GitWrites::Disabled).contains(&verb), "{verb}");
         }
         assert!(is_write("commit"));
         assert!(!is_write("status"));
@@ -334,21 +328,6 @@ mod tests {
             "git: stash takes a single subcommand."
         );
         assert!(waarom("stash", &["-u"], GitWrites::Enabled, None).contains("not allowed"));
-    }
-
-    #[test]
-    fn push_cannot_be_forced() {
-        assert!(ok("push", &[], GitWrites::Enabled, None));
-        assert!(ok("push", &["origin"], GitWrites::Enabled, None));
-        assert!(ok("push", &["origin", "main"], GitWrites::Enabled, None));
-        for flag in ["-f", "--force", "--force-with-lease", "-u"] {
-            let why = waarom("push", &[flag], GitWrites::Enabled, None);
-            assert!(why.contains("cannot force"), "{flag}: {why}");
-        }
-        assert_eq!(
-            waarom("push", &["origin", "main", "extra"], GitWrites::Enabled, None),
-            "git: push takes at most a remote and a branch."
-        );
     }
 
     #[test]

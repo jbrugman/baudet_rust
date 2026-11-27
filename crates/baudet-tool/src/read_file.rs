@@ -2,6 +2,7 @@
 use crate::folder_boundary::{FolderBoundary, Resolved};
 use crate::tool::{Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
+use std::io::Read;
 
 const MAX_FILE_BYTES: u64 = 1_000_000;
 
@@ -40,20 +41,41 @@ impl Tool for ReadFileTool {
         let Some(root) = ctx.root.as_deref() else {
             return fail("no project folder is linked to read from");
         };
+        if !ctx.read_granted {
+            return fail("the project does not grant the Read right");
+        }
         let resolved = match FolderBoundary::resolve_file_within(root, rel) {
             Resolved::Inside(path) => path,
             Resolved::Refused(reason) => return fail(reason),
         };
 
-        let Ok(size) = std::fs::metadata(&resolved).map(|m| m.len()) else {
+        let opened = (|| {
+            let root = root.canonicalize()?;
+            let dir = cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority())?;
+            let canonical = resolved.canonicalize()?;
+            let relative = canonical.strip_prefix(root).map_err(std::io::Error::other)?;
+            dir.open(relative)
+        })();
+        let Ok(file) = opened else {
             return fail(format!("{rel} could not be read"));
         };
-        if size > MAX_FILE_BYTES {
-            return fail(format!("{rel} is larger than the {} KB read limit", MAX_FILE_BYTES / 1024));
+        let Ok(metadata) = file.metadata() else {
+            return fail(format!("{rel} could not be read"));
+        };
+        if !metadata.is_file() {
+            return fail(format!("{rel} is not a regular file"));
         }
-        let Ok(bytes) = std::fs::read(&resolved) else {
+        let too_large = || fail(format!("{rel} is larger than the {} KB read limit", MAX_FILE_BYTES / 1024));
+        if metadata.len() > MAX_FILE_BYTES {
+            return too_large();
+        }
+        let mut bytes = Vec::new();
+        if file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes).is_err() {
             return fail(format!("{rel} could not be read"));
-        };
+        }
+        if bytes.len() as u64 > MAX_FILE_BYTES {
+            return too_large();
+        }
         if bytes.contains(&0) {
             return fail(format!("{rel} looks like a binary file and is not shown"));
         }
@@ -96,6 +118,16 @@ mod tests {
 
         let no_folder = ReadFileTool.execute(&json!({"file": "a.txt"}), &ctx);
         assert_eq!(no_folder.output, "read_file: no project folder is linked to read from");
+    }
+
+    #[test]
+    fn given_a_project_file_without_read_permission_when_read_is_requested_then_its_contents_stay_private() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "private note").unwrap();
+        let context = ToolContext::for_folder(dir.path(), false, true, false);
+        let result = ReadFileTool.execute(&json!({"file": "notes.txt"}), &context);
+        assert!(!result.ok);
+        assert_eq!(result.output, "read_file: the project does not grant the Read right");
     }
 
     #[test]
@@ -174,7 +206,7 @@ mod tests {
     fn reading_needs_no_write_right_and_asks_nothing() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.txt"), "inhoud").unwrap();
-        let ctx = ToolContext { root: Some(dir.path().to_path_buf()), ..Default::default() };
+        let ctx = ToolContext::for_folder(dir.path(), true, false, false);
         let result = ReadFileTool.execute(&json!({"file": "a.txt"}), &ctx);
         assert!(result.ok, "lezen vraagt niets: {}", result.output);
     }

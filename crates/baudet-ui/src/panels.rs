@@ -440,6 +440,12 @@ fn permission_boxes(ui: &mut Ui, state: &PermissionState, model: &mut SidebarMod
         ui.style_mut().visuals.widgets = previous;
     });
     if (read, write, execute) != (state.read, state.write, state.execute) {
+        if !read && state.read {
+            write = false;
+            execute = false;
+        } else if !write && state.write {
+            execute = false;
+        }
         let _ = model.set_permissions(read, write, execute);
     }
 }

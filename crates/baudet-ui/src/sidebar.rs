@@ -207,10 +207,10 @@ impl SidebarModel {
         match path {
             None => self.catalog.set_folder(project_id, None, 0),
             Some(path) => {
-                let bits = if project.permissions == 0 {
-                    Permissions::encode([FolderPermission::Read])
-                } else {
+                let bits = if project.folder_path.as_deref() == Some(path.trim()) {
                     project.permissions
+                } else {
+                    Permissions::encode([FolderPermission::Read])
                 };
                 self.catalog.set_folder(project_id, Some(path), bits)
             }
@@ -224,12 +224,15 @@ impl SidebarModel {
             None => return Ok(()),
         };
         let Some(path) = project.folder_path else { return Ok(()) };
-        let mut bits = 0;
-        for (granted, permission) in
-            [(read, FolderPermission::Read), (write, FolderPermission::Write), (execute, FolderPermission::Execute)]
-        {
-            bits = Permissions::with(bits, permission, granted);
-        }
+        let bits = if execute {
+            Permissions::encode([FolderPermission::Execute])
+        } else if write {
+            Permissions::encode([FolderPermission::Write])
+        } else if read {
+            Permissions::encode([FolderPermission::Read])
+        } else {
+            0
+        };
         self.catalog.set_folder(&project.id, Some(&path), bits).map_err(|error| error.to_string())
     }
 

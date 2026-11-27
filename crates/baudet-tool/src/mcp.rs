@@ -24,8 +24,9 @@ struct Client {
 
 impl Client {
     fn start(config: &McpServerConfig, cancelled: &AtomicBool) -> Result<Self, String> {
-        let mut child = Command::new(&config.command)
-            .args(&config.args)
+        let mut command = Command::new(&config.command);
+        crate::process_runner::restrict_environment(&mut command);
+        let mut child = command.args(&config.args)
             .envs(&config.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

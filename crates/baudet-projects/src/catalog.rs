@@ -112,7 +112,7 @@ impl Catalog {
         let mut state = self.lock();
         let project = Self::project_mut(&mut state.data, id)?;
         project.folder_path = path.map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
-        project.permissions = permissions;
+        project.permissions = crate::permissions::Permissions::normalize(permissions);
         self.write(&mut state)
     }
 

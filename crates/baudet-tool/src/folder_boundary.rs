@@ -113,6 +113,7 @@ mod tests {
         assert!(matches!(FolderBoundary::resolve_file_within(dir.path(), "sub"), Resolved::Refused(_)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlink_to_a_file_outside_the_folder_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -128,6 +129,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlink_to_a_directory_outside_is_refused_too() {
         let dir = tempfile::tempdir().unwrap();
@@ -142,6 +144,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlink_staying_inside_the_folder_still_works() {
         let dir = tempfile::tempdir().unwrap();
@@ -151,6 +154,7 @@ mod tests {
         assert!(matches!(FolderBoundary::resolve_file_within(dir.path(), "in.txt"), Resolved::Inside(_)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn real_within_needs_both_ends_to_resolve() {
         let dir = tempfile::tempdir().unwrap();

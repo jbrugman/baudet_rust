@@ -3,6 +3,7 @@
 pub mod context;
 pub mod error;
 pub mod event;
+pub mod git_network_transport;
 pub mod item;
 pub mod mcp;
 pub mod model_windows;

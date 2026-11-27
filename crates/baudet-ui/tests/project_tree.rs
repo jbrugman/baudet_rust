@@ -279,7 +279,7 @@ fn de_rechtenvakjes_volgen_de_bits_van_de_catalogus() {
 }
 
 #[test]
-fn een_wissel_van_map_houdt_de_rechten_die_er_stonden() {
+fn given_execute_access_when_switching_folders_then_only_read_is_granted() {
     let (_guard, _home, mut model) = model_in_tempdir();
     let project = model.add_project("Wissel").unwrap();
     model.link_folder(&project.id, Some("/tmp")).unwrap();
@@ -288,8 +288,8 @@ fn een_wissel_van_map_houdt_de_rechten_die_er_stonden() {
     let stored = stored(&model, &project.id);
     assert_eq!(
         stored.permissions,
-        Permissions::encode([FolderPermission::Read, FolderPermission::Write, FolderPermission::Execute]),
-        "de wissel poetste de rechten weg"
+        Permissions::encode([FolderPermission::Read]),
+        "de nieuwe map mag alleen leesrechten krijgen"
     );
     assert_eq!(stored.folder_path.as_deref(), Some("/var/tmp"), "de wissel zette het pad niet");
 }

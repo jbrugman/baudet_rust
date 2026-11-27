@@ -22,7 +22,7 @@ pub struct ExecuteTool {
 
 impl ExecuteTool {
     pub fn for_project(git: GitTool) -> Self {
-        Self { workspace: cfg!(any(target_os = "macos", target_os = "linux")), git }
+        Self { workspace: true, git }
     }
 }
 
@@ -37,6 +37,9 @@ impl Tool for ExecuteTool {
 
     fn description(&self) -> &str {
         if self.workspace {
+            #[cfg(windows)]
+            return "Run a Windows cmd.exe command in the isolated project copy. Successful changes are written to the project. Returns stdout, stderr and the exit code.";
+            #[cfg(not(windows))]
             return "Run a shell command within the project sandbox and its granted permissions. Returns stdout, stderr and the exit code.";
         }
         "Run a shell command (bash; python or other interpreters may be invoked from it) \
@@ -60,7 +63,7 @@ impl Tool for ExecuteTool {
     }
 
     fn can_run_parallel(&self, args: &Value, ctx: &ToolContext) -> bool {
-        ctx.auto_approve_safe && args.get("command").and_then(Value::as_str).is_some_and(|command| {
+        !cfg!(target_os = "windows") && ctx.auto_approve_safe && args.get("command").and_then(Value::as_str).is_some_and(|command| {
             safe_commands::is_safe(command) && crate::git_tool::shell_git_calls(command).is_none()
         })
     }
@@ -75,17 +78,36 @@ impl Tool for ExecuteTool {
         if let Some(result) = self.git.execute_shell(command, ctx) {
             return result;
         }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        if self.workspace {
+            return fail("workspace isolation is unavailable on this platform");
+        }
         let Some(root) = ctx.root.as_deref() else {
             return fail("no project folder is linked to run in");
         };
         let Some(cwd) = ExecuteWorkspace::project_dir(root) else {
             return fail("the project folder is not an existing directory");
         };
+        let timeout = timeout_arg(args).unwrap_or(DEFAULT_TIMEOUT_SECONDS).clamp(1, MAX_TIMEOUT_SECONDS);
+        #[cfg(windows)]
+        if self.workspace {
+            if !ctx.read_granted || !ctx.write_granted {
+                return fail("Windows project shell requires Read, Write and Execute rights");
+            }
+            let outcome = crate::windows_appcontainer::system_cmd().and_then(|exe| {
+                crate::windows_appcontainer::run_project(
+                    &cwd, true, &exe, &format!("cmd.exe /d /s /c \"{command}\""), (timeout * 1000) as u32,
+                )
+            });
+            return match outcome {
+                Ok(outcome) => command_result(outcome, &cwd, timeout),
+                Err(error) => fail(format!("Windows workspace sandbox: {error}")),
+            };
+        }
+
         let Some(temp) = ExecuteWorkspace::temp_dir() else {
             return fail("no writable temp folder is available to stage the run");
         };
-
-        let timeout = timeout_arg(args).unwrap_or(DEFAULT_TIMEOUT_SECONDS).clamp(1, MAX_TIMEOUT_SECONDS);
 
         if !self.workspace {
             let cwd = cwd.to_string_lossy();
@@ -93,9 +115,11 @@ impl Tool for ExecuteTool {
             let allowed = ctx.auto_allow();
             let trusted = command_signature::pinned(command);
             let family = command_signature::trusted_entry(command);
-            let pre_approved = allowed.contains(&pin) || allowed.contains(&trusted)
+            let pre_approved = !cfg!(target_os = "windows") && (
+                allowed.contains(&pin) || allowed.contains(&trusted)
                 || (ctx.auto_approve_safe && safe_commands::is_safe(command))
-                || family.as_deref().is_some_and(|key| ctx.trusted_commands().iter().any(|t| t == key));
+                || family.as_deref().is_some_and(|key| ctx.trusted_commands().iter().any(|t| t == key))
+            );
 
             if !pre_approved && !(ctx.approve_command)(command, &cwd, timeout as u32, &pin) {
                 return fail("the user declined to run this command");
@@ -115,41 +139,42 @@ impl Tool for ExecuteTool {
             Ok(path) => path,
             Err(reason) => return fail(reason),
         };
-        #[cfg(target_os = "macos")]
         let outcome = if self.workspace {
-            run_in_workspace(&script, &cwd, temp, timeout, ctx)
-                .ok_or_else(|| "could not start the macOS workspace sandbox".to_owned())
+            #[cfg(target_os = "linux")]
+            let script_arg = script.file_name().and_then(|name| name.to_str()).map(|name| format!("/tmp/{name}"));
+            #[cfg(not(target_os = "linux"))]
+            let script_arg = script.to_str().map(str::to_owned);
+            match script_arg {
+                Some(script_arg) => run_sandboxed(&["/bin/bash", &script_arg], &cwd, temp, timeout, ctx.read_granted, ctx.write_granted, |_| {}),
+                None => Err(command_start_error()),
+            }
         } else {
             run_staged(&script, &cwd, temp, timeout).ok_or_else(command_start_error)
         };
-        #[cfg(target_os = "linux")]
-        let outcome = if self.workspace {
-            run_in_linux_workspace(&script, &cwd, temp, timeout, ctx)
-        } else {
-            run_staged(&script, &cwd, temp, timeout).ok_or_else(command_start_error)
-        };
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        let outcome = run_staged(&script, &cwd, temp, timeout).ok_or_else(command_start_error);
         fs::remove_file(&script).ok();
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(reason) => return fail(&reason),
         };
 
-        let head = match outcome.exit_code {
-            Some(code) => format!("exit code: {code}"),
-            None if outcome.timed_out => format!("run_command timed out after {timeout}s (no exit code)"),
-            None => "run_command terminated without an exit code".to_owned(),
-        };
-        ToolResult {
-            ok: !outcome.timed_out && outcome.exit_code == Some(0),
-            output: head + &outcome.body(),
-            exit_code: outcome.exit_code,
-            timed_out: outcome.timed_out,
-            duration_ms: outcome.duration_ms,
-            cwd: Some(cwd.to_string_lossy().into_owned()),
-            ..Default::default()
-        }
+        command_result(outcome, &cwd, timeout)
+    }
+}
+
+fn command_result(outcome: crate::process_runner::ProcessOutcome, cwd: &Path, timeout: u64) -> ToolResult {
+    let head = match outcome.exit_code {
+        Some(code) => format!("exit code: {code}"),
+        None if outcome.timed_out => format!("run_command timed out after {timeout}s (no exit code)"),
+        None => "run_command terminated without an exit code".to_owned(),
+    };
+    ToolResult {
+        ok: !outcome.timed_out && outcome.exit_code == Some(0),
+        output: head + &outcome.body(),
+        exit_code: outcome.exit_code,
+        timed_out: outcome.timed_out,
+        duration_ms: outcome.duration_ms,
+        cwd: Some(cwd.to_string_lossy().into_owned()),
+        ..Default::default()
     }
 }
 
@@ -187,13 +212,15 @@ fn run_staged(script: &Path, cwd: &Path, temp: &Path, timeout: u64) -> Option<cr
 }
 
 #[cfg(target_os = "macos")]
-fn run_in_workspace(
-    script: &Path,
+pub(crate) fn run_sandboxed(
+    command: &[&str],
     cwd: &Path,
     temp: &Path,
     timeout: u64,
-    ctx: &ToolContext,
-) -> Option<crate::process_runner::ProcessOutcome> {
+    read_granted: bool,
+    write_granted: bool,
+    configure: impl FnOnce(&mut std::process::Command),
+) -> Result<crate::process_runner::ProcessOutcome, String> {
     let mut profile = String::from(
         r#"(version 1)
 (deny default)
@@ -208,52 +235,50 @@ fn run_in_workspace(
     (subpath "/usr/bin")
     (literal "/dev/null")
     (literal "/dev/urandom")
+    (literal (param "PROGRAM"))
     (subpath (param "TEMP")))
 (allow file-write* (subpath (param "TEMP")) (literal "/dev/null"))
 "#,
     );
-    if ctx.read_granted {
+    if read_granted {
         profile.push_str("(allow file-read-data (subpath (param \"PROJECT\")))\n");
     }
-    if ctx.write_granted {
+    if write_granted {
         profile.push_str("(allow file-write* (subpath (param \"PROJECT\")))\n");
     }
-    let project_param = format!("PROJECT={}", cwd.to_str()?);
-    let temp_param = format!("TEMP={}", temp.to_str()?);
-    let argv = [
-        "/usr/bin/sandbox-exec",
-        "-D",
-        &project_param,
-        "-D",
-        &temp_param,
-        "-p",
-        &profile,
-        "/bin/bash",
-        script.to_str()?,
+    let cwd_param = cwd.to_str().ok_or_else(command_start_error)?;
+    let temp_param = temp.to_str().ok_or_else(command_start_error)?;
+    let project_param = format!("PROJECT={cwd_param}");
+    let temp_param = format!("TEMP={temp_param}");
+    let program_param = format!("PROGRAM={}", command.first().ok_or_else(command_start_error)?);
+    let mut argv = vec![
+        "/usr/bin/sandbox-exec", "-D", &project_param, "-D", &temp_param, "-D", &program_param, "-p", &profile,
     ];
+    argv.extend_from_slice(command);
     ProcessRunner::run_with(&argv, cwd, Duration::from_secs(timeout), |command| {
         command.env_clear().env("PATH", "/usr/bin:/bin").env("HOME", temp).env("TMPDIR", temp);
+        configure(command);
     })
-    .ok()
+    .map_err(|error| format!("could not start the macOS workspace sandbox: {error}"))
 }
 
 #[cfg(target_os = "linux")]
-fn run_in_linux_workspace(
-    script: &Path,
+pub(crate) fn run_sandboxed(
+    command: &[&str],
     cwd: &Path,
     temp: &Path,
     timeout: u64,
-    ctx: &ToolContext,
+    read_granted: bool,
+    write_granted: bool,
+    configure: impl FnOnce(&mut std::process::Command),
 ) -> Result<crate::process_runner::ProcessOutcome, String> {
     let (Some(project_path), Some(temp_path)) = (cwd.to_str(), temp.to_str()) else {
         return Err("Linux workspace paths must be valid UTF-8".into());
     };
-    if ctx.write_granted && !ctx.read_granted {
+    if write_granted && !read_granted {
         return Err("Linux workspace shell writes also require project Read permission".into());
     }
 
-    let script_name = script.file_name().and_then(|name| name.to_str()).ok_or_else(command_start_error)?;
-    let sandbox_script = format!("/tmp/{script_name}");
     let mut argv = vec![
         "/usr/bin/bwrap",
         "--unshare-user", "--disable-userns", "--unshare-pid", "--unshare-net",
@@ -267,17 +292,32 @@ fn run_in_linux_workspace(
         "--proc", "/proc",
         "--bind", temp_path, "/tmp",
     ];
-    if ctx.read_granted {
-        let mount = if ctx.write_granted { "--bind" } else { "--ro-bind" };
+    if read_granted {
+        let mount = if write_granted { "--bind" } else { "--ro-bind" };
         argv.extend([mount, project_path, "/workspace"]);
     } else {
         argv.extend(["--dir", "/workspace"]);
     }
-    argv.extend(["--chdir", "/workspace", "--", "/bin/bash", &sandbox_script]);
+    argv.extend(["--chdir", "/workspace", "--"]);
+    argv.extend_from_slice(command);
     ProcessRunner::run_with(&argv, cwd, Duration::from_secs(timeout), |command| {
         command.env_clear().env("PATH", "/usr/bin:/bin").env("HOME", "/tmp").env("TMPDIR", "/tmp");
+        configure(command);
     })
     .map_err(|error| format!("could not start the Linux workspace sandbox (install Bubblewrap): {error}"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub(crate) fn run_sandboxed(
+    _command: &[&str],
+    _cwd: &Path,
+    _temp: &Path,
+    _timeout: u64,
+    _read_granted: bool,
+    _write_granted: bool,
+    _configure: impl FnOnce(&mut std::process::Command),
+) -> Result<crate::process_runner::ProcessOutcome, String> {
+    Err("workspace isolation is unavailable on this platform".into())
 }
 
 fn timeout_arg(args: &Value) -> Option<u64> {
@@ -323,6 +363,28 @@ mod tests {
 
     fn run(args: Value, ctx: &ToolContext) -> ToolResult {
         ExecuteTool::default().execute(&args, ctx)
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn given_windows_without_write_access_when_a_project_command_is_requested_then_it_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let approvals = recorder(true);
+        let result = ExecuteTool::for_project(GitTool::default())
+            .execute(&json!({"command": "echo test"}), &ctx(dir.path(), &approvals, true));
+        assert!(!result.ok);
+        assert_eq!(result.output, "run_command: Windows project shell requires Read, Write and Execute rights");
+        assert!(approvals.asked.lock().unwrap().is_empty());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn given_an_unisolated_windows_workspace_when_a_safe_command_is_requested_then_it_still_needs_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let approvals = recorder(false);
+        let result = ExecuteTool::default().execute(&json!({"command": "ls"}), &ctx(dir.path(), &approvals, true));
+        assert!(!result.ok);
+        assert_eq!(approvals.asked.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -509,8 +571,9 @@ mod tests {
         let context = ctx(dir.path(), &rec, true);
         assert_eq!(ExecuteTool::default().item_kind(), ItemKind::CommandExecution);
         assert!(
-            ExecuteTool::default().can_run_parallel(&json!({"command": "ls"}), &context),
-            "bewezen lezen mag naast zijn buren"
+            ExecuteTool::default().can_run_parallel(&json!({"command": "ls"}), &context)
+                == !cfg!(target_os = "windows"),
+            "zonder isolatie op Windows vraagt ook een leescommando individuele goedkeuring"
         );
         assert!(
             !ExecuteTool::default().can_run_parallel(&json!({"command": "rm -r iets"}), &context),

@@ -112,7 +112,7 @@ impl AppState {
             tools.push(Box::new(ReadFileTool));
             tools.push(Box::new(git));
         }
-        if write {
+        if read && write {
             tools.push(Box::new(EditFileTool));
         }
         if exec {

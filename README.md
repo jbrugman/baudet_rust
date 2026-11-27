@@ -29,18 +29,46 @@ Project permissions give the model a defined workspace for reading, editing, and
 - The file tree and Git changes refresh when files change on disk.
   Double-click a file to open its diff or preview.
 - Model-driven file reads and edits, Git operations, shell commands, and MCP servers over stdio.
-- Project shell commands use Seatbelt on macOS and Bubblewrap on Linux.
+
+- Project shell commands use Seatbelt on macOS, Bubblewrap on Linux, and AppContainer on Windows.
+  With Execute permission, workspace shell commands run inside the sandbox without a per-command approval prompt.
   MCP uses its own approval rules.
 
 **What's still open**
 
 - Reasoning controls, server-side sessions, and tool calls depend on support from the model server.
 - The packaged apps still need a launch check on all three platforms.
-  Windows workspace isolation and approval for extra folders or network access from the shell are still open.
+  Approval for extra folders or general network access from the shell is still open.
 - The diff viewer supports inspection.
   Source edits are made through the file tool or an external editor.
 
 See [TODO.md](TODO.md) for the remaining work and verification steps.
+
+### Git network access
+
+For `git pull` and `git push`, link a repository folder with Read, Write, and Execute permissions. Supply the configured remote name and the checked-out branch, for example `git pull origin main`. Baudet asks for approval for the resolved HTTPS or SSH destination each time. Pull requires a clean working tree and a fast-forward. Push updates one branch without force.
+
+Set `BAUDET_GIT_AUTH_FILE` in Baudet's launch environment to an absolute JSON file outside the project. Use the complete remote URL as the key. Refer to credentials by environment variable or key path:
+
+```json
+{
+  "https://git.example.org/team/project.git": {
+    "transport": "https",
+    "username": "my-user",
+    "token_env": "MY_PROJECT_GIT_TOKEN"
+  },
+  "ssh://git@git.example.org/team/project.git": {
+    "transport": "ssh",
+    "username": "git",
+    "private_key": "/absolute/path/to/project-key",
+    "passphrase_env": "MY_PROJECT_SSH_PASSPHRASE"
+  }
+}
+```
+
+Public HTTPS repositories can be read without a credential entry. Keep SSH keys outside the linked project and omit `passphrase_env` for an unencrypted key. SSH requires the remote host key to be present in the user's `known_hosts`. An SCP-style remote such as `git@git.example.org:team/project.git` uses the corresponding `ssh://` key shown above for credential lookup.
+
+Network operations use a temporary copy of a standalone repository, limited to 256 MiB and 40,000 entries. Linked worktrees, sparse checkouts, and projects containing filesystem links are refused.
 
 ## Quick start
 

@@ -1,9 +1,11 @@
 
 use crate::command_signature;
 use crate::git_command::{self, GitWrites};
+#[cfg(target_os = "macos")]
 use crate::process_runner::ProcessRunner;
 use crate::tool::{Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 const TIMEOUT_SECONDS: u64 = 15;
@@ -149,10 +151,10 @@ impl Tool for GitTool {
         if self.writes_allowed() {
             "Run a git command in the project repository. Read-only commands: status, diff, \
              diff_staged, log, show, branch, ls_files, rev_parse, blame. Write commands: add, \
-             commit, checkout, stash, push -- each runs only after the user approves it. For \
+             commit, checkout, stash -- each runs only after the user approves it. For \
              add, pass the paths in args; for commit, pass the message in the message field; for \
              checkout, one branch (optionally with -b to create it); for stash, one of push, pop, \
-             apply, save or list; for push, an optional remote and branch. Returns stdout, stderr and the exit code."
+             apply, save or list. For pull (fast-forward only) or push, pass the configured remote name and checked-out branch in args. Network commands require Read, Write, Execute and separate approval. Returns command output and status."
         } else {
             "Run a read-only git command in the project repository. Available commands: \
              status, diff, diff_staged, log, show, branch, ls_files, rev_parse, blame. \
@@ -203,6 +205,9 @@ impl Tool for GitTool {
         let Some(command) = string(args.get("command")).filter(|text| !text.trim().is_empty()) else {
             return fail("needs a command argument");
         };
+        if matches!(command, "pull" | "push") {
+            return execute_network(command, &strings(args.get("args")), self.writes, ctx);
+        }
         let extra = strings(args.get("args"));
         let message = string(args.get("message"));
 
@@ -212,12 +217,28 @@ impl Tool for GitTool {
         let Some(root) = ctx.root.as_deref() else {
             return fail("no project folder is linked to inspect");
         };
+        if !cfg!(any(target_os = "macos", target_os = "linux", target_os = "windows")) {
+            return fail("Git requires workspace isolation, which is unavailable on this platform");
+        }
 
+        let contained = baudet_core::context::git_workspace_within_project(root);
+        if contained == Some(false) {
+            return fail("the Git working tree or metadata is outside the project folder");
+        }
         let argv = git_command::argv(root, command, &extra, message);
-        if git_command::is_write(command) {
+        let write_root = if git_command::is_write(command) {
             if !ctx.write_granted {
                 return fail("the project does not grant the Write right");
             }
+            if contained != Some(true) {
+                return fail("no Git working tree could be verified inside the project folder");
+            }
+            let Some(canonical_root) = crate::execute_workspace::ExecuteWorkspace::project_dir(root) else {
+                return fail("the project folder is not an existing directory");
+            };
+            let Ok(approved_root) = same_file::Handle::from_path(&canonical_root) else {
+                return fail("the project folder could not be opened");
+            };
             let summary = git_command::summary(command, &extra, message);
             let cwd = root.to_string_lossy();
             let pin = command_signature::workspace_pin("git", &cwd, &argv);
@@ -226,12 +247,77 @@ impl Tool for GitTool {
             if !pinned && !(ctx.approve_command)(&summary, &cwd, TIMEOUT_SECONDS as u32, &pin) {
                 return fail("the user declined this git write");
             }
-        }
+            if !same_file::Handle::from_path(root).is_ok_and(|current| current == approved_root)
+                || !same_file::Handle::from_path(&canonical_root).is_ok_and(|current| current == approved_root)
+                || baudet_core::context::git_workspace_within_project(&canonical_root) != Some(true)
+            {
+                return fail("the project or Git working tree changed before execution");
+            }
+            Some(canonical_root)
+        } else {
+            None
+        };
 
-        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-        let outcome = match ProcessRunner::run(&refs, root, Duration::from_secs(TIMEOUT_SECONDS)) {
+        let writable = write_root.is_some();
+        let root_for_run = match write_root {
+            Some(root) => root,
+            None => match crate::execute_workspace::ExecuteWorkspace::project_dir(root) {
+                Some(root) => root,
+                None => return fail("the project folder is not an existing directory"),
+            },
+        };
+        #[cfg(not(windows))]
+        let Some(temp) = crate::execute_workspace::ExecuteWorkspace::temp_dir() else {
+            return fail("no writable temp folder is available for Git");
+        };
+        #[cfg(not(windows))]
+        let Ok(temp) = tempfile::Builder::new().prefix("baudet-git-").tempdir_in(temp) else {
+            return fail("could not create a private Git workspace temp folder");
+        };
+        #[cfg(target_os = "macos")]
+        let program = match ProcessRunner::run(&["/usr/bin/xcrun", "--find", "git"], temp.path(), Duration::from_secs(5)) {
+            Ok(result) if result.exit_code == Some(0) && std::path::Path::new(result.stdout.text.trim()).is_absolute() => {
+                result.stdout.text.trim().to_owned()
+            }
+            _ => return fail("could not locate the macOS Git executable"),
+        };
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let program = "/usr/bin/git";
+        #[cfg(windows)]
+        let Some(program) = windows_git_program() else {
+            return fail("could not locate Git for Windows in Program Files");
+        };
+        let identity = if command == "commit" {
+            baudet_core::context::git_commit_identity(&root_for_run)
+        } else {
+            Vec::new()
+        };
+        #[cfg(windows)]
+        let program_string = program.to_string_lossy();
+        #[cfg(windows)]
+        let mut sandbox_argv = vec![program_string.as_ref(), "-c", "core.hooksPath=NUL"];
+        #[cfg(not(windows))]
+        let mut sandbox_argv = vec![program.as_ref()];
+        for field in &identity {
+            sandbox_argv.extend(["-c", field.as_str()]);
+        }
+        // The sandbox sets its own cwd, mounted at /workspace on Linux.
+        sandbox_argv.extend(argv[3..].iter().map(String::as_str));
+        #[cfg(not(windows))]
+        let run = crate::execute_tool::run_sandboxed(
+            &sandbox_argv, &root_for_run, temp.path(), TIMEOUT_SECONDS, true, writable, |command| {
+                command.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_OPTIONAL_LOCKS", "0");
+            },
+        );
+        #[cfg(windows)]
+        let run = crate::windows_appcontainer::run_project(
+            &root_for_run, writable, &program,
+            &sandbox_argv.iter().map(|argument| windows_quote(argument)).collect::<Vec<_>>().join(" "),
+            (TIMEOUT_SECONDS * 1000) as u32,
+        );
+        let outcome = match run {
             Ok(outcome) => outcome,
-            Err(_) => return fail("the git command could not be started or completed"),
+            Err(error) => return fail(format!("the git command could not be started or completed: {error}")),
         };
 
         let head = match outcome.exit_code {
@@ -248,6 +334,152 @@ impl Tool for GitTool {
             ..Default::default()
         }
     }
+}
+
+fn execute_network(command: &str, arguments: &[String], writes: GitWrites, ctx: &ToolContext) -> ToolResult {
+    use baudet_core::context::git_network_destination;
+    use baudet_core::git_network_transport::{CredentialConfig, run_staged, validate_branch};
+
+    if !ctx.read_granted || !ctx.write_granted || !ctx.exec_granted {
+        return fail("pull and push require project Read, Write and Execute rights");
+    }
+    if let Some(reason) = git_command::check_allowed(command, arguments, writes, None) {
+        return ToolResult::fail(reason);
+    }
+    let [remote, branch] = arguments else {
+        return fail("supply a configured remote name and a branch");
+    };
+    let Some(root) = ctx.root.as_deref() else {
+        return fail("no project folder is linked");
+    };
+    let result = (|| -> Result<ToolResult, Box<dyn std::error::Error>> {
+        let root = root.canonicalize()?;
+        let identity = same_file::Handle::from_path(&root)?;
+        validate_branch(branch)?;
+        let push = command == "push";
+        let destination = git_network_destination(&root, remote, push)?;
+        let summary = format!("git {command} {branch} via {}", destination.address);
+        let root_label = root.to_string_lossy();
+        let pin = command_signature::workspace_pin("git-network", &root_label, &summary);
+        if !(ctx.approve_command)(&summary, &root_label, TIMEOUT_SECONDS as u32, &pin) {
+            return Ok(fail("the user declined Git network access to this remote"));
+        }
+        if same_file::Handle::from_path(&root)? != identity {
+            return Err("the project folder changed after approval".into());
+        }
+        let workspace = crate::windows_workspace::Workspace::stage(&root)?;
+        if git_network_destination(workspace.path(), remote, push)? != destination {
+            return Err("the Git destination changed after approval".into());
+        }
+        let mut credentials = match std::env::var_os("BAUDET_GIT_AUTH_FILE") {
+            Some(file) => {
+                let file = std::path::PathBuf::from(file);
+                if !file.is_absolute() || file.canonicalize()?.starts_with(&root) {
+                    return Err("the Git authentication file must be outside the project and use an absolute path".into());
+                }
+                let data = std::fs::read(file)?;
+                let mut entries: std::collections::BTreeMap<String, CredentialConfig> = serde_json::from_slice(&data)
+                    .map_err(|_| "invalid Git authentication file")?;
+                entries.remove(destination.url.as_str())
+            }
+            None => None,
+        };
+        if let Some(CredentialConfig::Ssh { private_key, .. }) = &mut credentials {
+            if !private_key.is_absolute() {
+                return Err("the SSH private key path must be absolute".into());
+            }
+            let resolved = private_key.canonicalize()?;
+            if resolved.starts_with(&root) {
+                return Err("the SSH private key must be outside the project".into());
+            }
+            *private_key = resolved;
+        }
+        run_staged(workspace.path(), &destination, credentials, remote, branch, push)?;
+        if !push {
+            workspace.commit()?;
+        }
+        Ok(ToolResult {
+            ok: true,
+            output: format!("git {command} completed for {branch} via {}", destination.address),
+            exit_code: Some(0),
+            cwd: Some(root_label.into_owned()),
+            ..Default::default()
+        })
+    })();
+    result.unwrap_or_else(|error| fail(format!("network Git failed: {error}")))
+}
+
+#[cfg(windows)]
+fn windows_git_program() -> Option<std::path::PathBuf> {
+    ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .flat_map(|directory| {
+            let root = std::path::PathBuf::from(directory).join("Git");
+            [root.join("mingw64").join("bin").join("git.exe"), root.join("cmd").join("git.exe")]
+        })
+        .find(|candidate| candidate.is_absolute() && candidate.is_file())
+}
+
+#[cfg(windows)]
+fn windows_quote(argument: &str) -> String {
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0;
+    for character in argument.chars() {
+        if character == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        let extra = if character == '"' { backslashes + 1 } else { 0 };
+        quoted.extend(std::iter::repeat_n('\\', backslashes + extra));
+        quoted.push(character);
+        backslashes = 0;
+    }
+    quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+#[cfg(windows)]
+#[test]
+fn given_windows_git_write_rights_when_add_and_commit_run_then_the_original_repo_contains_the_commit() {
+    let repository = tempfile::tempdir().unwrap();
+    let program = windows_git_program().expect("Git for Windows in Program Files");
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new(&program)
+            .current_dir(repository.path()).args(args).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Baudet fixture"]);
+    git(&["config", "user.email", "fixture@example.invalid"]);
+    std::fs::write(repository.path().join("fixture.txt"), "content").unwrap();
+    let context = ToolContext {
+        root: Some(repository.path().to_path_buf()),
+        read_granted: true,
+        write_granted: true,
+        approve_command: Box::new(|_, _, _, _| true),
+        ..Default::default()
+    };
+    let tool = GitTool::with_writes();
+    for args in [
+        serde_json::json!({"command": "status"}),
+        serde_json::json!({"command": "add", "args": ["fixture.txt"]}),
+        serde_json::json!({"command": "commit", "message": "Windows sandbox fixture"}),
+    ] {
+        let result = tool.execute(&args, &context);
+        assert!(result.ok, "{}: {}", args, result.output);
+    }
+    assert_eq!(git(&["log", "-1", "--format=%s"]).trim(), "Windows sandbox fixture");
+    assert_eq!(git(&["show", "HEAD:fixture.txt"]), "content");
+    git(&["checkout", "-qb", "other"]);
+    std::fs::write(repository.path().join("fixture.txt"), "other content").unwrap();
+    git(&["commit", "-qam", "Other fixture"]);
+    let checkout = tool.execute(&serde_json::json!({"command": "checkout", "args": ["main"]}), &context);
+    assert!(checkout.ok, "{}", checkout.output);
+    assert_eq!(git(&["branch", "--show-current"]).trim(), "main");
+    assert_eq!(std::fs::read_to_string(repository.path().join("fixture.txt")).unwrap(), "content");
 }
 
 fn strings(element: Option<&Value>) -> Vec<String> {
@@ -334,6 +566,17 @@ mod tests {
     }
 
     #[test]
+    fn given_a_project_inside_a_parent_repository_when_git_is_requested_then_the_parent_is_refused() {
+        let dir = repo();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let request = json!({"command": "status"});
+        let result = GitTool::read_only().execute(&request, &ctx(&project, true, false, &recorder(false)));
+        assert!(!result.ok);
+        assert!(result.output.contains("outside the project folder"));
+    }
+
+    #[test]
     fn a_read_verb_needs_no_approval_and_shows_what_git_thinks() {
         let dir = repo();
         let rec = recorder(false);
@@ -365,7 +608,10 @@ mod tests {
         assert!(read["properties"].get("message").is_none(), "geen message-veld zonder writes");
 
         let with = GitTool::with_writes().parameters();
-        assert_eq!(with["properties"]["command"]["enum"].as_array().unwrap().len(), 14);
+        let writable = with["properties"]["command"]["enum"].as_array().unwrap();
+        assert!(writable.contains(&json!("add")));
+        assert!(writable.contains(&json!("pull")));
+        assert!(writable.contains(&json!("push")));
         assert!(with["properties"]["message"].is_object());
         assert_eq!(with["required"].as_array().unwrap(), &vec![json!("command")]);
         assert!(GitTool::read_only().description().contains("read-only git command"));
@@ -406,6 +652,21 @@ mod tests {
         let staged =
             Command::new("git").args(["diff", "--cached", "--name-only"]).current_dir(dir.path()).output().unwrap();
         assert_eq!(String::from_utf8(staged.stdout).unwrap().trim(), "a.txt");
+    }
+
+    #[test]
+    fn given_local_write_rights_but_no_execute_when_git_is_requested_through_shell_then_it_is_refused() {
+        use crate::execute_tool::ExecuteTool;
+
+        let folder = repo();
+        let approvals = recorder(true);
+        let context = ctx(folder.path(), true, true, &approvals);
+        let result = ExecuteTool::for_project(GitTool::with_writes()).execute(
+            &json!({"command": "git add -- a.txt"}), &context,
+        );
+        assert!(!result.ok);
+        assert!(result.output.contains("Execute right"));
+        assert!(approvals.asked.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -495,6 +756,61 @@ mod tests {
         let commit = json!({"command": "commit", "message": "Update README"});
         assert_eq!(tool.execute(&commit, &approved).output, "git: the user declined this git write");
         assert_eq!(record.asked.lock().unwrap().len(), 2);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn given_an_approved_commit_when_a_hook_writes_outside_the_project_then_the_sandbox_refuses_the_write() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let project = repo();
+        let outside = tempfile::tempdir().unwrap();
+        let marker = outside.path().join("unmodified");
+        let hook = project.path().join(".git/hooks/pre-commit");
+        let quoted_marker = shlex::try_quote(marker.to_str().unwrap()).unwrap();
+        std::fs::write(&hook, format!("#!/bin/sh\n! printf 'outside' > {quoted_marker}\n")).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for (key, value) in [("user.name", "Test"), ("user.email", "test@example.invalid")] {
+            assert!(Command::new("git").args(["config", key, value])
+                .current_dir(project.path()).status().unwrap().success());
+        }
+
+        let context = ctx(project.path(), true, true, &recorder(true));
+        let tool = GitTool::with_writes();
+        let staged = tool.execute(&json!({"command": "add", "args": ["a.txt"]}), &context);
+        assert!(staged.ok, "{}", staged.output);
+        let committed = tool.execute(&json!({"command": "commit", "message": "Workspace guard"}), &context);
+        assert!(committed.ok, "{}", committed.output);
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn given_local_write_rights_when_git_needs_network_access_then_execute_rights_are_required() {
+        let project = repo();
+        let tool = GitTool::with_writes();
+        let context = ctx(project.path(), true, true, &recorder(true));
+        for command in ["pull", "push"] {
+            let result = tool.execute(&json!({"command": command}), &context);
+            assert!(!result.ok);
+            assert!(result.output.contains("Read, Write and Execute"));
+        }
+    }
+
+    #[test]
+    fn given_execute_rights_when_network_approval_is_declined_then_no_remote_action_runs() {
+        let project = repo();
+        let tool = GitTool::with_writes();
+        assert!(Command::new("git").args(["remote", "add", "origin", "https://example.invalid/project.git"])
+            .current_dir(project.path()).status().unwrap().success());
+        let approvals = recorder(false);
+        let mut context = ctx(project.path(), true, true, &approvals);
+        context.exec_granted = true;
+        for command in ["pull", "push"] {
+            let result = tool.execute(&json!({"command": command, "args": ["origin", "main"]}), &context);
+            assert!(!result.ok);
+            assert!(result.output.contains("declined Git network access"));
+        }
+        assert_eq!(approvals.asked.lock().unwrap().len(), 2);
     }
 
     #[test]

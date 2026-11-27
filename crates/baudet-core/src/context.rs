@@ -124,6 +124,112 @@ fn open_worktree(cwd: &str) -> Option<Repository> {
     Some(repo)
 }
 
+/// Check whether Git discovered a repository entirely inside the granted folder.
+pub fn git_workspace_within_project(project: &Path) -> Option<bool> {
+    let project = project.canonicalize().ok()?;
+    let repo = Repository::discover(&project).ok()?;
+    let Some(worktree) = repo.workdir() else { return Some(false) };
+    Some([worktree, repo.path(), repo.commondir()]
+        .iter()
+        .all(|path| path.canonicalize().is_ok_and(|path| path.starts_with(&project))))
+}
+
+/// Read an explicitly named remote from a contained repository. Return the
+/// validated destination itself so a network runner need not reload Git config.
+pub fn git_network_destination(project: &Path, name: &str, push: bool) -> Result<GitNetworkDestination, String> {
+    if name.is_empty() || name.starts_with('-')
+        || !name.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b'/'))
+    {
+        return Err("use a configured Git remote name".into());
+    }
+    if git_workspace_within_project(project) != Some(true) {
+        return Err("the Git working tree and metadata must be inside the project".into());
+    }
+    let repo = Repository::discover(project).map_err(|_| "could not open the Git repository")?;
+    let remote = repo.find_remote(name).map_err(|_| "the named Git remote does not exist")?;
+    let destination = if push { remote.pushurl().or_else(|| remote.url()) } else { remote.url() };
+    parse_network_destination(destination.ok_or("the Git remote has no URL")?)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitNetworkDestination {
+    pub url: url::Url,
+    pub address: String,
+}
+
+fn parse_network_destination(value: &str) -> Result<GitNetworkDestination, String> {
+    let invalid = || "Git network remotes must be HTTPS or SSH URLs without embedded credentials".to_owned();
+    if value.chars().any(|ch| ch.is_control() || ch.is_whitespace() || ch == '\\') {
+        return Err(invalid());
+    }
+    let scp_style = !value.contains("://");
+    let url = if !scp_style {
+        url::Url::parse(value)
+    } else {
+        // Git's SCP-style SSH remote, for example git@example.org:team/project.
+        let (authority, path) = value.split_once(':').ok_or_else(invalid)?;
+        if !authority.contains('@') || path.is_empty() || path.starts_with('/') {
+            return Err(invalid());
+        }
+        url::Url::parse(&format!("ssh://{authority}/{path}"))
+    }.map_err(|_| invalid())?;
+    if !matches!(url.scheme(), "https" | "ssh") || url.host_str().is_none() ||
+        url.password().is_some() || (url.scheme() == "https" && !url.username().is_empty()) ||
+        url.query().is_some() || url.fragment().is_some() || url.path().trim_matches('/').is_empty()
+    {
+        return Err(invalid());
+    }
+    if url.scheme() == "ssh" && (
+        url.username().is_empty() ||
+        !url.username().bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.')) ||
+        url.username().starts_with('-') ||
+        !url.path().bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'.' | b'/'))
+    ) {
+        return Err(invalid());
+    }
+    // A relative SCP path is relative to the SSH user's home. Rewriting it as
+    // ssh:// would change its meaning to an absolute path.
+    let address = if scp_style { value.to_owned() } else { url.to_string() };
+    Ok(GitNetworkDestination { url, address })
+}
+
+#[test]
+fn given_https_and_ssh_remotes_when_validated_then_only_supported_credential_free_destinations_are_accepted() {
+    for accepted in ["https://example.org/team/project.git", "ssh://git@example.org:2222/team/project.git",
+        "git@example.org:team/project.git"] {
+        assert!(parse_network_destination(accepted).is_ok(), "{accepted}");
+    }
+    for rejected in ["file:///tmp/project", "http://example.org/project", "https://token@example.org/project",
+        "ssh://git:token@example.org/project", "ssh://example.org/project", "ssh://@example.org/project",
+        "@example.org:project", "https://example.org/project?token=secret", "ext::git project"] {
+        assert!(parse_network_destination(rejected).is_err(), "{rejected}");
+    }
+    let scp_address = "git@example.org:team/project.git";
+    assert_eq!(parse_network_destination(scp_address).unwrap().address, scp_address);
+}
+
+#[test]
+fn given_distinct_fetch_and_push_urls_when_a_remote_is_resolved_then_the_operation_uses_its_own_url() {
+    let folder = tempfile::tempdir().unwrap();
+    let repo = Repository::init(folder.path()).unwrap();
+    repo.remote("origin", "https://fetch.example.org/team/project.git").unwrap();
+    repo.remote_set_pushurl("origin", Some("git@push.example.org:team/project.git")).unwrap();
+
+    assert_eq!(git_network_destination(folder.path(), "origin", false).unwrap().url.host_str(), Some("fetch.example.org"));
+    assert_eq!(git_network_destination(folder.path(), "origin", true).unwrap().url.host_str(), Some("push.example.org"));
+}
+
+/// Return only the identity fields needed for a commit with an isolated home directory.
+pub fn git_commit_identity(project: &Path) -> Vec<String> {
+    let Some(config) = Repository::discover(project).ok().and_then(|repo| repo.config().ok()) else {
+        return Vec::new();
+    };
+    ["user.name", "user.email", "author.name", "author.email", "committer.name", "committer.email"]
+        .into_iter()
+        .filter_map(|key| config.get_string(key).ok().map(|value| format!("{key}={value}")))
+        .collect()
+}
+
 fn project_prefix(repo: &Repository, cwd: &str) -> Option<PathBuf> {
     let root = repo.workdir()?.canonicalize().ok()?;
     let project = Path::new(cwd).canonicalize().ok()?;

@@ -66,6 +66,9 @@ impl Tool for EditFileTool {
         if !ctx.write_granted {
             return fail("write access to the project folder has not been granted");
         }
+        if !ctx.read_granted {
+            return fail("read access is required to verify the edit");
+        }
 
         let edits = parse_edits(args.get("edits"));
         if edits.is_empty() {
@@ -404,6 +407,7 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(unix)]
     #[test]
     fn it_refuses_an_approved_path_whose_parent_now_points_outside_the_project() {
         let dir = tempfile::tempdir().unwrap();
@@ -511,6 +515,20 @@ mod tests {
         );
         assert!(result.ok, "{}", result.output);
         assert_eq!(fs::read_to_string(&file).unwrap(), "after");
+    }
+
+    #[test]
+    fn given_write_permission_without_read_permission_when_editing_then_the_preview_is_refused() {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().join("notes.txt");
+        std::fs::write(&path, "private note").unwrap();
+        let context = ToolContext::for_folder(project.path(), false, true, false);
+        let result = EditFileTool.execute(&json!({
+            "file": "notes.txt",
+            "edits": [{"old_text": "private note", "new_text": "updated"}]
+        }), &context);
+        assert!(!result.ok && result.diff.is_none());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "private note");
     }
 
     #[test]
