@@ -216,6 +216,9 @@ fn callbacks<'a>(
     }
 
     let mut issued = false;
+    let mut try_agent = cfg!(windows)
+        || std::env::var_os("SSH_AUTH_SOCK").is_some_and(|socket| !socket.is_empty());
+    let mut default_keys = ["id_ed25519", "id_ecdsa", "id_rsa"].into_iter();
     let mut callbacks = RemoteCallbacks::new();
     // Keep libgit2's TLS certificate and SSH known_hosts checks in force.
     callbacks.credentials(move |url, user, allowed| {
@@ -234,8 +237,22 @@ fn callbacks<'a>(
                 && allowed.contains(CredentialType::SSH_KEY)
                 && user == Some(destination.url.username()) =>
             {
-                issued = true;
-                Cred::ssh_key_from_agent(destination.url.username())
+                let username = destination.url.username();
+                if std::mem::take(&mut try_agent) {
+                    if let Ok(credential) = Cred::ssh_key_from_agent(username) {
+                        return Ok(credential);
+                    }
+                }
+                if let Some(home) = std::env::home_dir() {
+                    let ssh = home.join(".ssh");
+                    for name in default_keys.by_ref() {
+                        let private_key = ssh.join(name);
+                        if private_key.is_file() {
+                            return Cred::ssh_key(username, None, &private_key, None);
+                        }
+                    }
+                }
+                Err(Error::from_str("no usable SSH agent identity or default SSH private key was found"))
             }
             Authentication::Https { username, token } if allowed.contains(CredentialType::USER_PASS_PLAINTEXT) => {
                 issued = true;

@@ -48,7 +48,7 @@ See [TODO.md](TODO.md) for the remaining work and verification steps.
 
 For `git pull` and `git push`, link a repository folder with Read, Write, and Execute permissions. Supply the configured remote name and the checked-out branch, for example `git pull origin main`. Baudet asks for approval for the resolved HTTPS or SSH destination each time. Pull requires a clean working tree and a fast-forward. Push updates one branch without force.
 
-Baudet uses your Git credential helper for HTTPS and your SSH agent for SSH. For SSH, load your key into an agent reachable from Baudet and include the SSH username in the remote URL. SSH host aliases and identity selection from `~/.ssh/config` are currently unsupported.
+Baudet uses your Git credential helper for HTTPS. For SSH, include the username in the remote URL. Baudet tries a reachable SSH agent first, then the standard private key files `id_ed25519`, `id_ecdsa`, and `id_rsa` in your home directory's `.ssh` folder. For a passphrase-protected key, use an agent or an authentication override. SSH host aliases and identity selection from `~/.ssh/config` are currently unsupported.
 
 To override authentication for a particular remote, set `BAUDET_GIT_AUTH_FILE` in Baudet's launch environment to an absolute JSON file outside the project. Use the complete remote URL as the key and refer to credentials by environment variable or key path:
 
