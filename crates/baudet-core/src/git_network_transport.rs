@@ -1,6 +1,6 @@
 use crate::context::GitNetworkDestination;
 use git2::{
-    AutotagOption, Cred, CredentialType, Error, FetchOptions, ProxyOptions, PushOptions, Reference, Remote,
+    AutotagOption, Config, Cred, CredentialType, Error, FetchOptions, ProxyOptions, PushOptions, Reference, Remote,
     RemoteCallbacks, RemoteRedirect, Repository,
 };
 use std::path::Path;
@@ -209,7 +209,8 @@ fn callbacks<'a>(
 ) -> Result<RemoteCallbacks<'a>, Error> {
     if !matches!(
         (destination.url.scheme(), &authentication),
-        ("https", Authentication::None | Authentication::Https { .. }) | ("ssh", Authentication::Ssh { .. })
+        ("https", Authentication::None | Authentication::Https { .. })
+            | ("ssh", Authentication::None | Authentication::Ssh { .. })
     ) {
         return Err(Error::from_str("the approved destination needs matching authentication"));
     }
@@ -222,6 +223,20 @@ fn callbacks<'a>(
             return Err(Error::from_str("credentials are unavailable for this Git connection"));
         }
         match &authentication {
+            Authentication::None if destination.url.scheme() == "https"
+                && allowed.contains(CredentialType::USER_PASS_PLAINTEXT) =>
+            {
+                issued = true;
+                // Use the user's Git configuration, without repository-local helpers.
+                Cred::credential_helper(&Config::open_default()?, destination.url.as_str(), user)
+            }
+            Authentication::None if destination.url.scheme() == "ssh"
+                && allowed.contains(CredentialType::SSH_KEY)
+                && user == Some(destination.url.username()) =>
+            {
+                issued = true;
+                Cred::ssh_key_from_agent(destination.url.username())
+            }
             Authentication::Https { username, token } if allowed.contains(CredentialType::USER_PASS_PLAINTEXT) => {
                 issued = true;
                 Cred::userpass_plaintext(username, token)
